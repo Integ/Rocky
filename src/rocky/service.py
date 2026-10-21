@@ -31,7 +31,11 @@ class Dispatcher:
                 try:
                     await self.client.start_workflow(
                         "RockyGoal",
-                        RunInput(goal_id=goal.goal_id, contract=goal.contract),
+                        RunInput(
+                            goal_id=goal.goal_id,
+                            contract=goal.contract,
+                            model_settings=goal.model_settings,
+                        ),
                         id=goal.goal_id,
                         task_queue=self.settings.task_queue,
                         id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,

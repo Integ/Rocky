@@ -10,6 +10,12 @@ import {
   goalTitle,
   relativeTime,
   summarize,
+  modelCatalog,
+  reasoningChoices,
+  normalizeModelSelection,
+  reasoningLabel,
+  recordedModelSettings,
+  modelSettingsLabel,
 } from '../../src/rocky/web/core.js';
 
 const NOW = Date.parse('2026-10-21T03:00:00Z');
@@ -277,4 +283,67 @@ test('demo snapshots are independent and cannot mutate a later demo or live list
   assert.notEqual(second[0].state.model_calls, 9999);
   assert.deepEqual(live, before);
   assert.ok(live.every((item) => !item.goal_id.startsWith('demo-')));
+});
+
+const MODELS = [
+  { id: 'gpt-4.1-mini', label: 'GPT-4.1 mini', reasoning_efforts: [] },
+  { id: 'reasoning-small', label: 'Reasoning small', reasoning_efforts: ['low', 'medium', 'high'] },
+  { id: 'reasoning-large', label: 'Reasoning large', reasoning_efforts: ['none', 'low', 'medium', 'high', 'xhigh'] },
+];
+
+test('reasoning choices come from each model capability list, never a universal set', () => {
+  assert.deepEqual(reasoningChoices(MODELS, 'gpt-4.1-mini'), []);
+  assert.deepEqual(reasoningChoices(MODELS, 'reasoning-small'), ['low', 'medium', 'high']);
+  assert.deepEqual(reasoningChoices(MODELS, 'unknown-model'), []);
+  assert.equal(reasoningChoices(MODELS, 'reasoning-small').includes('xhigh'), false);
+});
+
+test('switching models preserves supported effort but resets unsupported effort to model default', () => {
+  assert.deepEqual(normalizeModelSelection(MODELS, { model: 'reasoning-small', reasoning_effort: 'high' }), {
+    model: 'reasoning-small', reasoning_effort: 'high',
+  });
+  assert.deepEqual(normalizeModelSelection(MODELS, { model: 'reasoning-small', reasoning_effort: 'xhigh' }), {
+    model: 'reasoning-small', reasoning_effort: null,
+  });
+  assert.deepEqual(normalizeModelSelection(MODELS, { model: 'gpt-4.1-mini', reasoning_effort: 'high' }), {
+    model: 'gpt-4.1-mini', reasoning_effort: null,
+  });
+});
+
+test('model default stays null and is distinct from supported none reasoning', () => {
+  for (const effort of [null, undefined, '']) {
+    assert.equal(normalizeModelSelection(MODELS, { model: 'reasoning-large', reasoning_effort: effort }).reasoning_effort, null);
+  }
+  assert.equal(normalizeModelSelection(MODELS, { model: 'reasoning-large', reasoning_effort: 'none' }).reasoning_effort, 'none');
+  assert.equal(reasoningLabel(null), '模型默认');
+  assert.equal(reasoningLabel('max'), '最高（max）');
+  assert.notEqual(reasoningLabel('none'), reasoningLabel(null));
+});
+
+test('unknown models cannot be submitted as a settings selection', () => {
+  assert.throws(() => normalizeModelSelection(MODELS, { model: 'invented-model', reasoning_effort: 'high' }), /请选择/);
+  assert.throws(() => normalizeModelSelection([], { model: 'reasoning-small' }), /请选择/);
+});
+
+test('legacy tasks never inherit current model defaults in their displayed record', () => {
+  const legacy = goal('succeeded');
+  assert.equal(recordedModelSettings(legacy), null);
+  assert.equal(modelSettingsLabel(recordedModelSettings(legacy)), '未记录');
+  legacy.model_settings = null;
+  assert.equal(recordedModelSettings(legacy), null);
+  const currentDefault = { model: 'reasoning-large', reasoning_effort: 'xhigh' };
+  legacy.model_settings = { model: 'gpt-4.1-mini', reasoning_effort: null };
+  const historical = recordedModelSettings(legacy);
+  assert.deepEqual(historical, { model: 'gpt-4.1-mini', reasoning_effort: null });
+  assert.equal(modelSettingsLabel(historical), 'gpt-4.1-mini · 模型默认');
+  assert.notEqual(modelSettingsLabel(historical), modelSettingsLabel(currentDefault));
+});
+
+test('catalog normalization removes duplicate choices without mutating service data', () => {
+  const incoming = [...MODELS, { id: 'reasoning-small', label: 'Duplicate', reasoning_efforts: ['xhigh'] }, null, { id: '' }];
+  const before = structuredClone(incoming);
+  assert.equal(modelCatalog(incoming).length, 3);
+  assert.deepEqual(incoming, before);
+  const catalog = modelCatalog([{ id: 'custom', reasoning_efforts: ['high', 'high', null, ''] }]);
+  assert.deepEqual(catalog, [{ id: 'custom', label: 'custom', reasoning_efforts: ['high'] }]);
 });

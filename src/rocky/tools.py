@@ -37,6 +37,16 @@ def _digest(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def _operation_fingerprint(request: ToolInput) -> str:
+    # Keep the original v0.1 ToolInput serialization byte-for-byte. Inference
+    # settings do not change tool semantics; including them would invalidate
+    # durable receipts when old Activity inputs are decoded by newer workers.
+    payload = request.model_dump_json(
+        include={"run": {"goal_id", "contract"}, "operation_id": True, "action": True}
+    )
+    return _digest(payload.encode())
+
+
 def _parts(path: str | None, *, allow_root: bool = False) -> list[str]:
     if allow_root and path in {None, "", "."}:
         return []
@@ -146,7 +156,7 @@ class WorkspaceTools:
                 raise ToolError("Invalid operation identifier")
             if request.action.tool not in request.run.contract.allowed_tools:
                 raise ToolError("The tool is not authorized by this goal")
-            fingerprint = _digest(request.model_dump_json().encode())
+            fingerprint = _operation_fingerprint(request)
             receipt_name = _digest(request.operation_id.encode()) + ".json"
             with self._goal(request.run.goal_id) as (goal_fd, receipts_fd):
                 try:

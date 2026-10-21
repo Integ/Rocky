@@ -112,10 +112,17 @@ def actual_worker(env, settings, activities):
 async def test_api_submission_runs_actual_tools_and_independent_review(temporal_env, components):
     settings, store, tools, responses, activities = components
     with TestClient(create_app(settings, store)) as api:
+        pinned = {"model": "gpt-6-luna", "reasoning_effort": "low"}
+        assert api.put("/model-settings", headers=AUTH, json=pinned).status_code == 200
         submitted = api.post("/goals", headers=AUTH, json=contract())
         assert submitted.status_code == 202
         goal_id = submitted.json()["goal_id"]
         assert submitted.json()["state"]["status"] == "queued"
+        assert submitted.json()["model_settings"] == pinned
+        # Change defaults before dispatch: all inference, including independent
+        # review, must still use the configuration saved with this goal.
+        changed = {"model": "gpt-6-astra", "reasoning_effort": "max"}
+        assert api.put("/model-settings", headers=AUTH, json=changed).status_code == 200
         async with actual_worker(temporal_env, settings, activities):
             await Dispatcher(temporal_env.client, store, settings).tick()
             result = await temporal_env.client.get_workflow_handle(
@@ -126,6 +133,8 @@ async def test_api_submission_runs_actual_tools_and_independent_review(temporal_
         assert (result.input_tokens, result.output_tokens) == (30, 15)
         assert len(responses.requests) == 3
         assert len(responses.review_requests) == 1
+        assert all(request["model"] == pinned["model"] for request in responses.requests)
+        assert all(request["reasoning"] == {"effort": "low"} for request in responses.requests)
         assert (tools.root / goal_id / "report.md").read_text() == REPORT
         run = RunInput(goal_id=goal_id, contract=GoalContract.model_validate(contract()))
         independently_checked = tools.verify_files(run)

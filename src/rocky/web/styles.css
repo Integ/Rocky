@@ -195,6 +195,28 @@ h2, h3 { font-weight: 500; }
 .system-spec > div { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; color: #b0b9bc; font-size: 9px; }
 .system-spec .mono { font-size: 8px; text-align: right; }
 .system-spec .muted { color: #87969d; }
+.system-spec > .model-config-heading { align-items: center; gap: 10px; }
+.system-spec > .model-config-summary { justify-content: flex-start; margin-top: -4px; padding-bottom: 3px; }
+.model-config-summary .mono { color: #e3c2a0; font-size: 10px; text-align: left; overflow-wrap: anywhere; }
+.model-settings-trigger { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; padding: 4px 8px; border: 1px solid #62452d; border-radius: 2px; color: #f0b583; background: #1d1711; font-size: 9px; line-height: 1.5; white-space: nowrap; }
+.model-settings-trigger:hover { color: #ffcfaa; border-color: #a27148; background: #2a1e14; }
+.create-model-profile { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 13px 14px; border: 1px solid #493a2d; background: #17130f; }
+.create-model-profile .eyebrow { display: block; margin-bottom: 7px; color: #b09276; font-size: 7px; }
+.create-model-profile p { margin: 0; color: #dec3a8; font-size: 10px; line-height: 1.8; overflow-wrap: anywhere; }
+.create-model-profile > div { min-width: 0; }
+.create-model-profile + .field-note { margin-top: 9px; margin-bottom: 22px; }
+.model-dialog { width: min(640px, calc(100% - 36px)); }
+.model-dialog .field-input { min-height: 44px; padding-right: 10px; }
+.model-dialog select.field-input { cursor: pointer; }
+.model-dialog select.field-input:disabled { color: #94a2aa; background: #101619; border-color: #29343a; cursor: not-allowed; opacity: 1; }
+.model-dialog .dialog-description { margin-bottom: 15px; }
+.model-readonly-note { margin: 0 0 20px; color: #b8b09f; font-size: 11px; line-height: 1.8; }
+.model-selection-note { margin: 0 0 18px; padding: 10px 12px; border-left: 2px solid var(--accent); color: #e9bd95; background: rgba(255, 148, 60, 0.05); font-size: 11px; line-height: 1.8; }
+.model-selection-note:empty, .model-readonly-note:empty { display: none; }
+.model-scope-note { padding: 13px 14px; border: 1px solid #2d383e; background: #0c1215; }
+.model-scope-note > span { display: block; margin-bottom: 7px; color: #b39476; font-size: 8px; letter-spacing: 0.08em; }
+.model-scope-note > p { margin: 0; color: #a3b1ba; font-size: 11px; line-height: 1.8; }
+.model-detail-value { font-size: 12px !important; }
 
 .mission-list { padding: 0 18px; }
 .mission-row { display: grid; grid-template-columns: 30px minmax(0, 1fr) 88px 96px 12px; align-items: center; gap: 10px 12px; width: 100%; padding: 15px 2px; border: 0; border-bottom: 1px solid var(--line-soft); color: var(--text); background: transparent; text-align: left; }
@@ -429,6 +451,12 @@ textarea.field-input { min-height: 88px; resize: vertical; }
   .metric-label { font-size: 8px; }
   .metric-detail { font-size: 7px; }
   .telemetry-note { font-size: 8px; }
+  .model-config-summary .mono { font-size: 9px; }
+  .model-settings-trigger { min-height: 30px; font-size: 9px; }
+  .create-model-profile { align-items: flex-start; padding: 12px; }
+  .create-model-profile .text-button { font-size: 9px; }
+  .model-dialog .dialog-footer { gap: 8px; }
+  .model-dialog .dialog-footer .btn { padding: 8px 10px; font-size: 10px; }
   .section-header { min-height: 43px; padding: 0 14px; gap: 8px; }
   .section-header h2, .section-header h3 { font-size: 9px; letter-spacing: 0.06em; }
   .section-header .muted { font-size: 8px; }

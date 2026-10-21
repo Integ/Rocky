@@ -11,6 +11,7 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, ValidationError
 
 from rocky.config import Settings
+from rocky.inference import ModelSettings
 from rocky.models import (
     Decision,
     PlanInput,
@@ -185,11 +186,20 @@ class OpenAIPlanner:
         payload: dict[str, Any],
         schema: type[Parsed],
         max_output_tokens: int,
+        model_settings: ModelSettings | None = None,
     ) -> tuple[Parsed, int, int]:
         context = _json_context(payload)
+        inference = model_settings or ModelSettings(
+            model=self.settings.model, reasoning_effort=self.settings.reasoning_effort
+        )
+        reasoning = (
+            {"reasoning": {"effort": inference.reasoning_effort}}
+            if inference.reasoning_effort is not None
+            else {}
+        )
         try:
             response = await self.client.responses.parse(
-                model=self.settings.model,
+                model=inference.model,
                 input=[
                     {"role": "developer", "content": instructions},
                     {"role": "user", "content": context},
@@ -197,6 +207,7 @@ class OpenAIPlanner:
                 text_format=schema,
                 max_output_tokens=max_output_tokens,
                 store=False,
+                **reasoning,
             )
         except Exception:
             # Provider/validation errors can echo request data or headers. Keep
@@ -216,6 +227,7 @@ class OpenAIPlanner:
             },
             schema=Decision,
             max_output_tokens=request.run.contract.max_output_tokens,
+            model_settings=request.run.model_settings,
         )
         return PlanResult(decision=decision, input_tokens=input_tokens, output_tokens=output_tokens)
 
@@ -229,6 +241,7 @@ class OpenAIPlanner:
             },
             schema=ReviewVerdict,
             max_output_tokens=min(request.run.contract.max_output_tokens, 2_048),
+            model_settings=request.run.model_settings,
         )
         return VerificationResult(
             passed=verdict.passed,

@@ -15,6 +15,57 @@ export const TERMINAL = new Set([
   'succeeded', 'failed', 'cancelled', 'budget_exhausted', 'deadline_exceeded',
 ]);
 
+const REASONING_LABELS = {
+  none: '不启用推理（none）',
+  minimal: '最少（minimal）',
+  low: '低（low）',
+  medium: '中（medium）',
+  high: '高（high）',
+  xhigh: '超高（xhigh）',
+  max: '最高（max）',
+};
+
+export function reasoningLabel(effort) {
+  return effort == null || effort === '' ? '模型默认' : REASONING_LABELS[effort] || String(effort);
+}
+
+export function modelCatalog(models) {
+  const seen = new Set();
+  return (Array.isArray(models) ? models : []).filter(item => {
+    if (!item || typeof item.id !== 'string' || !item.id || seen.has(item.id)) return false;
+    seen.add(item.id); return true;
+  }).map(item => ({
+    id: item.id,
+    label: typeof item.label === 'string' && item.label ? item.label : item.id,
+    reasoning_efforts: [...new Set((Array.isArray(item.reasoning_efforts) ? item.reasoning_efforts : []).filter(effort => typeof effort === 'string' && effort.length > 0))],
+  }));
+}
+
+export function reasoningChoices(models, model) {
+  return modelCatalog(models).find(item => item.id === model)?.reasoning_efforts || [];
+}
+
+export function normalizeModelSelection(models, selection) {
+  const selected = modelCatalog(models).find(item => item.id === selection?.model);
+  if (!selected) throw new Error('请选择服务提供的一个模型。');
+  const effort = selection.reasoning_effort || null;
+  return {
+    model: selected.id,
+    reasoning_effort: selected.reasoning_efforts.includes(effort) ? effort : null,
+  };
+}
+
+export function recordedModelSettings(goal) {
+  const settings = goal?.model_settings;
+  if (!settings || typeof settings.model !== 'string' || !settings.model) return null;
+  return { model: settings.model, reasoning_effort: settings.reasoning_effort || null };
+}
+
+export function modelSettingsLabel(settings) {
+  if (!settings || typeof settings.model !== 'string' || !settings.model) return '未记录';
+  return `${settings.model} · ${reasoningLabel(settings.reasoning_effort)}`;
+}
+
 const nonnegative = (number) => Number.isFinite(Number(number)) ? Math.max(0, Number(number)) : 0;
 
 export function summarize(goals) {

@@ -1,10 +1,13 @@
 import hashlib
 import io
+import json
 import socket
 
 import pytest
+from pydantic import BaseModel
 
 from rocky.config import Settings
+from rocky.inference import ModelSettings
 from rocky.models import Action, Deliverable, GoalContract, RunInput, ToolInput
 from rocky.network import FetchError, fetch_public_text
 from rocky.tools import WorkspaceTools
@@ -120,6 +123,105 @@ def test_receipts_survive_new_tool_instance_and_do_not_repeat_writes(tools):
 def test_operation_identifier_cannot_be_reused_with_changed_payload(tools):
     assert execute(tools, Action(tool="write_file", path="report.txt", content="first")).success
     result = execute(tools, Action(tool="write_file", path="report.txt", content="second"))
+    assert not result.success
+    assert "cannot be reused" in result.content
+    assert (tools.root / "test-goal/report.txt").read_text() == "first"
+
+
+def test_legacy_receipt_accepts_model_settings_without_repeating_the_operation(tools, monkeypatch):
+    # These schemas reproduce the original persisted Activity input, before
+    # RunInput had inference settings. Do not derive the fixture hash from the
+    # new fingerprint helper: that would hide a serialization incompatibility.
+    class LegacyRunInput(BaseModel):
+        goal_id: str
+        contract: GoalContract
+
+    class LegacyToolInput(BaseModel):
+        run: LegacyRunInput
+        operation_id: str
+        action: Action
+
+    original_run = run()
+    action = Action(tool="write_file", path="report.txt", content="原始 conclusion\n")
+    operation_id = "legacy-operation"
+    first = execute(tools, action, operation_id, original_run)
+    assert first.success
+    legacy_input = LegacyToolInput(
+        run=LegacyRunInput(goal_id=original_run.goal_id, contract=original_run.contract),
+        operation_id=operation_id,
+        action=action,
+    )
+    receipt_path = (
+        tools.root
+        / ".rocky"
+        / original_run.goal_id
+        / (hashlib.sha256(operation_id.encode()).hexdigest() + ".json")
+    )
+    receipt = json.loads(receipt_path.read_text())
+    legacy_fingerprint = hashlib.sha256(legacy_input.model_dump_json().encode()).hexdigest()
+    assert receipt["fingerprint"] == legacy_fingerprint
+    # Materialize the old receipt explicitly, then change the visible file with
+    # another operation. A retry must return the old receipt, not repeat a write.
+    receipt["fingerprint"] = legacy_fingerprint
+    receipt_path.write_text(json.dumps(receipt))
+    assert execute(
+        tools,
+        Action(tool="write_file", path="report.txt", content="newer conclusion"),
+        "newer-operation",
+    ).success
+    upgraded_run = original_run.model_copy(
+        update={"model_settings": ModelSettings(model="gpt-6-sol", reasoning_effort="high")}
+    )
+    recreated = WorkspaceTools(Settings(workspace_root=tools.root))
+
+    def must_not_repeat(*args, **kwargs):
+        raise AssertionError("A legacy receipt must bypass tool execution")
+
+    monkeypatch.setattr(recreated, "_execute", must_not_repeat)
+    assert execute(recreated, action, operation_id, upgraded_run) == first
+    assert (tools.root / "test-goal/report.txt").read_text() == "newer conclusion"
+
+
+def test_changing_inference_settings_does_not_change_tool_idempotency(tools, monkeypatch):
+    configured_run = run().model_copy(
+        update={"model_settings": ModelSettings(model="gpt-6-sol", reasoning_effort="high")}
+    )
+    action = Action(tool="write_file", path="report.txt", content="A conclusion")
+    first = execute(tools, action, goal=configured_run)
+    assert first.success
+    changed_run = configured_run.model_copy(
+        update={"model_settings": ModelSettings(model="gpt-6-luna", reasoning_effort="low")}
+    )
+
+    def must_not_repeat(*args, **kwargs):
+        raise AssertionError("Inference settings must not repeat an existing tool operation")
+
+    monkeypatch.setattr(tools, "_execute", must_not_repeat)
+    assert execute(tools, action, goal=changed_run) == first
+
+
+def test_model_settings_compatibility_does_not_weaken_contract_conflict_detection(tools):
+    action = Action(tool="write_file", path="report.txt", content="A conclusion")
+    assert execute(tools, action).success
+    changed_run = run(max_steps=21).model_copy(
+        update={"model_settings": ModelSettings(model="gpt-6-sol", reasoning_effort="high")}
+    )
+    result = execute(tools, action, goal=changed_run)
+    assert not result.success
+    assert "cannot be reused" in result.content
+    assert (tools.root / "test-goal/report.txt").read_text() == "A conclusion"
+
+
+def test_model_settings_compatibility_does_not_weaken_action_conflict_detection(tools):
+    assert execute(tools, Action(tool="write_file", path="report.txt", content="first")).success
+    configured_run = run().model_copy(
+        update={"model_settings": ModelSettings(model="gpt-6-sol", reasoning_effort="high")}
+    )
+    result = execute(
+        tools,
+        Action(tool="write_file", path="report.txt", content="different"),
+        goal=configured_run,
+    )
     assert not result.success
     assert "cannot be reused" in result.content
     assert (tools.root / "test-goal/report.txt").read_text() == "first"

@@ -5,6 +5,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
+from rocky.inference import ModelSettings
+
 Criterion = Annotated[str, StringConstraints(min_length=1, max_length=2000)]
 
 
@@ -90,6 +92,7 @@ class Observation(Model):
 class RunInput(Model):
     goal_id: str
     contract: GoalContract
+    model_settings: ModelSettings | None = None
 
 
 Status = Literal[
@@ -168,6 +171,7 @@ class GoalView(Model):
     contract: GoalContract
     state: RunState
     created_at: str
+    model_settings: ModelSettings | None = None
 
 
 class WakeCommand(Model):

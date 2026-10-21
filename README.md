@@ -4,7 +4,7 @@
 自主规划下一步、调用工具、核验产物，并在等待、重启和人工反馈之后继续工作。
 
 v0.1 是单用户、单主机执行内核，使用 Python、Temporal、PostgreSQL 和 OpenAI
-Responses API。模型通过 `ROCKY_MODEL` 配置，默认 `gpt-4.1-mini`。
+Responses API。初始模型为 `gpt-4.1-mini`，可在网页中切换模型与思考级别。
 
 ## 已实现
 
@@ -68,8 +68,24 @@ API 启动后，在浏览器打开 [Rocky Mission Control](http://127.0.0.1:8000
 
 控制台支持创建目标、查看目标列表与详情、查看事件，以及补充信息唤醒或取消目标。
 创建目标时仍需指定产物、验收标准、工具范围和预算；界面操作使用现有 API 的相同
-持久化与取消规则。已显示的模型名称来自 API 配置，不能据此判断 worker 是否在线。
-在 Docker 或分开配置进程时，请为 API 和 worker 设置相同的 `ROCKY_MODEL`。
+持久化与取消规则。
+
+控制台的“模型设置”可选择模型和思考级别，保存后用于新提交的任务。
+设置存入数据库，API 或 worker 重启后保留；每个新任务在提交时保存独立配置，
+规划与结果核验都使用这份配置。修改默认值不会改变已提交任务，也不会改变幂等重试
+返回的原任务配置。任务详情显示该任务记录的模型和思考级别。
+
+GPT-4.1 系列不支持思考级别；控制台会禁用该选项。GPT-6 系列按各模型支持范围
+显示档位，并提供“模型默认”。级别越高通常耗时与 token 用量越多，仍受任务的
+调用次数和输出 token 预算约束。模型清单表示已配置的能力范围，实际可用性取决于
+当前 API 账户权限；不自动回退到其他模型。
+参数依据 [OpenAI 推理指南](https://developers.openai.com/api/docs/guides/reasoning)
+及[模型部署说明](https://developers.openai.com/api/docs/guides/deployment-checklist)。
+
+首次启动、尚未保存网页设置时，`ROCKY_MODEL` 与可选的
+`ROCKY_REASONING_EFFORT` 提供初始默认值。旧版任务未记录模型配置，继续使用 worker
+的环境配置；请为 API 和 worker 设置相同的初始值。模型配置标签不能据此判断
+worker 是否在线。
 
 界面遵循系统的“减少动态效果”偏好（`prefers-reduced-motion`）。所有脚本、样式和
 字体均来自本机或系统，不依赖外部 CDN。公开页面用于加载控制台，认证任务 JSON 和

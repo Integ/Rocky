@@ -10,7 +10,7 @@ from rocky.store import Store
 @pytest.fixture
 def api(tmp_path):
     store = Store(f"sqlite:///{tmp_path}/api.db")
-    settings = Settings(api_token="owner-test-token")
+    settings = Settings(api_token="owner-test-token", model="gpt-4.1-mini", reasoning_effort=None)
     with TestClient(create_app(settings, store)) as client:
         yield client, store
     store.close()
@@ -46,6 +46,7 @@ def test_submit_commits_outbox_without_temporal_and_idempotent_retry(api):
     assert first.status_code == 202
     second = client.post("/goals", json=contract(), headers=headers)
     assert second.json()["goal_id"] == first.json()["goal_id"]
+    assert first.json()["model_settings"] == {"model": "gpt-4.1-mini", "reasoning_effort": None}
     assert len(store.pending_goals()) == 1
     changed = contract() | {"objective": "Different objective"}
     assert client.post("/goals", json=changed, headers=headers).status_code == 409
