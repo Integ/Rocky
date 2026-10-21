@@ -10,6 +10,10 @@ A near-black command deck with amber orbital geometry, a rotating wireframe core
 mission queue, budget telemetry, event signals, and slide-out mission details.
 The immersive-mode button requests browser fullscreen; normal narrow layouts stack
 panels vertically. Reduced-motion preferences stop the animated core.
+The interface uses short Chinese labels, 16px body and form text, and 13px or
+larger secondary text. Connection diagnostics and execution records are collapsed
+by default; model settings stay directly accessible. The current-task icon is an
+upright SVG lightning bolt.
 
 - Create: objective, criteria, deliverables, scope, steps/calls budget and deadline.
 - Inspect: actual state, observations, loaded checkpoints, artifact paths/hashes.
@@ -88,6 +92,9 @@ submitted workflow inputs that it cannot decode.
 
 ## Validation
 
+- The readability pass passed 32 Node tests, 19 console tests and JavaScript
+  syntax checks. Browser checks covered desktop and 390px narrow layouts,
+  the upright icon, model/task forms and expandable diagnostics/records.
 - 268 Python tests passed, including the existing real Temporal integration suite
   and console authentication, static serving and security-header checks.
 - 32 Node tests passed for statuses, budget arithmetic, demo isolation, contract

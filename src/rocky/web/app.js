@@ -101,6 +101,7 @@ function render() {
   $('#connection-button').textContent = ui.connecting ? '正在连接…' : isLive ? '断开连接 ↗' : ui.mode === 'token_required' ? '登录服务 ↗' : ui.connectionError ? '重试连接 ↻' : '连接本机 ↗';
   $('#connection-button').disabled = ui.connecting;
   write('#mode-notice-text', connectionText.notice);
+  $('#mode-notice').classList.toggle('is-hidden', isLive && !ui.stale);
   write('#notice-connect', connectionText.action);
   $('#notice-connect').disabled = ui.connecting;
   $('#notice-demo').classList.toggle('is-hidden', isLive || isDemo);
@@ -111,25 +112,23 @@ function render() {
   write('#metric-tokens', number(summary.tokens));
   const cap = ui.goals.reduce((sum, item) => sum + item.contract.max_model_calls, 0);
   const percent = budgetPercent(summary.modelCalls, cap);
-  write('#budget-label', `${summary.modelCalls} / ${cap} CALLS`);
+  write('#budget-label', `${summary.modelCalls} / ${cap} 次`);
   $('#budget-fill').style.width = percent + '%';
   $('#budget-meter').setAttribute('aria-label', `已载入任务的模型调用预算用量 ${Math.round(percent)}%`);
   write('#budget-percent', Math.round(percent) + '%');
-  write('#configured-model', isDemo ? 'DEMO / SIMULATED' : ui.modelUncertain ? '配置待确认' : ui.info?.model || '—');
+  write('#configured-model', isDemo ? '演示模型' : ui.modelUncertain ? '配置待确认' : ui.info?.model || '—');
   write('#configured-reasoning', isDemo ? '演示配置' : ui.modelUncertain ? '待重新读取' : ui.info ? reasoningLabel(ui.info.reasoning_effort) : '—');
   renderCreateModelSummary();
   if ($('#model-dialog').open) renderModelControls();
-  write('#api-link', isLive ? ui.stale ? 'SYNC LOST' : `${ui.authMode === 'local' ? 'LOCAL' : 'CONNECTED'} / ${ui.latency ?? '—'} MS` : ui.connecting ? 'CONNECTING' : 'NOT CONNECTED');
+  write('#api-link', isLive ? ui.stale ? '连接中断' : `${ui.authMode === 'local' ? '本机' : '已连接'} · ${ui.latency ?? '—'} ms` : ui.connecting ? '连接中' : '未连接');
   write('#mission-count', String(ui.goals.length).padStart(2, '0'));
-  write('#core-status-label', ui.connecting ? 'ESTABLISHING LINK' : isDemo ? 'SIMULATION ACTIVE' : goal ? meta(goal.state.status).code : 'AWAITING MISSION');
+  write('#core-status-label', ui.connecting ? '连接中' : isDemo ? '演示模式' : goal ? meta(goal.state.status).label : '等待任务');
   $('.core-live-status').dataset.state = isDemo ? 'demo' : goal?.state.status || 'offline';
   $('#core-rounds').replaceChildren(document.createTextNode(String(goal?.state.steps || 0).padStart(2, '0') + ' '), element('small', '', '/ ' + (goal?.contract.max_steps || '—')));
-  write('#core-goal-id', goal ? goal.goal_id.slice(0, 12).toUpperCase() : 'NO VECTOR');
-  write('#core-goal-label', goal ? goal.state.reason || goalTitle(goal) : ui.connecting ? '正在读取本机任务' : isLive ? '等待你定义下一个目标' : '等待建立 Rocky 连接');
+  write('#core-goal-label', goal ? goalTitle(goal) : ui.connecting ? '正在读取任务' : isLive ? '等待新任务' : '等待连接 Rocky');
   $('#inspect-current').disabled = !goal;
-  write('#mission-caption', isDemo ? '演示数据 · 选择任务查看执行详情' : isLive ? `载入最近 ${ui.goals.length} 个任务（最多 100 个）· ${ui.stale ? '上次同步 ' : '已同步 '}${relativeTime(ui.synced)}` : ui.connecting ? '正在读取真实任务…' : '连接 Rocky 后显示真实任务');
-  write('#sync-caption', isDemo ? 'DEMO TELEMETRY / NO LIVE REQUESTS' : isLive ? ui.stale ? 'UPLINK INTERRUPTED / CACHED SNAPSHOT' : 'SNAPSHOT SYNC / 3 SEC INTERVAL' : 'AWAITING SECURE UPLINK');
-  write('#footer-state', connectionText.footer);
+  write('#mission-caption', isDemo ? '演示任务' : isLive ? `最近 ${ui.goals.length} 个任务 · ${ui.stale ? '上次同步 ' + relativeTime(ui.synced) : '自动同步'}` : ui.connecting ? '正在读取任务…' : '连接后查看任务');
+  write('#sync-caption', isDemo ? '模拟记录' : isLive ? ui.stale ? '上次同步的数据' : '每 3 秒自动同步' : '等待连接');
   renderMissions(); renderEvents();
   if ($('#detail-dialog').open && goal) renderDetail();
   if ($('#artifacts-dialog').open) renderArtifacts();
@@ -144,7 +143,7 @@ function renderMissions() {
     row.type = 'button'; row.setAttribute('aria-label', `查看任务：${goalTitle(goal)}，${meta(goal.state.status).label}`);
     const icon = element('span', 'mission-icon', meta(goal.state.status).glyph); icon.dataset.state = goal.state.status;
     const copy = element('span', 'mission-copy');
-    copy.append(element('span', 'mission-title', goalTitle(goal)), element('span', 'mission-meta mono', `${goal.goal_id.slice(0, 8).toUpperCase()} · ${relativeTime(goal.state.updated_at || goal.created_at)}`));
+    copy.append(element('span', 'mission-title', goalTitle(goal)), element('span', 'mission-meta', relativeTime(goal.state.updated_at || goal.created_at)));
     const budget = element('span', 'mission-budget');
     budget.append(element('span', 'mono', `${String(goal.state.steps).padStart(2, '0')} / ${goal.contract.max_steps}`));
     const progress = element('span', 'mission-progress');
@@ -164,7 +163,7 @@ function renderEvents() {
     const item = element('div', 'event-item');
     const dot = element('span', 'event-indicator'); dot.dataset.state = goal.state.status;
     const copy = element('div', 'event-copy');
-    copy.append(element('div', 'event-label', goal.state.reason || meta(goal.state.status).label), element('div', 'event-detail mono', `${goal.goal_id.slice(0, 8).toUpperCase()} / ${goal.state.observations?.at(-1)?.tool || 'workflow'}`));
+    copy.append(element('div', 'event-label', meta(goal.state.status).label), element('div', 'event-detail mono', `${goal.goal_id.slice(0, 8).toUpperCase()} / ${goal.state.observations?.at(-1)?.tool || 'workflow'}`));
     item.append(dot, copy, element('time', 'event-time mono', relativeTime(goal.state.updated_at || goal.created_at)));
     return item;
   });
@@ -356,6 +355,7 @@ for (const button of $$('[data-nav]')) button.addEventListener('click', () => {
   for (const candidate of $$('[data-nav]')) candidate.classList.toggle('active', candidate === button);
   if (button.dataset.nav === 'artifacts') { renderArtifacts(); openDialog('#artifacts-dialog'); return; }
   const target = button.dataset.nav === 'missions' ? '#missions-section' : button.dataset.nav === 'events' ? '#events-section' : '#main-content';
+  if (target === '#events-section') $(target).open = true;
   $(target).scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'start' });
 });
 $('#refresh-button').addEventListener('click', () => ui.mode === 'live' ? refresh() : toast('当前为演示数据。连接 Rocky 后会自动同步。'));
@@ -373,10 +373,10 @@ function renderModelControls() {
   $('#model-selection').disabled = !enabled;
   $('#reasoning-selection').disabled = !enabled || !reasoningChoices(ui.info?.models, ui.modelDraft?.model).length;
   $('#model-save').disabled = !enabled || !known;
-  $('#model-save').textContent = ui.modelSaving ? '正在保存…' : '保存默认配置 ↗';
+  $('#model-save').textContent = ui.modelSaving ? '正在保存…' : '保存设置';
   $('#model-reload').disabled = !live || pending;
   $('#model-connect').classList.toggle('is-hidden', ui.mode === 'live');
-  write('#model-access-note', ui.mode === 'demo' ? '演示模式不修改真实配置。连接你的 Rocky 后，可读取并保存新任务的默认设置。' : ui.mode !== 'live' ? '当前未连接。建立连接后才能修改模型设置。' : ui.stale ? '链路暂时中断，保存已停用。请先恢复连接。' : ui.modelSaving ? '正在保存默认配置；仅影响之后提交的新任务。' : ui.modelLoading ? '正在读取最新配置与可选模型…' : ui.modelReady ? '已读取服务配置，可为新任务保存默认模型。' : '尚未确认最新配置，请重新读取后保存。');
+  write('#model-access-note', ui.mode === 'demo' ? '演示模式。连接后可修改设置。' : ui.mode !== 'live' ? '连接后可修改设置。' : ui.stale ? '连接中断，暂时无法保存。' : ui.modelSaving ? '正在保存…' : ui.modelLoading ? '正在读取模型…' : ui.modelReady ? '' : '请重新读取配置。');
 }
 
 function renderModelForm() {
@@ -400,7 +400,7 @@ function renderModelForm() {
     const option = element('option', '', reasoningLabel(effort)); option.value = effort; return option;
   }));
   reasoning.value = ui.modelDraft?.reasoning_effort || '';
-  write('#reasoning-help', !ui.modelDraft?.model ? '连接后可查看每个模型支持的思考档位。' : !catalog.some(item => item.id === ui.modelDraft.model) ? '服务未提供此模型的可选档位，请选择列表中的模型后保存。' : !choices.length ? '此模型不支持单独调整思考级别，将使用模型默认。' : '可选档位由所选模型决定。选择“模型默认”时不单独指定思考级别。较高档位通常耗时与 Token 用量更多，仍受任务输出预算约束。');
+  write('#reasoning-help', !ui.modelDraft?.model ? '连接后读取可选档位。' : !catalog.some(item => item.id === ui.modelDraft.model) ? '请选择列表中的模型。' : !choices.length ? '此模型使用默认思考级别。' : '思考级别越高，通常耗时和用量越多。');
   renderModelControls();
 }
 
@@ -495,8 +495,8 @@ function openCreate() {
   if (ui.modelSaving) { toast('模型设置正在保存，请稍后创建任务。'); return; }
   if (ui.modelUncertain) { openModelSettings(); return; }
   if (!['live', 'demo'].includes(ui.mode)) { showConnection(); return; }
-  write('#create-eyebrow', ui.mode === 'demo' ? 'NEW MISSION / DEMO' : 'NEW MISSION / LIVE');
-  write('#create-submit', ui.mode === 'demo' ? '创建演示任务 ↗' : '发射任务 ↗');
+  write('#create-eyebrow', ui.mode === 'demo' ? '演示任务' : '新任务');
+  write('#create-submit', ui.mode === 'demo' ? '创建演示任务' : '启动任务');
   write('#create-error', ''); openDialog('#create-dialog');
 }
 $('#new-goal').addEventListener('click', openCreate);
@@ -526,7 +526,7 @@ $('#create-form').addEventListener('submit', async event => {
   if (ui.modelSaving || ui.modelUncertain) { write('#create-error', '请先确认模型设置已保存，再提交新任务。'); return; }
   const serialized = JSON.stringify(contract);
   if (ui.submission?.body !== serialized) ui.submission = { body: serialized, key: crypto.randomUUID() };
-  const epoch = ui.epoch; ui.dataVersion++; busy($('#create-submit'), true, '发射任务 ↗');
+  const epoch = ui.epoch; ui.dataVersion++; busy($('#create-submit'), true, '启动任务');
   try {
     const { data } = await api('/goals', { method: 'POST', body: contract, headers: { 'Idempotency-Key': ui.submission.key } });
     if (epoch !== ui.epoch) return;
@@ -536,7 +536,7 @@ $('#create-form').addEventListener('submit', async event => {
   } catch (error) {
     if (epoch !== ui.epoch) return;
     if (error.status === 401) clearSession(error.message); else write('#create-error', error.message);
-  } finally { busy($('#create-submit'), false, '发射任务 ↗'); }
+  } finally { busy($('#create-submit'), false, '启动任务'); }
 });
 
 $('#wake-goal').addEventListener('click', () => { write('#wake-error', ''); busy($('#wake-submit'), false, '发送信号 ↗'); openDialog('#wake-dialog'); });
@@ -580,12 +580,10 @@ $('#export-goal').addEventListener('click', () => {
   link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); toast('任务记录已导出，包含当前载入的检查点。');
 });
 
-function updateClock() { write('#utc-clock', new Date().toISOString().slice(11, 19) + ' UTC'); }
-updateClock(); const clock = setInterval(updateClock, 1000);
 const polling = setInterval(refresh, 3000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 const stopVisuals = startVisuals({ canvas: $('#core-canvas'), getStatus: () => ui.mode === 'demo' ? 'demo' : ui.mode === 'offline' ? 'offline' : selectedGoal()?.state.status || 'waiting' });
-window.addEventListener('pagehide', () => { clearInterval(clock); clearInterval(polling); stopVisuals(); abortRequests(); ui.token = null; });
+window.addEventListener('pagehide', () => { clearInterval(polling); stopVisuals(); abortRequests(); ui.token = null; });
 window.addEventListener('pageshow', event => { if (event.persisted) window.location.reload(); });
 render();
 connectLocalFirst({ announce: false });
