@@ -1,0 +1,65 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: rocky
+      POSTGRES_DB: rocky
+      POSTGRES_PASSWORD: ${ROCKY_POSTGRES_PASSWORD:?Set ROCKY_POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rocky -d rocky"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # Persistent local development server. For production use an authenticated
+  # Temporal deployment and configure the worker connection accordingly.
+  temporal:
+    image: temporalio/temporal:latest
+    command: ["server", "start-dev", "--ip", "0.0.0.0", "--db-filename", "/var/lib/temporal/temporal.db"]
+    volumes:
+      - temporal-data:/var/lib/temporal
+    ports:
+      - "127.0.0.1:8233:8233"
+    restart: unless-stopped
+
+  api:
+    build: .
+    command: ["rocky", "api"]
+    environment: &rocky-environment
+      ROCKY_DATABASE_URL: postgresql+psycopg://rocky:${ROCKY_POSTGRES_PASSWORD:?Set ROCKY_POSTGRES_PASSWORD}@postgres/rocky
+      ROCKY_API_TOKEN: ${ROCKY_API_TOKEN:?Set ROCKY_API_TOKEN}
+      ROCKY_TEMPORAL_ADDRESS: temporal:7233
+      ROCKY_HOST: 0.0.0.0
+      ROCKY_WORKSPACE_ROOT: /app/data/workspaces
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - rocky-data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["rocky", "worker"]
+    environment:
+      <<: *rocky-environment
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Reuse an existing OPENAI_API_KEY in your environment}
+      ROCKY_MODEL: ${ROCKY_MODEL:-gpt-4.1-mini}
+    volumes:
+      - rocky-data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  temporal-data:
+  rocky-data:

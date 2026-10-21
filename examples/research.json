@@ -1,0 +1,15 @@
+{
+  "objective": "Read https://docs.temporal.io/temporal.md and write a concise Chinese report explaining durable execution, what survives a worker restart, and why retrying external side effects still needs idempotency. Cite the supplied URL and clearly distinguish the documentation's claims from your recommendations.",
+  "acceptance_criteria": [
+    "Explains durable execution with a worker restart example",
+    "Explains that external side effects require idempotency or reconciliation",
+    "Includes the source URL and identifies uncertainty"
+  ],
+  "deliverables": [{"path": "research/report.md", "min_bytes": 300, "contains": ["https://docs.temporal.io/temporal.md"]}],
+  "allowed_tools": ["read_file", "write_file", "list_files", "fetch_url"],
+  "allowed_domains": ["docs.temporal.io"],
+  "max_steps": 16,
+  "max_model_calls": 24,
+  "max_output_tokens": 4096,
+  "deadline_seconds": 86400
+}
