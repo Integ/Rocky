@@ -22,28 +22,28 @@ export function authorizationHeaders(token) {
 
 export function connectionView({ mode, authMode, stale = false, error = '' } = {}) {
   if (mode === 'demo') return {
-    badge: 'DEMO MODE', notice: '演示空间 · 下方为模拟任务，不会提交到真实执行器。',
+    badge: '演示模式', notice: '模拟任务，不会实际执行。',
     action: '连接本机 →', footer: 'DEMO ENVIRONMENT',
   };
   if (mode === 'connecting') return {
-    badge: 'CONNECTING', notice: '正在连接本机 Rocky，读取任务与运行配置…',
+    badge: '连接中', notice: '正在连接本机 Rocky…',
     action: '正在连接…', footer: 'ESTABLISHING LOCAL LINK',
   };
   if (mode === 'live') {
     const local = authMode === 'local';
     return {
-      badge: stale ? 'LINK DEGRADED' : local ? '本机直连' : 'API CONNECTED',
-      notice: stale ? '链路暂时中断 · 当前显示上次同步的数据，写入操作暂时锁定。系统将自动重试。' : `${local ? '本机直连' : '实时工作区'} · 每 3 秒同步真实任务。执行器在线状态需另行核实。`,
+      badge: stale ? '连接中断' : local ? '本机直连' : '已连接',
+      notice: stale ? '连接中断，显示上次同步数据；写入操作暂时锁定，正在自动重试。' : '真实任务 · 自动同步',
       action: stale ? '重试连接 ↻' : '刷新数据 ↻',
       footer: stale ? 'LINK DEGRADED / CACHED SNAPSHOT' : local ? 'LOCAL DIRECT / CONNECTED' : 'OWNER SESSION / CONNECTED',
     };
   }
   if (mode === 'token_required') return {
-    badge: 'LOGIN REQUIRED', notice: '此服务启用了令牌访问模式，请登录后查看真实任务。',
+    badge: '请登录', notice: '服务启用了令牌访问模式，请登录。',
     action: '连接服务 →', footer: 'AWAITING OWNER LOGIN',
   };
   return {
-    badge: 'OFFLINE', notice: error ? `连接未成功 · ${error}` : '已断开 Rocky。点击连接可重新读取本机任务。',
+    badge: '未连接', notice: error ? `连接失败 · ${error}` : '已断开 Rocky，连接后查看任务。',
     action: error ? '重试连接 ↻' : '连接本机 →', footer: 'OFFLINE / DISCONNECTED',
   };
 }
