@@ -7,9 +7,11 @@ from uuid import uuid4
 
 from sqlalchemy import JSON, Boolean, Integer, String, create_engine, select, update
 from sqlalchemy.engine import make_url
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from rocky.inference import ModelSettings
 from rocky.models import GoalContract, GoalView, RunState
 
 
@@ -26,6 +28,20 @@ class GoalRow(Base):
     dispatched: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
     revision: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class ModelDefaultsRow(Base):
+    """A separate table lets existing installations upgrade without ALTER TABLE."""
+
+    __tablename__ = "model_defaults"
+    key: Mapped[str] = mapped_column(String(32), primary_key=True)
+    settings: Mapped[dict] = mapped_column(JSON)
+
+
+class GoalModelSettingsRow(Base):
+    __tablename__ = "goal_model_settings"
+    goal_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    settings: Mapped[dict] = mapped_column(JSON)
 
 
 class CommandRow(Base):
@@ -64,18 +80,58 @@ class Store:
         self.engine.dispose()
 
     @staticmethod
-    def _view(row: GoalRow) -> GoalView:
+    def _view(row: GoalRow, session: Session) -> GoalView:
+        snapshot = session.get(GoalModelSettingsRow, row.goal_id)
         return GoalView(
-            goal_id=row.goal_id, contract=row.contract, state=row.state, created_at=row.created_at
+            goal_id=row.goal_id,
+            contract=row.contract,
+            state=row.state,
+            created_at=row.created_at,
+            model_settings=ModelSettings.model_validate(snapshot.settings) if snapshot else None,
         )
 
-    def create_goal(self, goal_id: str, contract: GoalContract) -> GoalView:
+    def get_model_settings(self, fallback: ModelSettings) -> ModelSettings:
+        with self.sessions() as session:
+            row = session.get(ModelDefaultsRow, "default")
+            return (
+                ModelSettings.model_validate(row.settings)
+                if row
+                else fallback.model_copy(deep=True)
+            )
+
+    def set_model_settings(self, value: ModelSettings) -> ModelSettings:
+        data = value.model_dump(mode="json")
+        with self.sessions.begin() as session:
+            statement = (
+                update(ModelDefaultsRow)
+                .where(ModelDefaultsRow.key == "default")
+                .values(settings=data)
+            )
+            changed = session.execute(statement)
+            if not changed.rowcount:
+                try:
+                    # Concurrent first writes may both observe no default row.
+                    # A savepoint keeps an insert conflict from aborting the
+                    # enclosing PostgreSQL transaction before its retry UPDATE.
+                    with session.begin_nested():
+                        session.add(ModelDefaultsRow(key="default", settings=data))
+                        session.flush()
+                except IntegrityError:
+                    session.execute(statement)
+        return value.model_copy(deep=True)
+
+    def create_goal(
+        self,
+        goal_id: str,
+        contract: GoalContract,
+        model_settings: ModelSettings | None = None,
+    ) -> GoalView:
         with self.sessions.begin() as session:
             existing = session.get(GoalRow, goal_id)
             if existing:
                 if existing.contract != contract.model_dump(mode="json"):
                     raise ValueError("Idempotency key is already associated with a different goal")
-                return self._view(existing)
+                return self._view(existing, session)
             now = datetime.now(UTC).isoformat()
             state = RunState(goal_id=goal_id, updated_at=now)
             row = GoalRow(
@@ -85,18 +141,24 @@ class Store:
                 created_at=now,
             )
             session.add(row)
+            if model_settings is not None:
+                session.add(
+                    GoalModelSettingsRow(
+                        goal_id=goal_id, settings=model_settings.model_dump(mode="json")
+                    )
+                )
             session.flush()
-            return self._view(row)
+            return self._view(row, session)
 
     def get_goal(self, goal_id: str) -> GoalView | None:
         with self.sessions() as session:
             row = session.get(GoalRow, goal_id)
-            return self._view(row) if row else None
+            return self._view(row, session) if row else None
 
     def list_goals(self, limit: int = 50) -> list[GoalView]:
         with self.sessions() as session:
             return [
-                self._view(row)
+                self._view(row, session)
                 for row in session.scalars(
                     select(GoalRow).order_by(GoalRow.created_at.desc()).limit(limit)
                 )
@@ -105,7 +167,7 @@ class Store:
     def pending_goals(self) -> list[GoalView]:
         with self.sessions() as session:
             return [
-                self._view(row)
+                self._view(row, session)
                 for row in session.scalars(
                     select(GoalRow).where(GoalRow.dispatched.is_(False)).limit(100)
                 )

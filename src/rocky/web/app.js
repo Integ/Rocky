@@ -1,4 +1,4 @@
-import { STATUS_META, TERMINAL, summarize, budgetPercent, relativeTime, goalTitle, buildContract, demoGoals } from './core.js';
+import { STATUS_META, TERMINAL, summarize, budgetPercent, relativeTime, goalTitle, buildContract, demoGoals, modelCatalog, reasoningChoices, normalizeModelSelection, reasoningLabel, recordedModelSettings, modelSettingsLabel } from './core.js';
 import { startVisuals } from './visuals.js';
 
 const $ = selector => document.querySelector(selector);
@@ -8,6 +8,8 @@ const ui = {
   info: null, latency: null, synced: null, stale: false, polling: false, dataVersion: 0,
   detailEvents: [], detailMore: false, historyLoading: false, historyError: '',
   detailVersion: 0, connectionAttempt: 0, submission: null, pending: new Set(),
+  modelReady: false, modelLoading: false, modelSaving: false, modelUncertain: false,
+  modelRequestVersion: 0, modelDraft: null,
 };
 const controllers = new Set();
 let toastTimer;
@@ -44,6 +46,7 @@ function clearSession(message = '连接已断开，访问令牌已从页面清�
   ui.epoch++; ui.connectionAttempt++; ui.token = null; abortRequests(); ui.polling = false;
   ui.mode = 'offline'; ui.goals = []; ui.selectedId = null; ui.info = null;
   ui.pending.clear(); ui.detailEvents = []; ui.submission = null; ui.stale = false;
+  ui.modelRequestVersion++; ui.modelReady = false; ui.modelLoading = false; ui.modelSaving = false; ui.modelUncertain = false; ui.modelDraft = null;
   $('#api-token').value = '';
   for (const dialog of $$('dialog[open]')) dialog.close();
   render(); toast(message);
@@ -74,6 +77,7 @@ async function api(path, options = {}) {
     return { data: await response.json(), latency: Math.round(performance.now() - start) };
   } catch (error) {
     if (error.name === 'AbortError' || error instanceof TypeError) {
+      if (options.method === 'PUT' && path === '/model-settings') throw new Error('保存结果未确认，请重新读取模型设置后再提交新任务。');
       if (options.method === 'POST' && path.endsWith('/wake')) throw new Error('唤醒结果未确认，请先刷新任务状态，避免重复唤醒。');
       if (options.method === 'POST' && path === '/goals') throw new Error('提交结果未确认。可使用原表单重试，原幂等键会避免重复创建。');
       if (options.method === 'POST') throw new Error('命令结果未确认，请先刷新任务状态。');
@@ -104,7 +108,10 @@ function render() {
   $('#budget-fill').style.width = percent + '%';
   $('#budget-meter').setAttribute('aria-label', `已载入任务的模型调用预算用量 ${Math.round(percent)}%`);
   write('#budget-percent', Math.round(percent) + '%');
-  write('#configured-model', isDemo ? 'DEMO / SIMULATED' : ui.info?.model || '—');
+  write('#configured-model', isDemo ? 'DEMO / SIMULATED' : ui.modelUncertain ? '配置待确认' : ui.info?.model || '—');
+  write('#configured-reasoning', isDemo ? '演示配置' : ui.modelUncertain ? '待重新读取' : ui.info ? reasoningLabel(ui.info.reasoning_effort) : '—');
+  renderCreateModelSummary();
+  if ($('#model-dialog').open) renderModelControls();
   write('#api-link', isLive ? ui.stale ? 'SYNC LOST' : `CONNECTED / ${ui.latency ?? '—'} MS` : 'NOT CONNECTED');
   write('#mission-count', String(ui.goals.length).padStart(2, '0'));
   write('#core-status-label', isDemo ? 'SIMULATION ACTIVE' : goal ? meta(goal.state.status).code : 'AWAITING MISSION');
@@ -176,6 +183,10 @@ function renderDetail() {
   for (const [label, value] of [['状态', meta(goal.state.status).label], ['步骤预算', `${goal.state.steps} / ${goal.contract.max_steps}`], ['模型调用', `${goal.state.model_calls} / ${goal.contract.max_model_calls}`], ['运行期限', `${goal.contract.deadline_seconds / 3600} 小时 / 从执行开始`]]) {
     const stat = element('div', 'detail-stat'); stat.append(element('span', 'muted', label), element('strong', '', value)); grid.append(stat);
   }
+  const profile = recordedModelSettings(goal);
+  for (const [label, value] of [['任务模型', profile?.model || '未记录'], ['思考级别', profile ? reasoningLabel(profile.reasoning_effort) : '未记录']]) {
+    const stat = element('div', 'detail-stat'); stat.append(element('span', 'muted', label), element('strong', 'model-detail-value', value)); grid.append(stat);
+  }
   const objective = element('p', 'detail-objective', goal.contract.objective);
   const criteria = element('ul', 'criteria-list');
   for (const item of goal.contract.acceptance_criteria) criteria.append(element('li', '', item));
@@ -201,7 +212,7 @@ function renderDetail() {
     const more = element('button', 'btn btn-ghost', '加载更多检查点'); more.type = 'button';
     more.addEventListener('click', () => loadHistory(goal.goal_id)); history.append(more);
   }
-  const nodes = [grid, detailSection('目标', objective), detailSection('当前执行状态', element('p', 'detail-reason', goal.state.reason || '已入队，等待派发。')), detailSection('验收标准', criteria), detailSection('执行范围', scope), detailSection('产物记录', artifacts), detailSection('最近观察', observations), detailSection('持久检查点', history), element('p', 'field-note', `创建于 ${timestamp(goal.created_at)}。文件位于 data/workspaces/${goal.goal_id}/；此处仅展示路径、大小与校验值。`)];
+  const nodes = [grid, detailSection('目标', objective), detailSection('当前执行状态', element('p', 'detail-reason', goal.state.reason || '已入队，等待派发。')), detailSection('验收标准', criteria), detailSection('执行范围', scope), detailSection('模型配置记录', element('p', 'field-note', profile ? '此任务使用提交时保存的配置；当前默认设置的调整不会改变它。' : ui.mode === 'demo' ? '演示任务未绑定真实模型。' : '此任务未记录模型配置，无法从当前默认设置推断。')), detailSection('产物记录', artifacts), detailSection('最近观察', observations), detailSection('持久检查点', history), element('p', 'field-note', `创建于 ${timestamp(goal.created_at)}。文件位于 data/workspaces/${goal.goal_id}/；此处仅展示路径、大小与校验值。`)];
   body.replaceChildren(...nodes); body.scrollTop = scroll;
   const disabled = TERMINAL.has(goal.state.status) || ui.stale;
   $('#wake-goal').disabled = disabled || ui.pending.has(goal.goal_id + ':wake');
@@ -238,10 +249,13 @@ function renderArtifacts() {
 
 async function refresh() {
   if (ui.mode !== 'live' || ui.polling || document.hidden) return;
-  const epoch = ui.epoch; const dataVersion = ui.dataVersion; ui.polling = true;
+  const epoch = ui.epoch; const dataVersion = ui.dataVersion; const modelVersion = ui.modelRequestVersion; ui.polling = true;
   try {
-    const { data, latency } = await api('/goals?limit=100');
+    const [{ data, latency }, info] = await Promise.all([api('/goals?limit=100'), api('/console-info')]);
     if (epoch !== ui.epoch || dataVersion !== ui.dataVersion) return;
+    // A poll that began before a settings read/save must not replace its result.
+    // Keep the editable draft untouched even when another tab updates defaults.
+    if (modelVersion === ui.modelRequestVersion && !ui.modelSaving && !ui.modelLoading && !ui.modelUncertain) ui.info = info.data;
     const previous = new Map(ui.goals.map(goal => [goal.goal_id, goal.state.revision]));
     ui.goals = data; ui.latency = latency; ui.synced = new Date().toISOString(); ui.stale = false;
     for (const goal of data) if (goal.state.revision > (previous.get(goal.goal_id) ?? -1)) ui.pending.delete(goal.goal_id + ':wake');
@@ -285,6 +299,7 @@ $('#connect-form').addEventListener('submit', async event => {
     ui.epoch++; ui.token = token; ui.mode = 'live'; ui.info = info.data; ui.goals = goals.data; ui.latency = goals.latency;
     ui.selectedId = ui.goals[0]?.goal_id || null; ui.synced = new Date().toISOString(); ui.stale = false; ui.pending.clear(); ui.submission = null;
     $('#api-token').value = ''; $('#connect-dialog').close(); render(); toast('链路已建立，当前显示真实任务数据。');
+    if ($('#model-dialog').open) loadModelSettings();
   } catch (error) { if (attempt === ui.connectionAttempt) write('#connect-error', error.message); }
   finally { busy($('#connect-submit'), false, '建立安全连接 ↗'); }
 });
@@ -309,7 +324,139 @@ for (const button of $$('[data-nav]')) button.addEventListener('click', () => {
 $('#refresh-button').addEventListener('click', () => ui.mode === 'live' ? refresh() : toast('当前为演示数据。连接 Rocky 后会自动同步。'));
 $('#inspect-current').addEventListener('click', () => { if (selectedGoal()) inspectGoal(ui.selectedId); });
 
+function renderCreateModelSummary() {
+  write('#create-model-summary', ui.mode === 'demo' ? '演示任务 · 未绑定真实模型' : ui.modelSaving ? '默认配置正在保存…' : ui.modelUncertain ? '配置待确认，请重新读取模型设置' : ui.info ? modelSettingsLabel(ui.info) : '连接代理后读取默认模型配置');
+}
+
+function renderModelControls() {
+  const live = ui.mode === 'live' && !ui.stale;
+  const pending = ui.modelLoading || ui.modelSaving;
+  const known = modelCatalog(ui.info?.models).some(item => item.id === ui.modelDraft?.model);
+  const enabled = live && ui.modelReady && !pending;
+  $('#model-selection').disabled = !enabled;
+  $('#reasoning-selection').disabled = !enabled || !reasoningChoices(ui.info?.models, ui.modelDraft?.model).length;
+  $('#model-save').disabled = !enabled || !known;
+  $('#model-save').textContent = ui.modelSaving ? '正在保存…' : '保存默认配置 ↗';
+  $('#model-reload').disabled = !live || pending;
+  $('#model-connect').classList.toggle('is-hidden', ui.mode === 'live');
+  write('#model-access-note', ui.mode === 'demo' ? '演示模式不修改真实配置。连接你的 Rocky 后，可读取并保存新任务的默认设置。' : ui.mode !== 'live' ? '当前未连接。建立连接后才能修改模型设置。' : ui.stale ? '链路暂时中断，保存已停用。请先恢复连接。' : ui.modelSaving ? '正在保存默认配置；仅影响之后提交的新任务。' : ui.modelLoading ? '正在读取最新配置与可选模型…' : ui.modelReady ? '已读取服务配置，可为新任务保存默认模型。' : '尚未确认最新配置，请重新读取后保存。');
+}
+
+function renderModelForm() {
+  const catalog = modelCatalog(ui.info?.models);
+  const model = $('#model-selection');
+  const entries = catalog.map(item => {
+    const option = element('option', '', item.label === item.id ? item.id : `${item.label} / ${item.id}`);
+    option.value = item.id; return option;
+  });
+  if (ui.modelDraft?.model && !catalog.some(item => item.id === ui.modelDraft.model)) {
+    const option = element('option', '', `${ui.modelDraft.model}（当前配置，不在可选列表中）`);
+    option.value = ui.modelDraft.model; entries.unshift(option);
+  }
+  model.replaceChildren(...(entries.length ? entries : [element('option', '', '连接后读取可选模型')]));
+  if (!entries.length) model.options[0].value = '';
+  model.value = ui.modelDraft?.model || '';
+  const reasoning = $('#reasoning-selection');
+  const defaultOption = element('option', '', '模型默认'); defaultOption.value = '';
+  const choices = reasoningChoices(catalog, ui.modelDraft?.model);
+  reasoning.replaceChildren(defaultOption, ...choices.map(effort => {
+    const option = element('option', '', reasoningLabel(effort)); option.value = effort; return option;
+  }));
+  reasoning.value = ui.modelDraft?.reasoning_effort || '';
+  write('#reasoning-help', !ui.modelDraft?.model ? '连接后可查看每个模型支持的思考档位。' : !catalog.some(item => item.id === ui.modelDraft.model) ? '服务未提供此模型的可选档位，请选择列表中的模型后保存。' : !choices.length ? '此模型不支持单独调整思考级别，将使用模型默认。' : '可选档位由所选模型决定。选择“模型默认”时不单独指定思考级别。较高档位通常耗时与 Token 用量更多，仍受任务输出预算约束。');
+  renderModelControls();
+}
+
+async function loadModelSettings() {
+  if (ui.modelSaving) { renderModelControls(); return; }
+  if (ui.mode !== 'live' || ui.stale) {
+    ui.modelReady = false; ui.modelDraft = null; renderModelForm(); return;
+  }
+  const epoch = ui.epoch; const version = ++ui.modelRequestVersion;
+  ui.modelLoading = true; ui.modelReady = false;
+  write('#model-error', ''); write('#model-selection-note', ''); renderModelForm();
+  try {
+    const [info, settings] = await Promise.all([api('/console-info'), api('/model-settings')]);
+    if (epoch !== ui.epoch || version !== ui.modelRequestVersion) return;
+    ui.info = { ...info.data, ...settings.data };
+    ui.modelDraft = { model: settings.data.model, reasoning_effort: settings.data.reasoning_effort ?? null };
+    const catalog = modelCatalog(ui.info.models);
+    if (catalog.some(item => item.id === ui.modelDraft.model)) {
+      const normalized = normalizeModelSelection(catalog, ui.modelDraft);
+      if (normalized.reasoning_effort !== ui.modelDraft.reasoning_effort) write('#model-selection-note', '当前配置的思考档位不可用，已显示“模型默认”；保存后才应用调整。');
+      ui.modelDraft = normalized;
+    }
+    ui.modelReady = true; ui.modelUncertain = false;
+  } catch (error) {
+    if (epoch !== ui.epoch || version !== ui.modelRequestVersion) return;
+    if (error.status === 401) clearSession(error.message);
+    else write('#model-error', error.message);
+  } finally {
+    if (epoch === ui.epoch && version === ui.modelRequestVersion) {
+      ui.modelLoading = false; renderModelForm(); render();
+    }
+  }
+}
+
+function openModelSettings() {
+  write('#model-error', ''); write('#model-selection-note', '');
+  openDialog('#model-dialog'); loadModelSettings();
+}
+$('#model-settings-button').addEventListener('click', openModelSettings);
+$('#create-model-settings').addEventListener('click', openModelSettings);
+$('#model-connect').addEventListener('click', showConnection);
+$('#model-reload').addEventListener('click', loadModelSettings);
+$('#model-dialog').addEventListener('close', () => {
+  ui.modelRequestVersion++; ui.modelLoading = false;
+});
+$('#model-selection').addEventListener('change', () => {
+  const previous = ui.modelDraft?.reasoning_effort || null;
+  try {
+    ui.modelDraft = normalizeModelSelection(ui.info?.models, { model: $('#model-selection').value, reasoning_effort: previous });
+    write('#model-selection-note', previous && ui.modelDraft.reasoning_effort !== previous ? `新模型不支持${reasoningLabel(previous)}，已切换为“模型默认”。` : '');
+    write('#model-error', ''); renderModelForm();
+  } catch (error) { write('#model-error', error.message); }
+});
+$('#reasoning-selection').addEventListener('change', () => {
+  if (ui.modelDraft) ui.modelDraft.reasoning_effort = $('#reasoning-selection').value || null;
+  write('#model-selection-note', '');
+});
+$('#model-form').addEventListener('submit', async event => {
+  event.preventDefault(); write('#model-error', '');
+  if (ui.mode !== 'live' || ui.stale || !ui.modelReady || ui.modelLoading || ui.modelSaving) {
+    write('#model-error', '请先连接并读取最新配置，再保存模型设置。'); return;
+  }
+  let settings;
+  try { settings = normalizeModelSelection(ui.info?.models, { model: $('#model-selection').value, reasoning_effort: $('#reasoning-selection').value || null }); }
+  catch (error) { write('#model-error', error.message); return; }
+  const epoch = ui.epoch; const version = ++ui.modelRequestVersion;
+  ui.modelSaving = true; renderModelControls(); renderCreateModelSummary();
+  try {
+    const { data } = await api('/model-settings', { method: 'PUT', body: settings });
+    if (epoch !== ui.epoch) return;
+    ui.info = { ...ui.info, ...data }; ui.modelDraft = { model: data.model, reasoning_effort: data.reasoning_effort ?? null };
+    ui.modelReady = true; ui.modelUncertain = false;
+    const sameDialog = $('#model-dialog').open && version === ui.modelRequestVersion;
+    ui.modelRequestVersion++;
+    if (sameDialog) $('#model-dialog').close();
+    render(); toast('默认模型设置已保存，仅新任务生效。');
+  } catch (error) {
+    if (epoch !== ui.epoch) return;
+    if (error.status === 401) clearSession(error.message);
+    else {
+      ui.modelRequestVersion++;
+      ui.modelUncertain = !error.status || error.status >= 500;
+      if (ui.modelUncertain) ui.modelReady = false;
+      write('#model-error', error.status === 422 ? '模型或思考级别不受支持，请重新读取可选配置。' : error.message);
+    }
+  } finally {
+    if (epoch === ui.epoch) { ui.modelSaving = false; render(); if ($('#model-dialog').open) renderModelForm(); }
+  }
+});
+
 function openCreate() {
+  if (ui.modelSaving) { toast('模型设置正在保存，请稍后创建任务。'); return; }
+  if (ui.modelUncertain) { openModelSettings(); return; }
   if (ui.mode === 'offline') { showConnection(); return; }
   write('#create-eyebrow', ui.mode === 'demo' ? 'NEW MISSION / DEMO' : 'NEW MISSION / LIVE');
   write('#create-submit', ui.mode === 'demo' ? '创建演示任务 ↗' : '发射任务 ↗');
@@ -339,6 +486,7 @@ $('#create-form').addEventListener('submit', async event => {
     ui.goals.unshift(goal); ui.selectedId = goal.goal_id; $('#create-dialog').close(); render(); toast('已创建演示任务。连接 Rocky 后才能提交真实目标。'); return;
   }
   if (ui.mode !== 'live' || ui.stale) { write('#create-error', '请先恢复与 Rocky 的连接。'); return; }
+  if (ui.modelSaving || ui.modelUncertain) { write('#create-error', '请先确认模型设置已保存，再提交新任务。'); return; }
   const serialized = JSON.stringify(contract);
   if (ui.submission?.body !== serialized) ui.submission = { body: serialized, key: crypto.randomUUID() };
   const epoch = ui.epoch; ui.dataVersion++; busy($('#create-submit'), true, '发射任务 ↗');

@@ -26,6 +26,7 @@ def client(tmp_path, monkeypatch):
         database_url=f"sqlite:///{tmp_path / 'console.db'}",
         api_token=SecretStr(_OWNER_TOKEN),
         model="console-configured-model",
+        reasoning_effort=None,
     )
     store = Store(settings.database_url)
     store.initialize()
@@ -118,7 +119,14 @@ def test_missing_console_asset_returns_404_with_security_headers(client):
 
 
 @pytest.mark.parametrize(
-    "path", ["/goals", f"/goals/{_GOAL_ID}", f"/goals/{_GOAL_ID}/events", "/console-info"]
+    "path",
+    [
+        "/goals",
+        f"/goals/{_GOAL_ID}",
+        f"/goals/{_GOAL_ID}/events",
+        "/console-info",
+        "/model-settings",
+    ],
 )
 def test_public_shell_does_not_grant_api_access(client, path):
     response = client.get(path)
@@ -132,18 +140,27 @@ def test_authenticated_console_info_reports_configured_capabilities(client):
     response = client.get("/console-info", headers=_AUTH)
 
     assert response.status_code == 200
-    assert response.json() == {
+    payload = response.json()
+    assert {
+        key: payload[key]
+        for key in ("model", "reasoning_effort", "version", "tools", "polling_seconds")
+    } == {
         "model": "console-configured-model",
+        "reasoning_effort": None,
         "version": "0.1.0",
         "tools": ["read_file", "write_file", "list_files", "fetch_url"],
         "polling_seconds": 3,
     }
+    assert any(item["id"] == "console-configured-model" for item in payload["models"])
+    assert all({"id", "label", "reasoning_efforts"} <= item.keys() for item in payload["models"])
     assert response.headers["cache-control"] == "no-store"
     assert_console_headers(response)
     assert_no_private_data(response.text)
 
 
-@pytest.mark.parametrize("path", ["/goals", f"/goals/{_GOAL_ID}", f"/goals/{_GOAL_ID}/events"])
+@pytest.mark.parametrize(
+    "path", ["/goals", f"/goals/{_GOAL_ID}", f"/goals/{_GOAL_ID}/events", "/model-settings"]
+)
 def test_authenticated_task_json_is_not_browser_cached(client, path):
     response = client.get(path, headers=_AUTH)
 

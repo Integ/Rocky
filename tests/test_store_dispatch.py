@@ -4,6 +4,7 @@ from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from rocky.config import Settings
+from rocky.inference import ModelSettings
 from rocky.models import Deliverable, GoalContract, RunState
 from rocky.service import Dispatcher
 from rocky.store import Store
@@ -70,4 +71,22 @@ async def test_dispatch_reconciles_start_succeeded_but_ack_was_lost(tmp_path):
     assert signals[0][1].message == "Continue with new evidence"
     assert store.pending_goals() == []
     assert store.pending_commands() == []
+    store.close()
+
+
+async def test_dispatch_uses_frozen_goal_model_settings_instead_of_current_defaults(tmp_path):
+    store = Store(f"sqlite:///{tmp_path}/models.db")
+    store.initialize()
+    snapshot = ModelSettings(model="gpt-6-luna", reasoning_effort="low")
+    store.create_goal("pinned", make_goal(store).contract, model_settings=snapshot)
+    store.mark_dispatched("goal-1")
+    store.set_model_settings(ModelSettings(model="gpt-6-astra", reasoning_effort="max"))
+    dispatched = []
+
+    async def start(name, run, **kwargs):
+        dispatched.append(run)
+
+    await Dispatcher(SimpleNamespace(start_workflow=start), store, Settings()).tick()
+    assert len(dispatched) == 1
+    assert dispatched[0].model_settings == snapshot
     store.close()

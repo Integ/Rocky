@@ -15,6 +15,7 @@ from pydantic import Field
 from sqlalchemy.exc import IntegrityError
 
 from rocky.config import Settings
+from rocky.inference import ModelSettings, model_catalog
 from rocky.models import GoalContract, GoalView, Model
 from rocky.store import Store
 
@@ -101,12 +102,30 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.get("/console-info", dependencies=auth)
     def console_info():
+        current = get_default_model_settings()
         return {
-            "model": settings.model,
+            "model": current.model,
+            "reasoning_effort": current.reasoning_effort,
+            "models": model_catalog(settings.model),
             "version": app.version,
             "tools": list(_TOOL_NAMES),
             "polling_seconds": 3,
         }
+
+    def get_default_model_settings() -> ModelSettings:
+        return database.get_model_settings(
+            ModelSettings(model=settings.model, reasoning_effort=settings.reasoning_effort)
+        )
+
+    @app.get("/model-settings", response_model=ModelSettings, dependencies=auth)
+    def get_model_settings():
+        return get_default_model_settings()
+
+    @app.put("/model-settings", response_model=ModelSettings, dependencies=auth)
+    def put_model_settings(value: ModelSettings):
+        if value.model not in {item["id"] for item in model_catalog(settings.model)}:
+            raise HTTPException(422, "Select a model from the configured model catalog")
+        return database.set_model_settings(value)
 
     def require_goal(goal_id: str) -> GoalView:
         result = database.get_goal(goal_id)
@@ -130,7 +149,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             else str(uuid4())
         )
         try:
-            return database.create_goal(goal_id, contract)
+            return database.create_goal(goal_id, contract, get_default_model_settings())
         except ValueError as exc:
             raise HTTPException(409, "Idempotency key already used for a different goal") from exc
         except IntegrityError:

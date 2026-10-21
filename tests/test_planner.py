@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from rocky.config import Settings
+from rocky.inference import ModelSettings
 from rocky.models import (
     Decision,
     Deliverable,
@@ -74,6 +75,7 @@ async def test_plan_separates_untrusted_data_and_returns_usage():
     assert arguments["text_format"] is Decision
     assert arguments["max_output_tokens"] == 768
     assert arguments["store"] is False
+    assert "reasoning" not in arguments
     instructions, data = arguments["input"]
     assert instructions["role"] == "developer"
     assert data["role"] == "user"
@@ -83,6 +85,41 @@ async def test_plan_separates_untrusted_data_and_returns_usage():
     assert payload["run"] == request.run.model_dump(mode="json")
     assert payload["state"]["observations"][0]["content"].startswith("UNTRUSTED:")
     assert payload["feedback"] == request.feedback
+
+
+async def test_goal_snapshot_controls_both_planner_and_independent_review():
+    request = goal_request()
+    request.run.model_settings = ModelSettings(model="gpt-6-luna", reasoning_effort="high")
+    client = fake_client(completed(Decision(kind="finish", reason="Review the file.")))
+    planner = OpenAIPlanner(Settings(model="gpt-4.1-mini"), client=client)
+
+    await planner.plan(request)
+    planning = client.responses.parse.await_args.kwargs
+    client.responses.parse.return_value = completed(
+        ReviewVerdict(passed=True, feedback="Verified.")
+    )
+    await planner.review(VerifyInput(run=request.run, state=request.state), "Actual artifact")
+    review = client.responses.parse.await_args.kwargs
+
+    for arguments in (planning, review):
+        assert arguments["model"] == "gpt-6-luna"
+        assert arguments["reasoning"] == {"effort": "high"}
+    assert client.responses.parse.await_count == 2
+
+
+async def test_legacy_goal_uses_environment_defaults_and_explicit_none_is_preserved():
+    client = fake_client(completed(Decision(kind="blocked", reason="Need evidence.")))
+    planner = OpenAIPlanner(Settings(model="gpt-6-sol", reasoning_effort="none"), client=client)
+    request = goal_request()
+    await planner.plan(request)
+    assert client.responses.parse.await_args.kwargs["model"] == "gpt-6-sol"
+    assert client.responses.parse.await_args.kwargs["reasoning"] == {"effort": "none"}
+
+    # A snapshot using the model's default must not inherit the worker's effort.
+    request.run.model_settings = ModelSettings(model="gpt-6-luna")
+    await planner.plan(request)
+    assert client.responses.parse.await_args.kwargs["model"] == "gpt-6-luna"
+    assert "reasoning" not in client.responses.parse.await_args.kwargs
 
 
 async def test_review_uses_actual_artifact_without_planners_success_claim():

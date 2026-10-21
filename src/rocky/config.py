@@ -2,8 +2,10 @@
 
 from pathlib import Path
 
-from pydantic import SecretStr
+from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from rocky.inference import ModelSettings, ReasoningEffort
 
 
 class Settings(BaseSettings):
@@ -15,7 +17,13 @@ class Settings(BaseSettings):
     temporal_namespace: str = "default"
     task_queue: str = "rocky-goals"
     model: str = "gpt-4.1-mini"
+    reasoning_effort: ReasoningEffort | None = None
     api_token: SecretStr | None = None
     host: str = "127.0.0.1"
     port: int = 8000
     max_concurrent_activities: int = 4
+
+    @model_validator(mode="after")
+    def valid_inference_defaults(self) -> "Settings":
+        ModelSettings(model=self.model, reasoning_effort=self.reasoning_effort)
+        return self
