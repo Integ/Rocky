@@ -16,9 +16,57 @@ import {
   reasoningLabel,
   recordedModelSettings,
   modelSettingsLabel,
+  authorizationHeaders,
+  connectionView,
 } from '../../src/rocky/web/core.js';
 
 const NOW = Date.parse('2026-10-21T03:00:00Z');
+
+test('anonymous local requests never manufacture bearer credentials from missing values', () => {
+  for (const token of [undefined, null, '', '   ', 'null', 'undefined', ' NULL ', 0, false]) {
+    assert.deepEqual(authorizationHeaders(token), {});
+    assert.equal('Authorization' in authorizationHeaders(token), false);
+  }
+});
+
+test('explicit token-mode credentials are passed only when a real value is supplied', () => {
+  assert.deepEqual(authorizationHeaders('  owner-session-sentinel  '), {
+    Authorization: 'Bearer owner-session-sentinel',
+  });
+  assert.deepEqual(authorizationHeaders(null), {}, 'later anonymous requests must not retain an earlier credential');
+});
+
+test('local connected presentation has no token gate and is distinct from demo', () => {
+  const local = connectionView({ mode: 'live', authMode: 'local' });
+  assert.equal(local.badge, '本机直连');
+  assert.match(local.notice, /真实任务/);
+  assert.doesNotMatch(Object.values(local).join(' '), /令牌|DEMO|模拟/);
+  assert.notEqual(local.badge, connectionView({ mode: 'demo' }).badge);
+});
+
+test('startup and failed connections remain real-data states until demo is explicitly selected', () => {
+  const loading = connectionView({ mode: 'connecting' });
+  const failed = connectionView({ mode: 'offline', error: '服务暂时不可用' });
+  assert.match(loading.notice, /正在连接本机/);
+  assert.match(failed.action, /重试/);
+  assert.doesNotMatch(failed.notice, /模拟|演示|令牌/);
+  assert.doesNotMatch(connectionView().notice, /演示|模拟/);
+  assert.match(connectionView({ mode: 'demo' }).notice, /模拟任务/);
+});
+
+test('degraded local connections identify cached data and locked writes during retry', () => {
+  const degraded = connectionView({ mode: 'live', authMode: 'local', stale: true });
+  assert.match(degraded.notice, /上次同步/);
+  assert.match(degraded.notice, /写入操作暂时锁定/);
+  assert.match(degraded.notice, /自动重试/);
+  assert.match(degraded.footer, /CACHED/);
+});
+
+test('only an explicitly required token mode presents the owner login state', () => {
+  assert.match(connectionView({ mode: 'token_required' }).notice, /令牌访问模式/);
+  assert.doesNotMatch(connectionView({ mode: 'offline' }).notice, /令牌/);
+  assert.doesNotMatch(connectionView({ mode: 'connecting' }).notice, /令牌/);
+});
 
 function fields(overrides = {}) {
   return {

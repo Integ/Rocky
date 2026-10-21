@@ -21,10 +21,25 @@ panels vertically. Reduced-motion preferences stop the animated core.
 
 ## Connection and truthfulness
 
-Enter `ROCKY_API_TOKEN`, not `OPENAI_API_KEY`. The owner token remains only in
-page memory. Disconnect or reload clears it. Credentials are never placed in
-URLs, localStorage, sessionStorage, task exports or server-rendered HTML.
-All requests use the same origin with redirects disabled and no cookie credentials.
+The default local mode connects automatically on page load, without an application
+token. Refresh reconnects to real data. Initial connection failures show a retry;
+demo missions appear only after choosing the demo space. Disconnect remains
+disconnected until the user reconnects or reloads.
+
+Local requests must come from a loopback peer, use a loopback/localhost Host, and
+have a same-origin Origin if present. Cross-site API requests are rejected.
+User-activated top-level GET navigation may load the static console entry so
+opening its link works; this exception never grants cross-site API access.
+The API must bind to loopback in local mode. The CLI disables proxy-header
+rewriting and ignores HTTP proxy environment settings for local client requests.
+Any local process can use this mode. External reverse proxies, tunnels and
+container deployments must explicitly use `ROCKY_AUTH_MODE=token`.
+
+Token mode retains the owner token in page memory only. Disconnect or reload
+clears it. The console never asks for `OPENAI_API_KEY`. Credentials are never
+placed in URLs, localStorage, sessionStorage, exports or server-rendered HTML.
+All browser API requests use the same origin with redirects disabled and no cookie
+credentials. Anonymous requests omit Authorization entirely.
 
 Connected sessions poll the latest 100 goals every three seconds while visible.
 The telemetry describes that loaded subset. Budget consumption is explicitly
@@ -43,14 +58,16 @@ pretend a successful HTTP acknowledgement means execution already occurred.
 
 Task content is inserted as text, never HTML. Console responses carry a same-origin
 Content Security Policy, no-referrer and nosniff headers. Entry HTML and task JSON
-are not browser cached. The public shell contains no credentials or private goals.
+are not browser cached. The static shell contains no credentials or private goals.
 
 ## Model and reasoning settings
 
-Authenticated `GET /model-settings` reads defaults and `PUT /model-settings`
+`GET /model-settings` reads defaults and `PUT /model-settings`
 atomically replaces them. The payload is `{ "model": "gpt-6-luna",
 "reasoning_effort": "low" }`; use `null` for the model's default effort.
 `GET /console-info` exposes the model catalog and supported efforts.
+These endpoints use the local-access boundary or Bearer authentication according
+to the configured mode; `/console-info` also reports `auth_mode`.
 
 The settings form filters efforts when the model changes. Non-reasoning models
 disable the effort control; unsupported model/effort combinations are also
@@ -71,14 +88,18 @@ submitted workflow inputs that it cannot decode.
 
 ## Validation
 
-- 143 Python tests passed, including the existing real Temporal integration suite
+- 268 Python tests passed, including the existing real Temporal integration suite
   and console authentication, static serving and security-header checks.
-- 26 Node tests passed for statuses, budget arithmetic, demo isolation, contract
-  validation and model/effort selection. JavaScript syntax checks and Ruff passed.
+- 32 Node tests passed for statuses, budget arithmetic, demo isolation, contract
+  validation, model/effort selection and anonymous connection states. JavaScript
+  syntax checks and Ruff passed.
 - The built wheel includes all five HTML/JS/CSS console assets.
 - Browser acceptance covered a 387px narrow view and a 1465px fullscreen view,
   connecting to the real local API, submitting a test goal, viewing details,
-  enqueueing wake/cancel commands, and refresh clearing the connection.
+  enqueueing wake/cancel commands, and local-mode refresh reconnecting automatically.
+- Local-access acceptance covered first load, reload, disconnect/reconnect, and
+  saving unchanged model defaults without entering any token. Existing goals
+  remained available, and the native CLI listed them without a credential.
 - Model-settings acceptance covered demo mode blocking writes, non-reasoning
   models disabling the effort selector, selecting GPT-6 Luna with `low`, saving
   and reopening settings, and submitting a goal from the new-mission form.

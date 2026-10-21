@@ -1,6 +1,8 @@
 """Single-owner HTTP API; submissions and signals are committed before acknowledgement."""
 
 import asyncio
+import ipaddress
+import re
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -8,7 +10,7 @@ from typing import Annotated
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import Field
@@ -34,6 +36,120 @@ _CONSOLE_CSP = "; ".join(
     )
 )
 _TOOL_NAMES = ("read_file", "write_file", "list_files", "fetch_url")
+_IPV6_AUTHORITY = re.compile(r"\[([0-9a-fA-F:.]+)\](?::([0-9]{1,5}))?\Z")
+
+
+def _loopback_address(value: str) -> bool:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return address.ipv4_mapped.is_loopback
+    return address.is_loopback
+
+
+def _local_authority(value: str) -> tuple[str, int | None] | None:
+    """Validate an HTTP Host authority without DNS, URL repair or proxy headers."""
+    if not value or any(
+        ord(character) <= 32 or ord(character) == 127 or character == "\\" for character in value
+    ):
+        return None
+    if value.startswith("["):
+        match = _IPV6_AUTHORITY.fullmatch(value)
+        if match is None:
+            return None
+        host, port = match.groups()
+        try:
+            if ipaddress.ip_address(host).version != 6:
+                return None
+        except ValueError:
+            return None
+    else:
+        if value.count(":") > 1:
+            return None
+        host, separator, port = value.partition(":")
+        if not separator:
+            port = None
+        elif not port or not port.isascii() or not port.isdecimal():
+            return None
+    if port is not None and (len(port) > 5 or not 1 <= int(port) <= 65535):
+        return None
+    if host.lower() == "localhost":
+        normalized = "localhost"
+    elif _loopback_address(host):
+        normalized = str(ipaddress.ip_address(host))
+    else:
+        return None
+    return normalized, int(port) if port is not None else None
+
+
+def _local_request(request: Request) -> bool:
+    # The server must leave proxy_headers disabled: ASGI's client/scheme are
+    # the connection boundary, never X-Forwarded-For or Forwarded assertions.
+    if request.client is None or not _loopback_address(request.client.host):
+        return False
+    headers = request.scope.get("headers", ())
+
+    def values(name: bytes) -> list[bytes]:
+        return [value for key, value in headers if key.lower() == name]
+
+    hosts = values(b"host")
+    if len(hosts) != 1:
+        return False
+    try:
+        authority = hosts[0].decode("ascii")
+    except UnicodeDecodeError:
+        return False
+    host_parts = _local_authority(authority)
+    if host_parts is None:
+        return False
+    origins = values(b"origin")
+    if origins:
+        if len(origins) != 1:
+            return False
+        try:
+            origin = origins[0].decode("ascii")
+        except UnicodeDecodeError:
+            return False
+        if any(
+            ord(character) <= 32 or ord(character) == 127 or character == "\\"
+            for character in origin
+        ):
+            return False
+        origin_scheme, separator, origin_authority = origin.partition("://")
+        origin_scheme = origin_scheme.lower()
+        scheme = request.scope.get("scheme", "").lower()
+        if not separator or origin_scheme not in {"http", "https"} or origin_scheme != scheme:
+            return False
+        origin_parts = _local_authority(origin_authority)
+        if origin_parts is None:
+            return False
+        default_port = 443 if scheme == "https" else 80
+        if (host_parts[0], host_parts[1] or default_port) != (
+            origin_parts[0],
+            origin_parts[1] or default_port,
+        ):
+            return False
+    sites = values(b"sec-fetch-site")
+    if len(sites) > 1:
+        return False
+    if sites:
+        site = sites[0].strip().lower()
+        if site == b"cross-site":
+            # A deliberate click on a localhost console link may originate in
+            # an external page. Permit only that top-level static entry; never
+            # apply this navigation exception to API data or operations.
+            return (
+                request.method == "GET"
+                and request.scope.get("path") in {"/", "/console-assets/index.html"}
+                and values(b"sec-fetch-mode") == [b"navigate"]
+                and values(b"sec-fetch-dest") == [b"document"]
+                and values(b"sec-fetch-user") == [b"?1"]
+            )
+        if site not in {b"same-origin", b"same-site", b"none"}:
+            return False
+    return True
 
 
 class WakeRequest(Model):
@@ -62,9 +178,18 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.middleware("http")
     async def response_security(request: Request, call_next):
-        response = await call_next(request)
-        path = request.url.path
-        if path in ("/", "/console-info", "/console-assets") or path.startswith("/console-assets/"):
+        local_denied = settings.auth_mode == "local" and not _local_request(request)
+        response = (
+            JSONResponse(status_code=403, content={"detail": "Local access denied"})
+            if local_denied
+            else await call_next(request)
+        )
+        path = request.scope.get("path", "")
+        if (
+            local_denied
+            or path in ("/", "/console-info", "/console-assets")
+            or path.startswith("/console-assets/")
+        ):
             response.headers["Content-Security-Policy"] = _CONSOLE_CSP
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -86,12 +211,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         ):
             raise HTTPException(401, "Invalid bearer token", headers={"WWW-Authenticate": "Bearer"})
 
-    auth = [Depends(authorize)]
+    auth = [] if settings.auth_mode == "local" else [Depends(authorize)]
 
     @app.get("/", include_in_schema=False)
     def console():
-        # This is a static public shell. Task data and all credentials remain
-        # behind the authenticated JSON API or in the owner's browser memory.
+        # Serve a static shell under the configured access boundary. Task data
+        # stays in the JSON API, and credentials are never embedded in HTML.
         return FileResponse(_WEB_ROOT / "index.html", media_type="text/html")
 
     app.mount(
@@ -110,6 +235,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "version": app.version,
             "tools": list(_TOOL_NAMES),
             "polling_seconds": 3,
+            "auth_mode": settings.auth_mode,
         }
 
     def get_default_model_settings() -> ModelSettings:

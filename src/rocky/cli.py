@@ -33,19 +33,32 @@ def main() -> None:
 
         from rocky.api import create_app
 
-        uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
+        # Local access checks need the actual socket peer and scheme, rather
+        # than values supplied by forwarding headers from a loopback proxy.
+        uvicorn.run(
+            create_app(settings), host=settings.host, port=settings.port, proxy_headers=False
+        )
         return
     if args.command == "worker":
         from rocky.service import run_worker
 
         asyncio.run(run_worker(settings))
         return
-    if not settings.api_token:
+    if settings.auth_mode == "token" and not settings.api_token:
         parser.error("Set ROCKY_API_TOKEN for owner API access")
     base_url = os.environ.get("ROCKY_API_URL", "http://127.0.0.1:8000")
-    headers = {"Authorization": f"Bearer {settings.api_token.get_secret_value()}"}
+    headers = (
+        {"Authorization": f"Bearer {settings.api_token.get_secret_value()}"}
+        if settings.api_token and settings.api_token.get_secret_value()
+        else {}
+    )
     try:
-        with httpx.Client(base_url=base_url, headers=headers, timeout=20) as client:
+        with httpx.Client(
+            base_url=base_url,
+            headers=headers,
+            timeout=20,
+            trust_env=settings.auth_mode != "local",
+        ) as client:
             if args.command == "submit":
                 data = json.loads(args.file.read_text())
                 extra = {"Idempotency-Key": args.idempotency_key} if args.idempotency_key else {}

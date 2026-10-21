@@ -30,6 +30,8 @@ services:
     command: ["rocky", "api"]
     environment: &rocky-environment
       ROCKY_DATABASE_URL: postgresql+psycopg://rocky:${ROCKY_POSTGRES_PASSWORD:?Set ROCKY_POSTGRES_PASSWORD}@postgres/rocky
+      # Container networking uses a non-loopback peer, so require explicit auth.
+      ROCKY_AUTH_MODE: token
       ROCKY_API_TOKEN: ${ROCKY_API_TOKEN:?Set ROCKY_API_TOKEN}
       ROCKY_TEMPORAL_ADDRESS: temporal:7233
       ROCKY_HOST: 0.0.0.0
