@@ -55,6 +55,26 @@ validated IP with TLS hostname validation. Redirects and compression are rejecte
 Filesystem access uses descriptor-relative operations, no-follow opens, atomic
 writes, and link checks. Model-visible files cannot reach control receipts.
 
+## Mission Control boundary
+
+`GET /` and `/console-assets/` serve a public, static console shell. They contain
+no model key, owner token or server-side task data. Before connecting, the console
+labels its seeded local examples as DEMO. A connection uses the owner's
+`ROCKY_API_TOKEN` against the same-origin API; the browser retains it only in page
+memory. It must never request the worker's `OPENAI_API_KEY`.
+
+Goal creation, list/detail/events, wake and cancel keep the existing Bearer
+authentication boundary. Authenticated `/console-info` reports the configured
+model, application version, supported tool names and a three-second polling
+interval; it is not a worker-health signal. API and worker model configuration
+must agree when deployed separately.
+
+Console responses use a self-only Content Security Policy, with data images
+allowed and embedded objects/framing prohibited. No external scripts, fonts or
+styles are required. Entry HTML and JSON responses are marked `no-store`;
+responses also set `nosniff` and `no-referrer` headers. Swagger documentation
+retains its separate asset behavior. Animation respects reduced-motion settings.
+
 ## Budgets and cancellation
 
 Budgets cap planning rounds, attempted model calls, per-call generated tokens,

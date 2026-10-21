@@ -16,6 +16,11 @@ jobs:
       - run: uv sync --frozen
       - run: uv run ruff check .
       - run: uv run ruff format --check .
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: npm run check:ui
+      - run: npm run test:ui
       - run: uv run pytest -q
         env:
           # Official Temporal CLI dev server supports Linux CI without Java.

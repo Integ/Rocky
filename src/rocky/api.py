@@ -3,17 +3,36 @@
 import asyncio
 import secrets
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.staticfiles import StaticFiles
 from pydantic import Field
 from sqlalchemy.exc import IntegrityError
 
 from rocky.config import Settings
 from rocky.models import GoalContract, GoalView, Model
 from rocky.store import Store
+
+_WEB_ROOT = Path(__file__).parent / "web"
+_CONSOLE_CSP = "; ".join(
+    (
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self'",
+        "img-src 'self' data:",
+        "connect-src 'self'",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "frame-ancestors 'none'",
+        "form-action 'self'",
+    )
+)
+_TOOL_NAMES = ("read_file", "write_file", "list_files", "fetch_url")
 
 
 class WakeRequest(Model):
@@ -40,6 +59,23 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     app.state.store = database
     bearer = HTTPBearer(auto_error=False)
 
+    @app.middleware("http")
+    async def response_security(request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path in ("/", "/console-info", "/console-assets") or path.startswith("/console-assets/"):
+            response.headers["Content-Security-Policy"] = _CONSOLE_CSP
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        content_type = response.headers.get("content-type", "")
+        if (
+            path == "/"
+            or content_type.startswith("application/json")
+            or (path.startswith("/console-assets/") and content_type.startswith("text/html"))
+        ):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     def authorize(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]):
         if settings.api_token is None or not settings.api_token.get_secret_value():
             raise HTTPException(503, "Configure ROCKY_API_TOKEN before using the API")
@@ -50,6 +86,27 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise HTTPException(401, "Invalid bearer token", headers={"WWW-Authenticate": "Bearer"})
 
     auth = [Depends(authorize)]
+
+    @app.get("/", include_in_schema=False)
+    def console():
+        # This is a static public shell. Task data and all credentials remain
+        # behind the authenticated JSON API or in the owner's browser memory.
+        return FileResponse(_WEB_ROOT / "index.html", media_type="text/html")
+
+    app.mount(
+        "/console-assets",
+        StaticFiles(directory=_WEB_ROOT, check_dir=False),
+        name="console-assets",
+    )
+
+    @app.get("/console-info", dependencies=auth)
+    def console_info():
+        return {
+            "model": settings.model,
+            "version": app.version,
+            "tools": list(_TOOL_NAMES),
+            "polling_seconds": 3,
+        }
 
     def require_goal(goal_id: str) -> GoalView:
         result = database.get_goal(goal_id)
