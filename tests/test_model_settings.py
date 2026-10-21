@@ -33,6 +33,7 @@ def contract():
 
 def api_settings(**kwargs):
     return Settings(
+        auth_mode="token",
         api_token="model-settings-owner-test",
         model=kwargs.pop("model", "gpt-4.1-mini"),
         reasoning_effort=kwargs.pop("reasoning_effort", None),

@@ -57,17 +57,28 @@ writes, and link checks. Model-visible files cannot reach control receipts.
 
 ## Mission Control boundary
 
-`GET /` and `/console-assets/` serve a public, static console shell. They contain
-no model key, owner token or server-side task data. Before connecting, the console
-labels its seeded local examples as DEMO. A connection uses the owner's
-`ROCKY_API_TOKEN` against the same-origin API; the browser retains it only in page
-memory. It must never request the worker's `OPENAI_API_KEY`.
+`GET /` and `/console-assets/` serve a static console shell containing no model
+key, owner token or server-side task data. The console automatically attempts an
+anonymous same-origin connection on load. DEMO examples are an explicit user
+choice and remain labeled as simulated data.
 
-Goal creation, list/detail/events, wake and cancel keep the existing Bearer
-authentication boundary. Authenticated `/console-info` reports the configured
-model, application version, supported tool names and a three-second polling
-interval; it is not a worker-health signal. API and worker model configuration
-must agree when deployed separately.
+`ROCKY_AUTH_MODE=local` is the default. It requires a loopback bind, checks the
+actual socket peer, validates one trusted Host and a same-origin Origin when
+present, and rejects cross-site Fetch Metadata. The boundary applies to all
+routes, including the static shell. Local requests need no token. The static entry
+allows a narrow user-activated, top-level GET navigation exception for the static
+entry page only; this does not relax the API boundary. The API CLI
+disables proxy-header rewriting; local CLI requests ignore environment proxies.
+This mode grants access to any local process. Reverse proxies or tunnels exposing
+the service externally must use token mode: a real loopback peer cannot prove
+that an upstream proxy is local-only.
+
+Explicit `ROCKY_AUTH_MODE=token` preserves Bearer checks on goal creation,
+list/detail/events, wake/cancel and model settings. Without a configured owner
+token these endpoints fail closed. The browser retains a manually supplied token
+only in page memory and never requests the worker's `OPENAI_API_KEY`.
+`/console-info` reports authentication mode, model defaults, application version,
+supported tools and a three-second polling interval; it is not worker health.
 
 Console responses use a self-only Content Security Policy, with data images
 allowed and embedded objects/framing prohibited. No external scripts, fonts or

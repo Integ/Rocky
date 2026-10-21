@@ -15,6 +15,39 @@ export const TERMINAL = new Set([
   'succeeded', 'failed', 'cancelled', 'budget_exhausted', 'deadline_exceeded',
 ]);
 
+export function authorizationHeaders(token) {
+  if (typeof token !== 'string' || !token.trim() || /^(null|undefined)$/i.test(token.trim())) return {};
+  return { Authorization: `Bearer ${token.trim()}` };
+}
+
+export function connectionView({ mode, authMode, stale = false, error = '' } = {}) {
+  if (mode === 'demo') return {
+    badge: 'DEMO MODE', notice: '演示空间 · 下方为模拟任务，不会提交到真实执行器。',
+    action: '连接本机 →', footer: 'DEMO ENVIRONMENT',
+  };
+  if (mode === 'connecting') return {
+    badge: 'CONNECTING', notice: '正在连接本机 Rocky，读取任务与运行配置…',
+    action: '正在连接…', footer: 'ESTABLISHING LOCAL LINK',
+  };
+  if (mode === 'live') {
+    const local = authMode === 'local';
+    return {
+      badge: stale ? 'LINK DEGRADED' : local ? '本机直连' : 'API CONNECTED',
+      notice: stale ? '链路暂时中断 · 当前显示上次同步的数据，写入操作暂时锁定。系统将自动重试。' : `${local ? '本机直连' : '实时工作区'} · 每 3 秒同步真实任务。执行器在线状态需另行核实。`,
+      action: stale ? '重试连接 ↻' : '刷新数据 ↻',
+      footer: stale ? 'LINK DEGRADED / CACHED SNAPSHOT' : local ? 'LOCAL DIRECT / CONNECTED' : 'OWNER SESSION / CONNECTED',
+    };
+  }
+  if (mode === 'token_required') return {
+    badge: 'LOGIN REQUIRED', notice: '此服务启用了令牌访问模式，请登录后查看真实任务。',
+    action: '连接服务 →', footer: 'AWAITING OWNER LOGIN',
+  };
+  return {
+    badge: 'OFFLINE', notice: error ? `连接未成功 · ${error}` : '已断开 Rocky。点击连接可重新读取本机任务。',
+    action: error ? '重试连接 ↻' : '连接本机 →', footer: 'OFFLINE / DISCONNECTED',
+  };
+}
+
 const REASONING_LABELS = {
   none: '不启用推理（none）',
   minimal: '最少（minimal）',

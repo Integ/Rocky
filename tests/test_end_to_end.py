@@ -84,6 +84,7 @@ def contract() -> dict:
 @pytest.fixture
 def components(tmp_path):
     settings = Settings(
+        auth_mode="token",
         database_url=f"sqlite:///{tmp_path}/goals.db",
         workspace_root=tmp_path / "workspaces",
         api_token="test-owner-token",

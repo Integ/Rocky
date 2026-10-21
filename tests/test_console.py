@@ -23,6 +23,7 @@ def client(tmp_path, monkeypatch):
     # any existing credential or initializing an OpenAI client.
     monkeypatch.setenv("OPENAI_API_KEY", _MODEL_KEY)
     settings = Settings(
+        auth_mode="token",
         database_url=f"sqlite:///{tmp_path / 'console.db'}",
         api_token=SecretStr(_OWNER_TOKEN),
         model="console-configured-model",
@@ -143,13 +144,14 @@ def test_authenticated_console_info_reports_configured_capabilities(client):
     payload = response.json()
     assert {
         key: payload[key]
-        for key in ("model", "reasoning_effort", "version", "tools", "polling_seconds")
+        for key in ("model", "reasoning_effort", "version", "tools", "polling_seconds", "auth_mode")
     } == {
         "model": "console-configured-model",
         "reasoning_effort": None,
         "version": "0.1.0",
         "tools": ["read_file", "write_file", "list_files", "fetch_url"],
         "polling_seconds": 3,
+        "auth_mode": "token",
     }
     assert any(item["id"] == "console-configured-model" for item in payload["models"])
     assert all({"id", "label", "reasoning_efforts"} <= item.keys() for item in payload["models"])

@@ -10,7 +10,9 @@ from rocky.store import Store
 @pytest.fixture
 def api(tmp_path):
     store = Store(f"sqlite:///{tmp_path}/api.db")
-    settings = Settings(api_token="owner-test-token", model="gpt-4.1-mini", reasoning_effort=None)
+    settings = Settings(
+        auth_mode="token", api_token="owner-test-token", model="gpt-4.1-mini", reasoning_effort=None
+    )
     with TestClient(create_app(settings, store)) as client:
         yield client, store
     store.close()
@@ -34,7 +36,7 @@ def test_owner_auth_and_fail_closed_without_configuration(api):
     assert client.get("/goals", headers={"Authorization": "Bearer wrong"}).status_code == 401
     assert client.get("/goals", headers=[(b"authorization", b"Bearer \xff")]).status_code == 401
     store = Store("sqlite://")
-    with TestClient(create_app(Settings(api_token=None), store)) as unconfigured:
+    with TestClient(create_app(Settings(auth_mode="token", api_token=None), store)) as unconfigured:
         assert unconfigured.get("/goals", headers=AUTH).status_code == 503
     store.close()
 

@@ -41,3 +41,23 @@ outputs. See architecture.md for the deployment boundary and future work.
   goal retained its recorded model and effort.
 - The existing local API and worker were restarted with the new code. Temporal,
   the existing completed goal, databases and artifacts were retained.
+
+## Token-free local console
+
+- Full Python suite: **268 passed**, including real Temporal integration tests.
+  Frontend suite: **32 passed**; JavaScript syntax, Ruff and diff checks passed.
+- Local-access tests cover anonymous goal/settings operations, raw peer checks,
+  strict Host validation, duplicate headers, DNS rebinding authorities, origin
+  scheme/host/port matching, IPv6, spoofed proxy headers, Fetch Metadata, and the
+  narrow static-entry navigation exception. Token-mode authentication remains
+  covered explicitly, including failure without a configured credential.
+- The native API was restarted in `local` mode without a provider key or owner
+  token in its environment. Anonymous console-info/goals calls returned 200;
+  cross-origin and cross-site API calls returned 403. Local OpenAPI has no Bearer
+  requirement. Both existing completed goals remained available.
+- Browser acceptance verified initial automatic connection, reload, explicit
+  disconnect/reconnect, and saving the unchanged default model without entering
+  a token. The console showed its local connection and real task data.
+- The real native CLI listed goals with `ROCKY_API_TOKEN` removed from its
+  environment. Docker Compose configuration validation passed in explicit token
+  mode. No additional model calls were used for this change.

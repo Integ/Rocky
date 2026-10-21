@@ -1,10 +1,11 @@
-import { STATUS_META, TERMINAL, summarize, budgetPercent, relativeTime, goalTitle, buildContract, demoGoals, modelCatalog, reasoningChoices, normalizeModelSelection, reasoningLabel, recordedModelSettings, modelSettingsLabel } from './core.js';
+import { STATUS_META, TERMINAL, summarize, budgetPercent, relativeTime, goalTitle, buildContract, demoGoals, modelCatalog, reasoningChoices, normalizeModelSelection, reasoningLabel, recordedModelSettings, modelSettingsLabel, authorizationHeaders, connectionView } from './core.js';
 import { startVisuals } from './visuals.js';
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const ui = {
-  mode: 'demo', token: null, epoch: 0, goals: demoGoals(), selectedId: 'demo-001', filter: 'all',
+  mode: 'connecting', token: null, authMode: null, connecting: false, connectionError: '',
+  epoch: 0, goals: [], selectedId: null, filter: 'all',
   info: null, latency: null, synced: null, stale: false, polling: false, dataVersion: 0,
   detailEvents: [], detailMore: false, historyLoading: false, historyError: '',
   detailVersion: 0, connectionAttempt: 0, submission: null, pending: new Set(),
@@ -42,14 +43,15 @@ function badge(status) {
   return item;
 }
 function abortRequests() { for (const controller of controllers) controller.abort(); controllers.clear(); }
-function clearSession(message = '连接已断开，访问令牌已从页面清除。') {
+function clearSession(message = '已断开 Rocky 连接。点击连接可重新建立链路。', { announce = true } = {}) {
   ui.epoch++; ui.connectionAttempt++; ui.token = null; abortRequests(); ui.polling = false;
-  ui.mode = 'offline'; ui.goals = []; ui.selectedId = null; ui.info = null;
+  ui.mode = 'offline'; ui.authMode = null; ui.connecting = false; ui.connectionError = '';
+  ui.goals = []; ui.selectedId = null; ui.info = null;
   ui.pending.clear(); ui.detailEvents = []; ui.submission = null; ui.stale = false;
   ui.modelRequestVersion++; ui.modelReady = false; ui.modelLoading = false; ui.modelSaving = false; ui.modelUncertain = false; ui.modelDraft = null;
   $('#api-token').value = '';
   for (const dialog of $$('dialog[open]')) dialog.close();
-  render(); toast(message);
+  render(); if (announce && message) toast(message);
 }
 function enterDemo() {
   clearSession('已进入演示空间，未连接真实任务。');
@@ -57,7 +59,7 @@ function enterDemo() {
 }
 
 async function api(path, options = {}) {
-  const token = options.token ?? ui.token;
+  const token = options.anonymous ? null : options.token ?? ui.token;
   const controller = new AbortController();
   controllers.add(controller);
   const timeout = setTimeout(() => controller.abort(), 12000);
@@ -66,11 +68,11 @@ async function api(path, options = {}) {
     const response = await fetch(path, {
       method: options.method || 'GET', cache: 'no-store', credentials: 'omit', redirect: 'error',
       signal: controller.signal,
-      headers: { 'Authorization': `Bearer ${token}`, ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers },
+      headers: { ...authorizationHeaders(token), ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers },
       ...(options.body ? { body: JSON.stringify(options.body) } : {}),
     });
     if (!response.ok) {
-      const messages = { 401: '访问令牌无效，请重新连接。', 403: '当前令牌没有此操作的权限。', 404: '目标不存在，请刷新任务列表。', 409: '任务已结束，或请求与原提交冲突。', 422: '任务参数未通过校验，请检查表单。', 503: '服务尚未配置访问令牌，请检查 ROCKY_API_TOKEN。' };
+      const messages = { 401: '此服务需要登录，请重新连接。', 403: '当前连接不允许此操作，请确认从本机控制台访问。', 404: '目标不存在，请刷新任务列表。', 409: '任务已结束，或请求与原提交冲突。', 422: '任务参数未通过校验，请检查表单。', 503: 'Rocky 服务尚未就绪，请检查运行配置。' };
       const error = new Error(messages[response.status] || `服务返回 HTTP ${response.status}，请稍后重试。`);
       error.status = response.status; throw error;
     }
@@ -93,11 +95,16 @@ function render() {
   const isLive = ui.mode === 'live';
   const isDemo = ui.mode === 'demo';
   const connection = $('#connection-badge');
-  connection.dataset.state = isLive && !ui.stale ? 'running' : 'waiting';
-  connection.replaceChildren(element('span', 'status-dot'), document.createTextNode(isDemo ? 'DEMO MODE' : isLive ? ui.stale ? 'LINK DEGRADED' : 'API CONNECTED' : 'OFFLINE'));
-  $('#connection-button').textContent = isLive ? '断开连接 ↗' : '连接代理 ↗';
-  write('#mode-notice-text', isDemo ? '演示空间 · 下方为模拟任务。连接 Rocky 后显示真实运行数据。' : isLive ? ui.stale ? '链路暂时中断 · 当前显示上次同步的数据，写入操作暂时锁定。' : '实时工作区 · 每 3 秒同步任务状态。API 已连接，执行器在线状态需另行核实。' : '尚未连接 · 输入控制台访问令牌，或进入演示空间。');
-  write('#notice-connect', isDemo ? '建立连接 →' : isLive ? '刷新链路 ↻' : '查看演示 →');
+  const connectionText = connectionView({ mode: ui.mode, authMode: ui.authMode, stale: ui.stale, error: ui.connectionError });
+  connection.dataset.state = ui.connecting ? 'connecting' : isLive && !ui.stale ? 'running' : 'waiting';
+  connection.replaceChildren(element('span', 'status-dot'), document.createTextNode(connectionText.badge));
+  $('#connection-button').textContent = ui.connecting ? '正在连接…' : isLive ? '断开连接 ↗' : ui.mode === 'token_required' ? '登录服务 ↗' : ui.connectionError ? '重试连接 ↻' : '连接本机 ↗';
+  $('#connection-button').disabled = ui.connecting;
+  write('#mode-notice-text', connectionText.notice);
+  write('#notice-connect', connectionText.action);
+  $('#notice-connect').disabled = ui.connecting;
+  $('#notice-demo').classList.toggle('is-hidden', isLive || isDemo);
+  $('#rail-connect').disabled = ui.connecting;
   write('#metric-active', String(summary.active).padStart(2, '0'));
   write('#metric-total', `/ ${String(summary.total).padStart(2, '0')}`);
   write('#metric-calls', number(summary.modelCalls));
@@ -112,21 +119,21 @@ function render() {
   write('#configured-reasoning', isDemo ? '演示配置' : ui.modelUncertain ? '待重新读取' : ui.info ? reasoningLabel(ui.info.reasoning_effort) : '—');
   renderCreateModelSummary();
   if ($('#model-dialog').open) renderModelControls();
-  write('#api-link', isLive ? ui.stale ? 'SYNC LOST' : `CONNECTED / ${ui.latency ?? '—'} MS` : 'NOT CONNECTED');
+  write('#api-link', isLive ? ui.stale ? 'SYNC LOST' : `${ui.authMode === 'local' ? 'LOCAL' : 'CONNECTED'} / ${ui.latency ?? '—'} MS` : ui.connecting ? 'CONNECTING' : 'NOT CONNECTED');
   write('#mission-count', String(ui.goals.length).padStart(2, '0'));
-  write('#core-status-label', isDemo ? 'SIMULATION ACTIVE' : goal ? meta(goal.state.status).code : 'AWAITING MISSION');
+  write('#core-status-label', ui.connecting ? 'ESTABLISHING LINK' : isDemo ? 'SIMULATION ACTIVE' : goal ? meta(goal.state.status).code : 'AWAITING MISSION');
   $('.core-live-status').dataset.state = isDemo ? 'demo' : goal?.state.status || 'offline';
   $('#core-rounds').replaceChildren(document.createTextNode(String(goal?.state.steps || 0).padStart(2, '0') + ' '), element('small', '', '/ ' + (goal?.contract.max_steps || '—')));
   write('#core-goal-id', goal ? goal.goal_id.slice(0, 12).toUpperCase() : 'NO VECTOR');
-  write('#core-goal-label', goal ? goal.state.reason || goalTitle(goal) : '等待你定义下一个目标');
+  write('#core-goal-label', goal ? goal.state.reason || goalTitle(goal) : ui.connecting ? '正在读取本机任务' : isLive ? '等待你定义下一个目标' : '等待建立 Rocky 连接');
   $('#inspect-current').disabled = !goal;
-  write('#mission-caption', isDemo ? '演示数据 · 选择任务查看执行详情' : isLive ? `载入最近 ${ui.goals.length} 个任务（最多 100 个）· ${ui.stale ? '上次同步 ' : '已同步 '}${relativeTime(ui.synced)}` : '连接代理后显示真实任务');
+  write('#mission-caption', isDemo ? '演示数据 · 选择任务查看执行详情' : isLive ? `载入最近 ${ui.goals.length} 个任务（最多 100 个）· ${ui.stale ? '上次同步 ' : '已同步 '}${relativeTime(ui.synced)}` : ui.connecting ? '正在读取真实任务…' : '连接 Rocky 后显示真实任务');
   write('#sync-caption', isDemo ? 'DEMO TELEMETRY / NO LIVE REQUESTS' : isLive ? ui.stale ? 'UPLINK INTERRUPTED / CACHED SNAPSHOT' : 'SNAPSHOT SYNC / 3 SEC INTERVAL' : 'AWAITING SECURE UPLINK');
-  write('#footer-state', isDemo ? 'DEMO ENVIRONMENT' : isLive ? ui.stale ? 'LINK DEGRADED' : 'OWNER SESSION / CONNECTED' : 'OFFLINE / NO CREDENTIALS');
+  write('#footer-state', connectionText.footer);
   renderMissions(); renderEvents();
   if ($('#detail-dialog').open && goal) renderDetail();
   if ($('#artifacts-dialog').open) renderArtifacts();
-  $('#new-goal').disabled = ui.mode === 'offline' || ui.stale;
+  $('#new-goal').disabled = !['live', 'demo'].includes(ui.mode) || ui.stale || ui.connecting;
 }
 
 function renderMissions() {
@@ -147,7 +154,7 @@ function renderMissions() {
     row.addEventListener('click', () => inspectGoal(goal.goal_id));
     return row;
   });
-  if (!nodes.length) nodes.push(element('div', 'empty-state', ui.mode === 'offline' ? '等待连接你的 Rocky' : ui.filter === 'all' ? '轨道已就绪。发起你的第一个任务。' : '此筛选下暂时没有任务。'));
+  if (!nodes.length) nodes.push(element('div', 'empty-state', ui.connecting ? '正在连接本机 Rocky，读取任务…' : !['live', 'demo'].includes(ui.mode) ? '连接 Rocky 后显示真实任务' : ui.filter === 'all' ? '轨道已就绪。发起你的第一个任务。' : '此筛选下暂时没有任务。'));
   list.replaceChildren(...nodes);
 }
 
@@ -273,9 +280,37 @@ async function refresh() {
   } finally { if (epoch === ui.epoch) ui.polling = false; }
 }
 
+async function connectLocalFirst({ announce = true } = {}) {
+  if (ui.connecting) return;
+  const reopenModels = $('#model-dialog').open;
+  clearSession('', { announce: false });
+  const epoch = ui.epoch; const attempt = ++ui.connectionAttempt;
+  ui.mode = 'connecting'; ui.connecting = true; render();
+  try {
+    const info = await api('/console-info', { anonymous: true });
+    if (epoch !== ui.epoch || attempt !== ui.connectionAttempt) return;
+    const goals = await api('/goals?limit=100', { anonymous: true });
+    if (epoch !== ui.epoch || attempt !== ui.connectionAttempt) return;
+    ui.mode = 'live'; ui.authMode = info.data.auth_mode || 'local'; ui.token = null;
+    ui.info = info.data; ui.goals = goals.data; ui.latency = goals.latency;
+    ui.selectedId = ui.goals[0]?.goal_id || null; ui.synced = new Date().toISOString(); ui.stale = false;
+    render(); if (announce) toast('已通过本机直连连接 Rocky。');
+    if (reopenModels) openModelSettings();
+  } catch (error) {
+    if (epoch !== ui.epoch || attempt !== ui.connectionAttempt) return;
+    if (error.status === 401) {
+      ui.mode = 'token_required'; ui.authMode = 'token';
+      write('#connect-error', ''); openDialog('#connect-dialog');
+    } else {
+      ui.mode = 'offline'; ui.connectionError = error.message;
+    }
+  } finally {
+    if (epoch === ui.epoch && attempt === ui.connectionAttempt) { ui.connecting = false; render(); }
+  }
+}
 function showConnection() {
-  if (ui.mode === 'live') { toast('当前已连接。右上角可断开连接并清除页面令牌。'); return; }
-  $('#connect-error').textContent = ''; openDialog('#connect-dialog');
+  if (ui.mode === 'live' && !ui.stale) { toast(ui.authMode === 'local' ? '当前已通过本机直连连接 Rocky。' : '当前服务已连接。'); return; }
+  connectLocalFirst();
 }
 $('#connection-button').addEventListener('click', () => ui.mode === 'live' ? clearSession() : showConnection());
 $('#fullscreen-toggle').addEventListener('click', async () => {
@@ -286,7 +321,8 @@ $('#fullscreen-toggle').addEventListener('click', async () => {
 });
 document.addEventListener('fullscreenchange', () => $('#fullscreen-toggle').setAttribute('aria-label', document.fullscreenElement ? '退出沉浸模式' : '切换沉浸模式'));
 $('#rail-connect').addEventListener('click', showConnection);
-$('#notice-connect').addEventListener('click', () => ui.mode === 'live' ? refresh() : ui.mode === 'offline' ? enterDemo() : showConnection());
+$('#notice-connect').addEventListener('click', () => ui.mode === 'live' && !ui.stale ? refresh() : showConnection());
+$('#notice-demo').addEventListener('click', enterDemo);
 $('#connect-form').addEventListener('submit', async event => {
   event.preventDefault();
   const token = $('#api-token').value.trim(); if (!token) return;
@@ -296,7 +332,8 @@ $('#connect-form').addEventListener('submit', async event => {
   try {
     const [info, goals] = await Promise.all([api('/console-info', { token }), api('/goals?limit=100', { token })]);
     if (attempt !== ui.connectionAttempt || !$('#connect-dialog').open) return;
-    ui.epoch++; ui.token = token; ui.mode = 'live'; ui.info = info.data; ui.goals = goals.data; ui.latency = goals.latency;
+    ui.epoch++; ui.token = info.data.auth_mode === 'local' ? null : token; ui.authMode = info.data.auth_mode || 'token';
+    ui.mode = 'live'; ui.connecting = false; ui.connectionError = ''; ui.info = info.data; ui.goals = goals.data; ui.latency = goals.latency;
     ui.selectedId = ui.goals[0]?.goal_id || null; ui.synced = new Date().toISOString(); ui.stale = false; ui.pending.clear(); ui.submission = null;
     $('#api-token').value = ''; $('#connect-dialog').close(); render(); toast('链路已建立，当前显示真实任务数据。');
     if ($('#model-dialog').open) loadModelSettings();
@@ -457,7 +494,7 @@ $('#model-form').addEventListener('submit', async event => {
 function openCreate() {
   if (ui.modelSaving) { toast('模型设置正在保存，请稍后创建任务。'); return; }
   if (ui.modelUncertain) { openModelSettings(); return; }
-  if (ui.mode === 'offline') { showConnection(); return; }
+  if (!['live', 'demo'].includes(ui.mode)) { showConnection(); return; }
   write('#create-eyebrow', ui.mode === 'demo' ? 'NEW MISSION / DEMO' : 'NEW MISSION / LIVE');
   write('#create-submit', ui.mode === 'demo' ? '创建演示任务 ↗' : '发射任务 ↗');
   write('#create-error', ''); openDialog('#create-dialog');
@@ -551,3 +588,4 @@ const stopVisuals = startVisuals({ canvas: $('#core-canvas'), getStatus: () => u
 window.addEventListener('pagehide', () => { clearInterval(clock); clearInterval(polling); stopVisuals(); abortRequests(); ui.token = null; });
 window.addEventListener('pageshow', event => { if (event.persisted) window.location.reload(); });
 render();
+connectLocalFirst({ announce: false });
