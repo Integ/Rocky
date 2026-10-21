@@ -33,6 +33,7 @@ services:
       ROCKY_API_TOKEN: ${ROCKY_API_TOKEN:?Set ROCKY_API_TOKEN}
       ROCKY_TEMPORAL_ADDRESS: temporal:7233
       ROCKY_HOST: 0.0.0.0
+      ROCKY_MODEL: ${ROCKY_MODEL:-gpt-4.1-mini}
       ROCKY_WORKSPACE_ROOT: /app/data/workspaces
     ports:
       - "127.0.0.1:8000:8000"
@@ -49,7 +50,6 @@ services:
     environment:
       <<: *rocky-environment
       OPENAI_API_KEY: ${OPENAI_API_KEY:?Reuse an existing OPENAI_API_KEY in your environment}
-      ROCKY_MODEL: ${ROCKY_MODEL:-gpt-4.1-mini}
     volumes:
       - rocky-data:/app/data
     depends_on:

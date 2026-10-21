@@ -55,6 +55,26 @@ uv run rocky cancel GOAL_ID
 API 文档在 `http://127.0.0.1:8000/docs`，点击 Authorize 输入 API token。
 `/health` 仅表示 API 进程存活，不表示 worker 已连接。
 
+## Mission Control 控制台
+
+API 启动后，在浏览器打开 [Rocky Mission Control](http://127.0.0.1:8000/)。
+未连接时显示明确标注 **DEMO** 的本地示例任务；这些示例不表示实际执行记录。
+连接后，控制台从同一地址的认证 API 读取真实任务，每三秒刷新一次。
+
+在连接界面输入应用凭证 `ROCKY_API_TOKEN`。这是上文为 Rocky API 设置的 token，
+**不要输入 `OPENAI_API_KEY`**；模型密钥仅供 worker 使用。控制台只在当前页面内存中
+保留应用 token，不写入 localStorage、sessionStorage 或 URL；刷新页面后需要重新连接。
+页面和静态资源不包含服务端凭证或真实任务数据，任务接口仍要求 Bearer 认证。
+
+控制台支持创建目标、查看目标列表与详情、查看事件，以及补充信息唤醒或取消目标。
+创建目标时仍需指定产物、验收标准、工具范围和预算；界面操作使用现有 API 的相同
+持久化与取消规则。已显示的模型名称来自 API 配置，不能据此判断 worker 是否在线。
+在 Docker 或分开配置进程时，请为 API 和 worker 设置相同的 `ROCKY_MODEL`。
+
+界面遵循系统的“减少动态效果”偏好（`prefers-reduced-motion`）。所有脚本、样式和
+字体均来自本机或系统，不依赖外部 CDN。公开页面用于加载控制台，认证任务 JSON 和
+入口页面使用 `Cache-Control: no-store`，避免保留在浏览器缓存中。
+
 ## Docker Compose
 
 需要正在运行的 Docker。保留已导出的 `OPENAI_API_KEY`，设置应用凭证：
