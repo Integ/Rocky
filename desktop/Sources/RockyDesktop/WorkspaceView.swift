@@ -11,6 +11,8 @@ struct WorkspaceView: View {
     @ObservedObject private var runtime: RuntimeManager
     @State private var confirmStop = false
     @State private var deletingGoal: Goal?
+    @FocusState private var composerFocused: Bool
+    @FocusState private var searchFocused: Bool
 
     init(model: AppModel) { self.model = model; self.runtime = model.runtime }
 
@@ -30,9 +32,9 @@ struct WorkspaceView: View {
                 }
             }
             .background(Color.rockyCanvas)
-            if model.showInspector, let goal = model.selected {
+            if model.showInspector {
                 Divider()
-                inspector(goal).frame(width: 264).background(Color.rockySidebar)
+                inspector.frame(width: 264).background(Color.rockySidebar)
             }
         }
         .tint(.rockyAccent)
@@ -52,35 +54,30 @@ struct WorkspaceView: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 9) {
-                Image(systemName: "asterisk").font(.system(size: 24, weight: .heavy)).foregroundStyle(Color.rockyAccent)
+                RockyMark().frame(height: 28)
                 Text("Rocky").font(.system(size: 22, weight: .semibold, design: .rounded))
                 Spacer()
                 Text("本地").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary).padding(.horizontal, 7).padding(.vertical, 3).background(.quaternary, in: Capsule())
             }.padding(.top, 44).padding(.horizontal, 21).padding(.bottom, 25)
-            Button { model.newTask() } label: {
-                Label("新建任务", systemImage: "square.and.pencil").font(.system(size: 13, weight: .medium))
-                    .frame(maxWidth: .infinity, alignment: .leading).padding(11)
-                    .background(Color.rockyCanvas.opacity(0.8), in: RoundedRectangle(cornerRadius: 9))
-                    .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(.primary.opacity(0.07)))
-            }.buttonStyle(.plain).padding(.horizontal, 14)
-            HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.tertiary)
-                TextField("搜索任务", text: $model.search).textFieldStyle(.plain)
-            }.font(.system(size: 12)).padding(11).padding(.horizontal, 8).padding(.top, 7)
-            HStack {
-                Menu {
-                    Button("最近任务") { model.showHistory(archived: false) }
-                    Button("已存档任务") { model.showHistory(archived: true) }
-                } label: {
-                    Text(model.showArchived ? "已存档任务" : model.onlyActive ? "进行中的任务" : "最近任务").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
-                }.menuStyle(.borderlessButton).fixedSize().help("切换最近任务与已存档任务")
+            Button { model.newTask(); composerFocused = true } label: {
+                HStack {
+                    Label("新建任务", systemImage: "square.and.pencil").font(.system(size: 13, weight: .medium))
+                    Spacer()
+                    Text("⌘N").font(.system(size: 10)).foregroundStyle(.tertiary)
+                }.padding(.horizontal, 12).frame(height: 40)
+            }.buttonStyle(CardButtonStyle(cornerRadius: 9, fill: Color.rockyCanvas.opacity(0.8))).padding(.horizontal, 14)
+            searchField.padding(.horizontal, 14).padding(.top, 10)
+            HStack(spacing: 2) {
+                historyTab("最近任务", archived: false)
+                historyTab("已存档", archived: true)
                 Spacer()
                 if !model.showArchived {
-                    Button { model.onlyActive.toggle() } label: { Image(systemName: model.onlyActive ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle") }.buttonStyle(.plain).help("只显示进行中的任务")
+                    Button { model.onlyActive.toggle() } label: { Image(systemName: model.onlyActive ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle") }
+                        .buttonStyle(IconButtonStyle(size: 26, active: model.onlyActive)).labelled(model.onlyActive ? "显示全部任务" : "只显示进行中的任务")
                 }
-            }.padding(.horizontal, 23).padding(.top, 22).padding(.bottom, 10)
+            }.padding(.horizontal, 14).padding(.top, 18).padding(.bottom, 6)
             ScrollView {
-                LazyVStack(spacing: 3) {
+                LazyVStack(spacing: 2) {
                     ForEach(model.visibleGoals) { goal in
                         Button { model.select(goal.id) } label: {
                             HStack(alignment: .center, spacing: 9) {
@@ -91,13 +88,12 @@ struct WorkspaceView: View {
                                 }
                                 Spacer(minLength: 0)
                             }.padding(.horizontal, 12).padding(.vertical, 10).frame(maxWidth: .infinity, alignment: .leading)
-                                .background(model.selectedID == goal.id ? Color.primary.opacity(0.065) : .clear, in: RoundedRectangle(cornerRadius: 8))
-                        }.buttonStyle(.plain).contextMenu {
+                        }.buttonStyle(HoverButtonStyle(cornerRadius: 8, selected: model.selectedID == goal.id)).contextMenu {
                             if goal.state.isTerminal { historyActions(goal) }
                         }
                     }
                     if model.visibleGoals.isEmpty {
-                        Text(model.search.isEmpty ? (model.showArchived ? "暂无已存档任务" : "你的任务会保存在这里") : "没有匹配的任务").font(.system(size: 11)).foregroundStyle(.tertiary).padding(.top, 15)
+                        Text(model.search.isEmpty ? (model.showArchived ? "暂无已存档任务" : model.onlyActive ? "没有进行中的任务" : "你的任务会保存在这里") : "没有匹配的任务").font(.system(size: 11)).foregroundStyle(.tertiary).padding(.top, 15)
                     }
                 }.padding(.horizontal, 12)
             }
@@ -112,30 +108,61 @@ struct WorkspaceView: View {
                     }
                     Spacer()
                     Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.tertiary)
-                }.padding(20).contentShape(Rectangle())
-            }.buttonStyle(.plain).disabled(!runtime.isReady)
+                }.padding(.horizontal, 10).padding(.vertical, 11)
+            }.buttonStyle(HoverButtonStyle(cornerRadius: 9)).padding(10).disabled(!runtime.isReady)
         }.background(Color.rockySidebar)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.tertiary)
+            TextField("搜索任务", text: $model.search).textFieldStyle(.plain).focused($searchFocused)
+            if !model.search.isEmpty {
+                Button { model.search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary) }
+                    .buttonStyle(IconButtonStyle(size: 22)).labelled("清除搜索")
+            }
+        }.font(.system(size: 12)).padding(.leading, 10).padding(.trailing, 5).frame(height: 32)
+            .background(Color.primary.opacity(searchFocused ? 0.07 : 0.045), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(Rectangle()).onTapGesture { searchFocused = true }
+    }
+
+    private func historyTab(_ title: String, archived: Bool) -> some View {
+        let selected = model.showArchived == archived
+        return Button { model.showHistory(archived: archived) } label: {
+            Text(title).font(.system(size: 11, weight: selected ? .semibold : .regular)).foregroundStyle(selected ? .primary : .secondary)
+                .padding(.horizontal, 9).frame(height: 26)
+        }.buttonStyle(HoverButtonStyle(selected: selected))
     }
 
     private var topbar: some View {
         HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(model.selected?.title ?? "新任务").font(.system(size: 13, weight: .medium)).lineLimit(1)
-                Button { model.showSettings = true } label: {
-                    HStack(spacing: 4) { Text(model.selected?.model_settings?.model ?? model.provider?.model ?? "选择模型"); Image(systemName: "chevron.down").font(.system(size: 8)) }.font(.system(size: 10)).foregroundStyle(.secondary)
-                }.buttonStyle(.plain).disabled(!runtime.isReady)
+                if let goal = model.selected {
+                    // A task keeps the model it was submitted with; settings only affect new tasks.
+                    Text(goal.model_settings?.model ?? "未记录模型").font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                        .frame(height: 22).help("任务使用提交时的模型")
+                } else {
+                    Button { model.showSettings = true } label: {
+                        HStack(spacing: 4) { Text(model.provider?.model ?? "选择模型"); Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold)) }
+                            .font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 6).frame(height: 22)
+                    }.buttonStyle(HoverButtonStyle(cornerRadius: 6)).padding(.leading, -6).disabled(!runtime.isReady).help("更改新任务使用的模型")
+                }
             }
             Spacer()
             Circle().fill(runtime.isReady && model.isConnected ? Color.green.opacity(0.8) : Color.orange).frame(width: 6, height: 6)
             Text(runtime.isReady ? (model.isConnected ? "本地运行" : "正在重连") : runtime.status).font(.system(size: 10)).foregroundStyle(.secondary)
-            if model.selected != nil {
+            HStack(spacing: 2) {
                 if let goal = model.selected, goal.state.isTerminal {
-                    Menu { historyActions(goal) } label: { Image(systemName: "ellipsis.circle").font(.system(size: 15)) }
-                        .menuStyle(.borderlessButton).fixedSize().padding(.leading, 10).help("任务操作")
+                    Button { Task { await model.archive(goal, archived: !goal.isArchived) } } label: { Image(systemName: goal.isArchived ? "arrow.uturn.backward" : "archivebox") }
+                        .buttonStyle(IconButtonStyle()).labelled(goal.isArchived ? "移回最近任务" : "存档任务").disabled(!model.canManageHistory(goal))
+                    Button { deletingGoal = goal } label: { Image(systemName: "trash") }
+                        .buttonStyle(IconButtonStyle()).labelled("删除任务").disabled(!model.canManageHistory(goal))
                 }
-                Button { model.showInspector.toggle() } label: { Image(systemName: "sidebar.right").font(.system(size: 15)) }.buttonStyle(.plain).padding(.leading, 14).help("任务详情 ⌥⌘I")
-            }
-        }.padding(.horizontal, 28).frame(height: 74)
+                Button { model.showInspector.toggle() } label: { Image(systemName: "sidebar.right") }
+                    .buttonStyle(IconButtonStyle(active: model.showInspector)).labelled(model.selected == nil ? "新任务设置 ⌥⌘I" : "任务详情 ⌥⌘I")
+            }.padding(.leading, 8)
+        }.padding(.leading, 28).padding(.trailing, 16).frame(height: 74)
     }
 
     @ViewBuilder
@@ -172,7 +199,7 @@ struct WorkspaceView: View {
                         }.font(.system(size: 11)).foregroundStyle(.secondary)
                     }
                     HStack(alignment: .top, spacing: 13) {
-                        rockyMark(size: 19).frame(width: 28).padding(.top, 1)
+                        RockyMark().frame(width: 28, height: 22).padding(.top, -2)
                         VStack(alignment: .leading, spacing: 16) {
                             HStack(spacing: 8) {
                                 Text("Rocky").font(.system(size: 13, weight: .semibold))
@@ -190,7 +217,7 @@ struct WorkspaceView: View {
                                         Button("批准此操作") { Task { await model.approve() } }
                                             .buttonStyle(.borderedProminent)
                                         Button("停止任务", role: .cancel) { Task { await model.cancel() } }
-                                    }.controlSize(.small).disabled(model.pendingCommand != nil || !model.isConnected)
+                                    }.disabled(model.pendingCommand != nil || !model.isConnected)
                                 }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
                                     .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
                             }
@@ -201,7 +228,7 @@ struct WorkspaceView: View {
                                     }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 12)
                                 } label: {
                                     Label("执行记录 · \(executionEntries.count) 条", systemImage: "list.bullet").font(.system(size: 11)).foregroundStyle(.secondary)
-                                }.tint(.secondary)
+                                }
                             }
                             ForEach(goal.state.artifacts) { artifact in
                                 artifactCard(artifact)
@@ -212,9 +239,10 @@ struct WorkspaceView: View {
                         }
                     }
                     if goal.state.isTerminal {
-                        Button { model.newTask() } label: { Label("开始新任务", systemImage: "plus") }.buttonStyle(.bordered).controlSize(.small).padding(.leading, 41)
+                        Button { model.newTask(); composerFocused = true } label: { Label("开始新任务", systemImage: "plus") }.buttonStyle(.bordered).padding(.leading, 41)
                     }
                 }.padding(.horizontal, 42).padding(.bottom, 36).frame(maxWidth: 850).frame(maxWidth: .infinity)
+                    .disclosureGroupStyle(RowDisclosureStyle())
             } else {
                 welcome.frame(maxWidth: .infinity).padding(.top, 100)
             }
@@ -269,7 +297,7 @@ struct WorkspaceView: View {
 
     private var welcome: some View {
         VStack(spacing: 17) {
-            rockyMark(size: 48).padding(.bottom, 5)
+            RockyMark().frame(height: 60).padding(.bottom, 5)
             Text("把想法交给 Rocky。").font(.system(size: 30, weight: .medium, design: .serif))
             Text("一个目标，从规划到交付。\n你的本地 AI 伙伴，会接着把事情做完。")
                 .font(.system(size: 13)).foregroundStyle(.secondary).lineSpacing(6).multilineTextAlignment(.center)
@@ -279,19 +307,21 @@ struct WorkspaceView: View {
                 suggestion("比较不同方案", icon: "square.split.2x2", prompt: "帮我比较以下方案，分析各自的优缺点并给出建议：\n")
             }.padding(.top, 24)
             if model.provider?.isConfigured == false {
-                Button { model.showSettings = true } label: { Label("先连接你的 AI 模型", systemImage: "key.horizontal") }
-                    .buttonStyle(.plain).font(.system(size: 12, weight: .medium)).foregroundStyle(Color.rockyAccent).padding(.top, 12)
+                Button { model.showSettings = true } label: {
+                    Label("先连接你的 AI 模型", systemImage: "key.horizontal").font(.system(size: 12, weight: .medium)).foregroundStyle(Color.rockyAccent)
+                        .padding(.horizontal, 12).frame(height: 30)
+                }.buttonStyle(HoverButtonStyle(cornerRadius: 8)).padding(.top, 12)
             }
         }.padding(.horizontal, 24)
     }
 
     private func suggestion(_ title: String, icon: String, prompt: String) -> some View {
-        Button { model.input = prompt } label: {
+        Button { model.input = prompt; composerFocused = true } label: {
             VStack(alignment: .leading, spacing: 15) {
                 Image(systemName: icon).foregroundStyle(Color.rockyAccent.opacity(0.8))
                 Text(title).font(.system(size: 11))
-            }.frame(width: 122, alignment: .leading).padding(14).background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 12)).overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.primary.opacity(0.07)))
-        }.buttonStyle(.plain)
+            }.frame(width: 122, alignment: .leading).padding(14)
+        }.buttonStyle(CardButtonStyle())
     }
 
     private var composer: some View {
@@ -301,26 +331,30 @@ struct WorkspaceView: View {
             } else {
                 VStack(alignment: .leading, spacing: 12) {
                     TextField(model.selected == nil ? "描述你想完成的事…" : "补充信息，或回复 Rocky…", text: $model.input, axis: .vertical)
-                        .textFieldStyle(.plain).font(.system(size: 14)).lineLimit(3...7).onSubmit { Task { await model.send() } }
-                    HStack(spacing: 12) {
+                        .textFieldStyle(.plain).font(.system(size: 14)).lineLimit(3...7).focused($composerFocused).onSubmit { Task { await model.send() } }
+                    HStack(spacing: 8) {
                         if model.selected == nil {
-                            Button { model.showScope = true } label: { Label("任务范围", systemImage: "slider.horizontal.3").font(.system(size: 10)) }.buttonStyle(.plain).foregroundStyle(.secondary)
-                            Text("文件 · 网络 · Shell").font(.system(size: 10)).foregroundStyle(.tertiary)
+                            Button { model.showScope = true } label: {
+                                Label("任务范围", systemImage: "slider.horizontal.3").font(.system(size: 11)).foregroundStyle(.secondary)
+                                    .padding(.horizontal, 8).frame(height: 28)
+                            }.buttonStyle(HoverButtonStyle()).padding(.leading, -8).help("调整验收标准、交付文件和执行预算")
+                            Text(scopeSummary).font(.system(size: 10)).foregroundStyle(.tertiary).lineLimit(1)
                         } else {
                             Text(model.pendingCommand ?? "补充信息会保存到同一个任务").font(.system(size: 10)).foregroundStyle(.secondary)
                         }
                         Spacer()
                         if let goal = model.selected, !goal.state.isTerminal {
-                            Button { confirmStop = true } label: { Image(systemName: "stop.fill").font(.system(size: 10)).frame(width: 28, height: 28) }.buttonStyle(.plain).help("停止任务").disabled(!model.isConnected || model.pendingCommand != nil)
+                            Button { confirmStop = true } label: { Image(systemName: "stop.fill").font(.system(size: 11)) }
+                                .buttonStyle(IconButtonStyle(size: 32)).labelled("停止任务").disabled(!model.isConnected || model.pendingCommand != nil)
                         }
                         Button { Task { await model.send() } } label: {
-                            Group { if model.isSubmitting { ProgressView().controlSize(.small) } else { Image(systemName: "arrow.up").font(.system(size: 15, weight: .semibold)) } }
-                                .frame(width: 32, height: 32).background(model.canSend ? Color.rockyAccent : Color.primary.opacity(0.09), in: Circle()).foregroundStyle(model.canSend ? .white : .secondary)
-                        }.buttonStyle(.plain).disabled(!model.canSend).keyboardShortcut(.return, modifiers: .command).help("发送 ⌘↩")
+                            if model.isSubmitting { ProgressView().controlSize(.small) } else { Image(systemName: "arrow.up").font(.system(size: 15, weight: .semibold)) }
+                        }.buttonStyle(SendButtonStyle()).disabled(!model.canSend).keyboardShortcut(.return, modifiers: .command).labelled("发送 ⌘↩")
                     }
                 }.padding(17).background(Color.rockyCanvas, in: RoundedRectangle(cornerRadius: 18))
-                    .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Color.primary.opacity(0.14)))
+                    .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Color.primary.opacity(composerFocused ? 0.24 : 0.14)))
                     .shadow(color: .black.opacity(0.035), radius: 10, y: 3)
+                    .contentShape(RoundedRectangle(cornerRadius: 18)).onTapGesture { composerFocused = true }
                 Text("Rocky 会按你设定的范围执行。重要结果请自行核验。")
                     .font(.system(size: 9)).foregroundStyle(.tertiary)
             }
@@ -330,7 +364,7 @@ struct WorkspaceView: View {
     private var startup: some View {
         VStack(spacing: 20) {
             Spacer()
-            rockyMark(size: 44)
+            RockyMark().frame(height: 60)
             Text(runtime.status).font(.system(size: 19, weight: .medium))
             Text(runtime.detail).font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 450)
             if runtime.phase == .failed {
@@ -347,7 +381,8 @@ struct WorkspaceView: View {
             HStack {
                 Label(artifact.path, systemImage: "doc.text").font(.system(size: 11, weight: .medium))
                 Spacer()
-                Button { model.export(artifact.path) } label: { Image(systemName: "square.and.arrow.down") }.buttonStyle(.plain).help("另存为").disabled(!model.isConnected)
+                Button { model.export(artifact.path) } label: { Image(systemName: "square.and.arrow.down") }
+                    .buttonStyle(IconButtonStyle(size: 28)).labelled("另存为").disabled(!model.isConnected)
             }
             if let text = model.artifactContents[artifact.path] {
                 Divider()
@@ -361,33 +396,84 @@ struct WorkspaceView: View {
         }.padding(16).background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 12)).overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.primary.opacity(0.08)))
     }
 
-    private func inspector(_ goal: Goal) -> some View {
+    private var scopeSummary: String {
+        let files = model.draft.files.lines
+        let deliverables = files.isEmpty ? "未设置交付文件" : "交付 " + files.prefix(2).joined(separator: "、") + (files.count > 2 ? " 等" : "")
+        return deliverables + " · " + (model.draft.unlimited ? "不限预算" : "最多 \(model.draft.maxSteps) 步")
+    }
+
+    private var inspector: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 23) {
-                Text("任务详情").font(.system(size: 14, weight: .semibold)).padding(.top, 25)
-                detailSection("执行状态") { Label(goal.state.statusLabel, systemImage: goal.state.status == "succeeded" ? "checkmark.circle" : "circle.dotted").foregroundStyle(statusColor(goal.state)) }
-                detailSection("使用模型") { Text(goal.model_settings?.model ?? "未记录"); Text(goal.model_settings?.provider ?? "OpenAI").foregroundStyle(.secondary) }
-                detailSection("验收标准") { ForEach(goal.contract.acceptance_criteria, id: \.self) { Text("• \($0)").fixedSize(horizontal: false, vertical: true) } }
-                detailSection("执行用量") {
-                    HStack { Text("步骤"); Spacer(); Text("\(goal.state.steps)").foregroundStyle(.secondary) }
-                    HStack { Text("模型调用"); Spacer(); Text("\(goal.state.model_calls) 次").foregroundStyle(.secondary) }
-                    Text("已用 \(goal.state.input_tokens + goal.state.output_tokens) tokens").foregroundStyle(.secondary)
-                    if let limits = goal.contract.limits {
-                        Text("步骤上限：\(limits.max_steps.map(String.init) ?? "不限") · 调用上限：\(limits.max_model_calls.map(String.init) ?? "不限")").foregroundStyle(.secondary)
-                        Text("Token 上限：\(limits.max_tokens.map(String.init) ?? "不限") · 时限：\(limits.timeout_seconds.map { "\($0 / 60) 分钟" } ?? "不限")").foregroundStyle(.secondary)
-                    }
-                }
+                Text(model.selected == nil ? "新任务设置" : "任务详情").font(.system(size: 14, weight: .semibold)).padding(.top, 25)
+                if let goal = model.selected { taskDetails(goal) } else { draftDetails }
                 detailSection("权限范围") {
-                    Label("文件系统访问", systemImage: "folder")
-                    Label("网络访问（不限域名）", systemImage: "network")
-                    Text("支持登录会话与写入请求").foregroundStyle(.secondary)
+                    Label("文件系统读写", systemImage: "folder")
+                    Label("网络访问与登录会话（不限域名）", systemImage: "network")
                     Label("执行 Shell 命令", systemImage: "terminal")
+                    Text("Shell 命令和网络写入会先暂停，等待你批准具体操作。你可以随时停止任务。").foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
-                detailSection("交付文件") { ForEach(goal.contract.deliverables, id: \.path) { Text($0.path).font(.system(size: 11, design: .monospaced)) } }
-                Button { model.openWorkspace() } label: { Label("在 Finder 中打开", systemImage: "folder") }.controlSize(.small)
-                Text(goal.id).font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary).textSelection(.enabled)
+                detailSection("本地运行") {
+                    Label("任务与产物保存在这台 Mac 上", systemImage: "internaldrive")
+                    Label("关闭应用会暂停执行，再次打开时恢复", systemImage: "pause.circle")
+                }
+                if let goal = model.selected {
+                    Text(goal.id).font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary).textSelection(.enabled)
+                }
             }.padding(21)
         }
+    }
+
+    @ViewBuilder
+    private func taskDetails(_ goal: Goal) -> some View {
+        detailSection("执行状态") { Label(goal.state.statusLabel, systemImage: goal.state.status == "succeeded" ? "checkmark.circle" : "circle.dotted").foregroundStyle(statusColor(goal.state)) }
+        detailSection("使用模型") {
+            Text(goal.model_settings?.model ?? "未记录")
+            Text(goal.model_settings?.provider ?? "OpenAI").foregroundStyle(.secondary)
+            Text("提交时确定。修改设置只影响新任务。").foregroundStyle(.tertiary)
+        }
+        detailSection("验收标准") { ForEach(goal.contract.acceptance_criteria, id: \.self) { Text("• \($0)").fixedSize(horizontal: false, vertical: true) } }
+        detailSection("执行用量") {
+            HStack { Text("步骤"); Spacer(); Text("\(goal.state.steps)").foregroundStyle(.secondary) }
+            HStack { Text("模型调用"); Spacer(); Text("\(goal.state.model_calls) 次").foregroundStyle(.secondary) }
+            Text("已用 \(goal.state.input_tokens + goal.state.output_tokens) tokens").foregroundStyle(.secondary)
+            if let limits = goal.contract.limits {
+                Text("步骤上限：\(limits.max_steps.map(String.init) ?? "不限") · 调用上限：\(limits.max_model_calls.map(String.init) ?? "不限")").foregroundStyle(.secondary)
+                Text("Token 上限：\(limits.max_tokens.map(String.init) ?? "不限") · 时限：\(limits.timeout_seconds.map { "\($0 / 60) 分钟" } ?? "不限")").foregroundStyle(.secondary)
+            }
+        }
+        detailSection("交付文件") {
+            ForEach(goal.contract.deliverables, id: \.path) { Text($0.path).font(.system(size: 11, design: .monospaced)) }
+            inspectorAction("在 Finder 中打开", systemImage: "folder") { model.openWorkspace() }
+        }
+    }
+
+    @ViewBuilder
+    private var draftDetails: some View {
+        detailSection("使用模型") {
+            if let provider = model.provider {
+                Text(provider.model.isEmpty ? "尚未选择模型" : provider.model)
+                Text(provider.label + (provider.reasoning_effort.map { " · 思考：\(reasoningLabel($0))" } ?? "")).foregroundStyle(.secondary)
+            } else { Text("正在载入…").foregroundStyle(.secondary) }
+            inspectorAction("更改模型…", systemImage: "slider.horizontal.3") { model.showSettings = true }.disabled(!runtime.isReady)
+        }
+        detailSection("交付要求") {
+            ForEach(model.draft.criteria.lines, id: \.self) { Text("• \($0)").fixedSize(horizontal: false, vertical: true) }
+            ForEach(model.draft.files.lines, id: \.self) { Text($0).font(.system(size: 11, design: .monospaced)) }
+        }
+        detailSection("执行预算") {
+            if model.draft.unlimited { Text("不限制总预算") } else {
+                Text("最多 \(model.draft.maxSteps) 步 · \(model.draft.maxModelCalls) 次模型调用")
+                Text("\(model.draft.maxTokens) tokens · \(model.draft.timeoutMinutes) 分钟").foregroundStyle(.secondary)
+            }
+            inspectorAction("调整任务范围…", systemImage: "list.bullet.rectangle") { model.showScope = true }
+        }
+    }
+
+    private func inspectorAction(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage).font(.system(size: 11)).padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+        }.buttonStyle(CardButtonStyle(cornerRadius: 8)).padding(.top, 4)
     }
 
     private func detailSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
@@ -400,20 +486,13 @@ struct WorkspaceView: View {
     private var scopeSettings: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack { Text("任务范围").font(.title2.weight(.semibold)); Spacer(); Button("完成") { model.showScope = false }.keyboardShortcut(.defaultAction) }
-            Text("先描述目标，其余交给 Rocky。需要时，在这里调整交付要求。") .font(.system(size: 12)).foregroundStyle(.secondary)
+            Text("先描述目标，其余交给 Rocky。需要时，在这里调整交付要求和执行预算。") .font(.system(size: 12)).foregroundStyle(.secondary)
             Form {
                 Section("交付要求") {
                     TextField("验收标准（每行一条）", text: $model.draft.criteria, axis: .vertical).lineLimit(2...4)
                     TextField("产物路径（每行一个）", text: $model.draft.files, axis: .vertical).lineLimit(1...3)
                 }
-                Section("执行权限") {
-                    Label("文件系统读写", systemImage: "folder")
-                    Label("网络访问与登录会话", systemImage: "network")
-                    Label("执行 Shell 命令", systemImage: "terminal")
-                    Text("Rocky 可使用当前账户有权限的文件、网络和命令行，无需逐个添加网站。")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
-                }
-                Section("执行方式") {
+                Section {
                     Toggle("不限制总预算", isOn: $model.draft.unlimited)
                     if !model.draft.unlimited {
                         TextField("最多规划步骤", value: $model.draft.maxSteps, format: .number)
@@ -421,11 +500,11 @@ struct WorkspaceView: View {
                         TextField("最多累计 tokens", value: $model.draft.maxTokens, format: .number)
                         TextField("最长运行时间（分钟）", value: $model.draft.timeoutMinutes, format: .number)
                     }
-                    Text("Shell 命令和网络写入会暂停等待你批准具体操作。你可以随时停止任务。")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                } header: { Text("执行预算") } footer: {
+                    Text("执行权限和审批方式见右侧“新任务设置”。")
                 }
             }.formStyle(.grouped)
-        }.padding(25).frame(width: 540, height: 680)
+        }.padding(25).frame(width: 540, height: 540)
     }
 
     private func errorBanner(_ message: String) -> some View {
@@ -433,11 +512,10 @@ struct WorkspaceView: View {
             Image(systemName: "exclamationmark.circle")
             Text(message).textSelection(.enabled)
             Spacer()
-            Button { model.error = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain)
+            Button { model.error = nil } label: { Image(systemName: "xmark").foregroundStyle(.red) }.buttonStyle(IconButtonStyle(size: 22)).labelled("关闭提示")
         }.font(.system(size: 11)).foregroundStyle(.red).padding(12).background(.red.opacity(0.05), in: RoundedRectangle(cornerRadius: 8)).padding(.horizontal, 36).padding(.bottom, 10)
     }
 
-    private func rockyMark(size: CGFloat) -> some View { Image(systemName: "asterisk").font(.system(size: size, weight: .heavy)).foregroundStyle(Color.rockyAccent) }
     private func statusColor(_ state: RunState) -> Color {
         switch state.status { case "succeeded": .green; case "failed", "budget_exhausted", "deadline_exceeded": .red; case "blocked", "waiting": .orange; case "running", "queued": .rockyAccent; default: .secondary }
     }

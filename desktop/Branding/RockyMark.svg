@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="272 184 480 614">
+  <title>Rocky</title>
+  <defs>
+    <linearGradient id="spark" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#ED955F"/>
+      <stop offset="1" stop-color="#B8573B"/>
+    </linearGradient>
+  </defs>
+  <path fill="#8E9693" d="M276.7 743.1C274.2 695.6 357.6 664 489.6 657.1C621.6 650.2 745.5 670.9 747.7 713C750.3 761.9 671.1 783.8 525 791.4C378.9 799.1 279 786.6 276.7 743.1Z"/>
+  <path fill="url(#spark)" d="M512 188C512 320.16 600 424 712 424C600 424 512 527.84 512 660C512 527.84 424 424 312 424C424 424 512 320.16 512 188Z"/>
+</svg>

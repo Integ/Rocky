@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <title>Rocky</title>
+  <!-- An AI spark balanced on a stone: an agent that works from solid, verified ground. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#3D4946"/>
+      <stop offset="1" stop-color="#161E1D"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#F08A55" stop-opacity="0.32"/>
+      <stop offset="1" stop-color="#F08A55" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="stone" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FBF7EE"/>
+      <stop offset="1" stop-color="#DDD3BE"/>
+    </linearGradient>
+    <linearGradient id="spark" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#FFC27A"/>
+      <stop offset="0.55" stop-color="#EE8550"/>
+      <stop offset="1" stop-color="#C9573A"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)"/>
+  <rect x="101" y="101" width="822" height="822" rx="184" fill="none" stroke="#fff" stroke-opacity="0.08" stroke-width="2"/>
+  <circle cx="512" cy="424" r="300" fill="url(#glow)"/>
+  <path fill="url(#stone)" d="M276.7 743.1C274.2 695.6 357.6 664 489.6 657.1C621.6 650.2 745.5 670.9 747.7 713C750.3 761.9 671.1 783.8 525 791.4C378.9 799.1 279 786.6 276.7 743.1Z"/>
+  <path fill="url(#spark)" d="M512 188C512 320.16 600 424 712 424C600 424 512 527.84 512 660C512 527.84 424 424 312 424C424 424 512 320.16 512 188Z"/>
+</svg>

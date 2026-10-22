@@ -40,8 +40,9 @@ struct SettingsView: View {
                     }
                 }
                 Spacer()
-                Button { dismiss() } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 19)).foregroundStyle(.tertiary) }.buttonStyle(.plain).keyboardShortcut(.cancelAction)
-            }.padding(27)
+                Button { dismiss() } label: { Image(systemName: "xmark") }
+                    .buttonStyle(IconButtonStyle(size: 30)).keyboardShortcut(.cancelAction).labelled("关闭")
+            }.padding(.leading, 27).padding(.trailing, 20).padding(.vertical, 24)
             Divider()
             Form {
                 Section {
@@ -86,24 +87,20 @@ struct SettingsView: View {
                 } header: { Text("API 密钥") } footer: {
                     Text(provider == "ollama" ? "请先启动 Ollama 并下载所选模型。Rocky 会连接你填写的本机地址。" : "密钥存入 macOS 钥匙串。更换服务或 API 地址时，请填写对应的密钥。")
                 }
-                Section {
-                    Picker("思考程度", selection: edited($reasoning)) {
-                        Text(reasoningLabel(nil)).tag("")
-                        ForEach(reasoningOptions, id: \.self) { effort in
-                            Text(reasoningLabel(effort)).tag(effort)
+                // Only offer reasoning when the model exposes adjustable levels.
+                if !reasoningOptions.isEmpty {
+                    Section {
+                        Picker("思考程度", selection: edited($reasoning)) {
+                            Text(reasoningLabel(nil)).tag("")
+                            ForEach(reasoningOptions, id: \.self) { effort in
+                                Text(reasoningLabel(effort)).tag(effort)
+                            }
                         }
+                        .pickerStyle(.menu)
+                    } header: { Text("思考设置") } footer: {
+                        Text("仅显示所选模型支持的档位。更高的思考程度可能增加响应时间和用量。")
                     }
-                    .pickerStyle(.menu)
-                    .disabled(reasoningOptions.isEmpty)
-                } header: { Text("思考设置") } footer: {
-                    Text(reasoningOptions.isEmpty ? "当前模型未提供可配置的思考程度，将使用模型默认。" : "仅显示所选模型支持的档位。更高的思考程度可能增加响应时间和用量。")
                 }
-                Section {
-                    LabeledContent("任务与产物", value: "保存在这台 Mac 上")
-                    LabeledContent("应用关闭后", value: "暂停执行，再次打开时恢复")
-                    Text("设置会用于新任务。已有任务继续使用提交时的模型和服务地址。")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
-                } header: { Text("本地工作") }
             }.formStyle(.grouped).disabled(saving || model.provider == nil)
             Divider()
             HStack(spacing: 10) {
@@ -120,7 +117,7 @@ struct SettingsView: View {
                 }.buttonStyle(.borderedProminent).disabled(!canSave).keyboardShortcut("s", modifiers: .command)
             }.padding(20)
         }
-        .frame(width: 610, height: 650).tint(.rockyAccent)
+        .frame(width: 610, height: 600).tint(.rockyAccent)
         .task { if let value = model.provider { populate(value) } else { await load() } }
         .onChange(of: model.provider?.model) { _, _ in
             if selection.isEmpty, let value = model.provider { message = nil; populate(value) }
