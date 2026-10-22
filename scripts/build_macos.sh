@@ -76,7 +76,7 @@ fi
 chmod 755 "$RESOURCES/runtime/bin/uv" "$RESOURCES/runtime/bin/temporal" "$APP/Contents/MacOS/RockyDesktop"
 if [[ -f "$ROOT/scripts/make_app_icon.swift" ]]; then
   swift -module-cache-path "$ROOT/desktop/.cache/modules" "$ROOT/scripts/make_app_icon.swift" \
-    "$ROOT/desktop/Branding/Rocky.svg" "$STAGE/Rocky.iconset"
+    "$ROOT/desktop/Branding/Rocky-Obsidian.png" "$STAGE/Rocky.iconset"
   iconutil -c icns "$STAGE/Rocky.iconset" -o "$RESOURCES/Rocky.icns"
 fi
 codesign --force --deep --sign - "$APP"
