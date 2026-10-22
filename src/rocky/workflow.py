@@ -17,7 +17,6 @@ from temporalio.exceptions import ActivityError, ApplicationError
 with workflow.unsafe.imports_passed_through():
     from rocky.models import (
         MAX_PARALLEL_ACTIONS,
-        PHASES,
         Action,
         Decision,
         ExecutionStep,
@@ -67,7 +66,6 @@ class GoalWorkflow:
         self._wake_generation = 0
         self._consumed_wake_generation = 0
         self._wake_feedback = ""
-        self._deadline = None
         self._no_progress = 0
         self._seen_progress: set[str] = set()
         self._refreshed_progress: set[str] = set()
@@ -75,15 +73,7 @@ class GoalWorkflow:
         # Fingerprints of the batch the planner saw last, like _last_progress.
         self._last_batch: set[str] = set()
         self._seen_wake_commands: set[str] = set()
-        self._unlimited = False
-        self._execution_boundary = 0
-        self._harness = False
-        self._harness_boundary = 0
-        self._history_maintenance = False
-        self._history_boundary = 0
         self._run_start_cycle = 0
-        self._adaptive = False
-        self._adaptive_boundary = 0
         self._limits = run.contract.limits
         self._approved_action = ""
         # Restore before signal handlers can run in a continued execution. A
@@ -102,22 +92,6 @@ class GoalWorkflow:
             self._wake_feedback = checkpoint.wake_feedback
             self._seen_wake_commands = set(checkpoint.seen_wake_commands)
             self._cancel_requested = checkpoint.cancel_requested
-            self._harness = self._unlimited = self._history_maintenance = True
-            self._adaptive = checkpoint.adaptive
-
-    def _adaptive_execution(self) -> bool:
-        if not self._adaptive:
-            self._adaptive_boundary += 1
-            self._adaptive = workflow.patched(f"adaptive-harness-v1-{self._adaptive_boundary}")
-        return self._adaptive
-
-    def _maintain_history(self) -> bool:
-        if not self._history_maintenance:
-            self._history_boundary += 1
-            self._history_maintenance = workflow.patched(
-                f"bounded-harness-history-v1-{self._history_boundary}"
-            )
-        return self._history_maintenance
 
     def _should_continue_as_new(self) -> bool:
         info = workflow.info()
@@ -142,32 +116,7 @@ class GoalWorkflow:
             wake_feedback=self._wake_feedback,
             seen_wake_commands=sorted(self._seen_wake_commands),
             cancel_requested=self._cancel_requested,
-            adaptive=self._adaptive,
         )
-
-    def _harness_execution(self) -> bool:
-        # A distinct marker at each legacy boundary lets an active history
-        # replay unchanged and adopt the harness as soon as it reaches new work.
-        if not self._harness:
-            self._harness_boundary += 1
-            self._harness = workflow.patched(f"six-phase-harness-v1-{self._harness_boundary}")
-        return self._harness
-
-    def _unlimited_execution(self) -> bool:
-        """Upgrade active histories at their first new execution boundary.
-
-        Pre-upgrade replay must reproduce its old timers and Activity timeouts.
-        Temporal memoizes a missing patch as false for the whole replay, so a
-        separate ID per boundary lets an existing execution adopt unlimited
-        budgets as soon as replay reaches new work. Only the first true patch
-        records a marker; subsequent boundaries use the in-memory flag.
-        """
-        if not self._unlimited:
-            self._execution_boundary += 1
-            self._unlimited = workflow.patched(
-                f"unlimited-task-execution-v1-{self._execution_boundary}"
-            )
-        return self._unlimited
 
     def _check_activity_cancellation(self, error: ActivityError) -> bool:
         cause = error.cause
@@ -178,13 +127,11 @@ class GoalWorkflow:
     def _guard_dispatch(self) -> None:
         if self._cancel_requested:
             raise _StopExecution("cancelled", "Cancelled by the user.")
-        if self._adaptive and self._state.deadline_at:
+        if self._state.deadline_at:
             if workflow.now() >= datetime.fromisoformat(self._state.deadline_at):
                 raise _StopExecution(
                     "deadline_exceeded", "The task's wall-clock limit has elapsed."
                 )
-        if not self._unlimited_execution() and self._remaining() <= 0:
-            raise _StopExecution("deadline_exceeded", "The goal's wall-clock deadline has elapsed.")
 
     @workflow.query(name="state")
     def state(self) -> RunState:
@@ -223,36 +170,14 @@ class GoalWorkflow:
                 self._state.approved_command_prefixes.append(list(pending.command_prefix))
         self._approved_action = pending.fingerprint
 
-    def _remaining(self) -> float:
-        assert self._deadline is not None
-        return (self._deadline - workflow.now()).total_seconds()
-
-    def _stop_reason(self, run: RunInput) -> tuple[Status, str] | None:
-        if self._cancel_requested:
-            return "cancelled", "Cancelled by the user."
-        # These branches only reproduce pre-upgrade history during replay.
-        if not self._unlimited_execution():
-            if self._remaining() <= 0:
-                return "deadline_exceeded", "The goal's wall-clock deadline has elapsed."
-            if self._state.steps >= run.contract.max_steps:
-                return "budget_exhausted", "The planning-step budget has been exhausted."
-            if self._state.model_calls >= run.contract.max_model_calls:
-                return "budget_exhausted", "The model-call budget has been exhausted."
-        if self._no_progress >= run.contract.max_no_progress:
-            return "blocked", "Repeated attempts produced no new progress."
-        return None
-
     def _append_observation(self, observation: Observation) -> None:
-        if self._history_maintenance:
-            # Full results have their own SQL phase/message record. Repeated
-            # snapshots need only a short working set, not the entire transcript.
-            content = observation.content
-            if len(content) > 2000:
-                content = content[:1900] + "\n[Excerpt; full result is in the execution record]"
-            observation = observation.model_copy(update={"content": content})
-            self._state.observations = [*self._state.observations[-5:], observation]
-            return
-        self._state.observations = [*self._state.observations[-19:], observation]
+        # Full results have their own SQL phase/message record. Repeated
+        # snapshots need only a short working set, not the entire transcript.
+        content = observation.content
+        if len(content) > 2000:
+            content = content[:1900] + "\n[Excerpt; full result is in the execution record]"
+        observation = observation.model_copy(update={"content": content})
+        self._state.observations = [*self._state.observations[-5:], observation]
 
     def _take_wake_feedback(self) -> str | None:
         if self._wake_generation == self._consumed_wake_generation:
@@ -271,34 +196,19 @@ class GoalWorkflow:
         generation = self._consumed_wake_generation
         self._state.status = "blocked"
         self._state.reason = reason[:4000]
-        unlimited = self._unlimited_execution()
-        self._state.wake_at = (
-            self._state.deadline_at
-            if self._adaptive
-            else (None if unlimited else self._deadline.isoformat())
-        )
+        self._state.wake_at = self._state.deadline_at
         await self._persist()
         self._guard_dispatch()
-        while True:
-            unlimited = self._unlimited_execution()
-            if unlimited and not self._adaptive and self._state.wake_at is not None:
-                self._state.wake_at = None
-                await self._persist()
-                self._guard_dispatch()
-            try:
-                await workflow.wait_condition(
-                    lambda: self._cancel_requested or self._wake_generation != generation,
-                    timeout=self._timeout(86400 * 365)
-                    if self._adaptive and self._state.deadline_at
-                    else (None if unlimited else timedelta(seconds=self._remaining())),
-                )
-            except TimeoutError:
-                pass
-            self._guard_dispatch()
-            # An old deadline timer is not new user input. When it fires on
-            # upgrade, keep the goal blocked until a genuine wake or cancel.
-            if not self._unlimited_execution() or self._wake_generation != generation:
-                break
+        try:
+            await workflow.wait_condition(
+                lambda: self._cancel_requested or self._wake_generation != generation,
+                timeout=datetime.fromisoformat(self._state.deadline_at) - workflow.now()
+                if self._state.deadline_at
+                else None,
+            )
+        except TimeoutError:
+            pass
+        self._guard_dispatch()
         self._no_progress = 0
         self._state.status = "running"
         self._state.wake_at = None
@@ -316,7 +226,7 @@ class GoalWorkflow:
         )
 
     async def _complete(self, status: Status, reason: str) -> RunState:
-        if self._harness and self._state.execution_step:
+        if self._state.execution_step:
             step = self._state.execution_step
             if step.status == "started":
                 step.status = "failed"
@@ -330,16 +240,13 @@ class GoalWorkflow:
         return self._state.model_copy(deep=True)
 
     def _timeout(self, maximum_seconds: float) -> timedelta:
-        # Per-operation timeouts still recover from hung dependencies; they do
-        # not impose a lifetime limit on the task.
-        if self._adaptive and self._state.deadline_at:
+        # Each operation is bounded by both its own timeout and the task deadline.
+        if self._state.deadline_at:
             remaining = (
                 datetime.fromisoformat(self._state.deadline_at) - workflow.now()
             ).total_seconds()
             return timedelta(seconds=max(0.001, min(remaining, maximum_seconds)))
-        if self._unlimited_execution():
-            return timedelta(seconds=maximum_seconds)
-        return timedelta(seconds=max(0.001, min(self._remaining(), maximum_seconds)))
+        return timedelta(seconds=maximum_seconds)
 
     async def _plan(self, run: RunInput, feedback: str) -> PlanResult:
         # Record before dispatch, including failed/unknown-result attempts.
@@ -409,12 +316,11 @@ class GoalWorkflow:
         )
         await self._persist()
         self._guard_dispatch()
-        if self._adaptive and phase not in run.hook_phases:
+        if phase not in run.hook_phases:
             return
         hook_state = self._state.model_copy(deep=True)
-        if self._history_maintenance:
-            hook_state.execution_step.input = {}
-            hook_state.execution_step.output = {}
+        hook_state.execution_step.input = {}
+        hook_state.execution_step.output = {}
         result = await workflow.execute_activity(
             "rocky.phase",
             PhaseInput(
@@ -436,8 +342,7 @@ class GoalWorkflow:
             cycle.feedback = result.feedback
         if result.handoff_summary is not None:
             self._state.handoff_summary = result.handoff_summary
-            if self._adaptive:
-                self._state.handoff_is_model = True
+            self._state.handoff_is_model = True
             cycle.custom_summary = True
         if result.decision is not None:
             if phase != "decide":
@@ -496,7 +401,7 @@ class GoalWorkflow:
             return feedback
         assert decision.wait_seconds is not None
         wake_at = workflow.now() + timedelta(seconds=decision.wait_seconds)
-        if self._adaptive and self._state.deadline_at:
+        if self._state.deadline_at:
             wake_at = min(wake_at, datetime.fromisoformat(self._state.deadline_at))
         self._state.status = "waiting"
         self._state.wake_at = wake_at.isoformat()
@@ -579,8 +484,7 @@ class GoalWorkflow:
         if decision.kind == "blocked":
             return {"blocked": True, "reason": decision.reason}
         if decision.kind == "finish":
-            if self._adaptive:
-                self._check_limits(model_call=True)
+            self._check_limits(model_call=True)
             cycle.verification = await self._verify(run)
             self._guard_dispatch()
             verification = cycle.verification
@@ -598,7 +502,7 @@ class GoalWorkflow:
         if decision.actions is not None:
             return await self._harness_batch(run, cycle, decision.actions)
         cycle.result = await self._execute(run, decision.action)
-        if self._adaptive and cycle.result.approval_required:
+        if cycle.result.approval_required:
             await self._await_approval(decision, cycle.result)
             cycle.result = await self._execute(run, decision.action)
             self._approved_action = ""
@@ -610,7 +514,7 @@ class GoalWorkflow:
         result = cycle.result
         assert decision.action is not None
         content = result.content
-        if self._adaptive and not result.success:
+        if not result.success:
             content = "\n".join(
                 part for part in (result.error_code, result.retry_hint, result.content) if part
             )[:16000]
@@ -708,14 +612,11 @@ class GoalWorkflow:
         resets the counter.
         """
         if (
-            not self._adaptive
-            or not success
+            not success
             or tool not in _OBSERVATION_TOOLS
             or fingerprint == self._last_progress
             or fingerprint in self._last_batch
             or fingerprint in self._refreshed_progress
-            # Earlier histories counted every repeat; replay must keep doing so.
-            or not workflow.patched("refresh-rolled-out-evidence-v1")
         ):
             return False
         self._refreshed_progress.add(fingerprint)
@@ -842,131 +743,8 @@ class GoalWorkflow:
             "feedback": cycle.feedback,
         }
 
-    async def _run_harness(
-        self, run: RunInput, feedback: str, resume: RunCheckpoint | None = None
-    ) -> RunState:
-        while True:
-            if resume is None and self._adaptive_execution():
-                return await self._run_adaptive(run, feedback)
-            self._guard_dispatch()
-            if self._maintain_history() and resume is None:
-                if self._should_continue_as_new():
-                    # No await between capturing signals and continuing: wake
-                    # generations, cancellation and dedupe travel atomically.
-                    workflow.continue_as_new(
-                        run.model_copy(
-                            update={
-                                "checkpoint": self._checkpoint(feedback),
-                            }
-                        )
-                    )
-                self._state.observations = [
-                    item.model_copy(update={"content": item.content[:2000]})
-                    for item in self._state.observations[-6:]
-                ]
-            if resume is None:
-                self._state.cycle += 1
-            self._state.status = "running"
-            self._state.wake_at = None
-            cycle = _Cycle(
-                feedback=feedback,
-                decision=resume.decision if resume else None,
-                result=resume.tool_result if resume else None,
-                verification=resume.verification if resume else None,
-            )
-            phases = (
-                PHASES[PHASES.index(resume.resume_phase) :]
-                if resume and resume.resume_phase
-                else PHASES
-            )
-            resume = None
-            for phase in phases:
-                output: dict = {}
-                failed = False
-                try:
-                    await self._start_phase(run, phase, cycle)
-                    if phase == "perceive":
-                        if wake_feedback := self._take_wake_feedback():
-                            cycle.feedback = wake_feedback
-                            self._no_progress = 0
-                            self._state.recovery_attempts = 0
-                        output = {
-                            "feedback": cycle.feedback,
-                            "handoff_summary": self._state.handoff_summary,
-                        }
-                    elif phase == "think":
-                        result = await self._plan(run, cycle.feedback)
-                        self._guard_dispatch()
-                        self._state.input_tokens += max(0, result.input_tokens)
-                        self._state.output_tokens += max(0, result.output_tokens)
-                        cycle.decision = result.decision
-                        output = {"decision": result.decision.model_dump(mode="json")}
-                    elif phase == "decide":
-                        cycle.error = cycle.error or self._decision_error(run, cycle.decision)
-                        output = {
-                            "decision": cycle.decision.model_dump(mode="json")
-                            if cycle.decision
-                            else None,
-                            "error": cycle.error,
-                        }
-                        failed = bool(cycle.error)
-                    elif phase == "act":
-                        output = await self._harness_action(run, cycle)
-                        failed = bool(cycle.error or (cycle.result and not cycle.result.success))
-                    elif phase == "reflect":
-                        output = self._reflect_cycle(run, cycle)
-                    elif phase == "complete":
-                        if not cycle.error and cycle.decision and cycle.decision.kind == "blocked":
-                            cycle.blocked_reason = cycle.decision.reason
-                        self._state.reason = (
-                            cycle.blocked_reason
-                            or cycle.feedback
-                            or (cycle.decision.reason if cycle.decision else cycle.error)
-                        )[:4000]
-                        output = {
-                            "passed": bool(
-                                cycle.verification and cycle.verification.passed and not cycle.error
-                            ),
-                            "blocked": bool(cycle.blocked_reason),
-                            "reason": self._state.reason,
-                            "verification": (
-                                cycle.verification.model_dump(mode="json")
-                                if cycle.verification
-                                else None
-                            ),
-                        }
-                except ActivityError as error:
-                    if self._check_activity_cancellation(error):
-                        raise _StopExecution("cancelled", "Cancelled by the user.") from None
-                    # Never persist arbitrary provider or extension exception text.
-                    cycle.error = (
-                        "Planning failed in the think phase; inspect model configuration or availability."
-                        if phase == "think"
-                        else f"The {phase} phase failed; inspect dependency availability or change strategy."
-                    )
-                    output = {"error": cycle.error}
-                    failed = True
-                    # A completion extension runs after reflection. Its failure
-                    # must also reach recovery instead of repeatedly verifying
-                    # a finished artifact forever.
-                    if phase in {"reflect", "complete"}:
-                        output.update(self._reflect_cycle(run, cycle))
-                await self._end_phase(output, failed=failed)
-                self._guard_dispatch()
-            if cycle.verification and cycle.verification.passed and not cycle.error:
-                self._state.handoff_summary = (
-                    "Completed and independently verified: " + cycle.verification.feedback
-                )[:8000]
-                return await self._complete("succeeded", cycle.verification.feedback)
-            if cycle.blocked_reason:
-                feedback = await self._await_external_input(cycle.blocked_reason)
-                self._state.recovery_attempts = 0
-            else:
-                feedback = cycle.feedback
-
     async def _run_adaptive(self, run: RunInput, feedback: str) -> RunState:
         """A small decision loop. Phases label actual work, never dictate a plan."""
-        self._harness = self._unlimited = self._history_maintenance = True
         if self._state.deadline_at is None and self._limits.timeout_seconds is not None:
             self._state.deadline_at = (
                 workflow.now() + timedelta(seconds=self._limits.timeout_seconds)
@@ -1076,189 +854,16 @@ class GoalWorkflow:
     async def run(self, run: RunInput) -> RunState:
         checkpoint = run.checkpoint
         if checkpoint is not None:
-            # Checkpoints are workflow inputs only; never duplicate them into
-            # every model/tool/phase Activity payload in the new run.
+            # Continuation state belongs only to the Workflow input, never to
+            # the model/tool/phase Activity payloads in the new run.
             run = run.model_copy(update={"checkpoint": None})
         else:
             self._state = RunState(goal_id=run.goal_id, status="running")
         self._run_start_cycle = self._state.cycle
-        # Retain the original deadline only to replay pre-upgrade commands.
-        self._deadline = workflow.now() + timedelta(seconds=run.contract.deadline_seconds or 86400)
         feedback = checkpoint.feedback if checkpoint else ""
         try:
             await self._persist()
-            if checkpoint is not None:
-                return await self._run_harness(
-                    run, feedback, checkpoint if checkpoint.resume_phase else None
-                )
-            while True:
-                if self._harness_execution():
-                    return await self._run_harness(run, feedback)
-                if stop := self._stop_reason(run):
-                    if stop[0] == "blocked":
-                        feedback = await self._await_external_input(stop[1])
-                        continue
-                    return await self._complete(*stop)
-                if wake_feedback := self._take_wake_feedback():
-                    feedback = wake_feedback
-                self._state.status = "running"
-                self._state.wake_at = None
-                try:
-                    result = await self._plan(run, feedback)
-                except ActivityError as error:
-                    if self._check_activity_cancellation(error):
-                        return await self._complete("cancelled", "Cancelled by the user.")
-                    # Provider errors must not expose request headers or secrets.
-                    self._no_progress += 1
-                    feedback = "Planning failed. Reconsider once the dependency is available."
-                    self._state.reason = feedback
-                    await self._persist()
-                    continue
-
-                self._state.input_tokens += max(0, result.input_tokens)
-                self._state.output_tokens += max(0, result.output_tokens)
-                decision = result.decision
-                self._state.reason = decision.reason
-                # Signals can arrive while the model Activity is in flight.
-                if self._cancel_requested:
-                    return await self._complete("cancelled", "Cancelled by the user.")
-                if not self._unlimited_execution() and self._remaining() <= 0:
-                    return await self._complete(
-                        "deadline_exceeded", "The goal's wall-clock deadline has elapsed."
-                    )
-
-                if decision.kind == "blocked":
-                    # Legacy stop checks only apply while replaying old history.
-                    stop = self._stop_reason(run)
-                    if stop is not None and stop[0] != "blocked":
-                        return await self._complete(*stop)
-                    feedback = await self._await_external_input(decision.reason)
-                    continue
-
-                if decision.kind == "wait":
-                    seconds = decision.wait_seconds
-                    if seconds is None or seconds < 1 or seconds > run.contract.max_wait_seconds:
-                        self._no_progress += 1
-                        feedback = (
-                            "Provide a positive wait within the contract's maximum wait duration."
-                        )
-                        await self._persist()
-                        continue
-                    generation = self._consumed_wake_generation
-                    if wake_feedback := self._take_wake_feedback():
-                        feedback = wake_feedback
-                        await self._persist()
-                        continue
-                    wait_seconds = (
-                        float(seconds)
-                        if self._unlimited_execution()
-                        else min(float(seconds), self._remaining())
-                    )
-                    self._state.status = "waiting"
-                    wake_at = workflow.now() + timedelta(seconds=wait_seconds)
-                    self._state.wake_at = wake_at.isoformat()
-                    await self._persist()
-                    # Projection persistence must not extend an absolute wake
-                    # if the database was temporarily slow.
-                    wait_seconds = (wake_at - workflow.now()).total_seconds()
-                    if wait_seconds <= 0:
-                        feedback = "The durable wait ended; check current conditions."
-                        continue
-                    try:
-                        await workflow.wait_condition(
-                            lambda generation=generation: (
-                                self._cancel_requested or self._wake_generation != generation
-                            ),
-                            timeout=timedelta(seconds=wait_seconds),
-                        )
-                    except TimeoutError:
-                        pass
-                    feedback = (
-                        self._take_wake_feedback()
-                        or "The durable wait ended; check current conditions."
-                    )
-                    continue
-
-                if decision.kind == "finish":
-                    if (
-                        not self._unlimited_execution()
-                        and self._state.model_calls >= run.contract.max_model_calls
-                    ):
-                        return await self._complete(
-                            "budget_exhausted",
-                            "No model-call budget remains for independent verification.",
-                        )
-                    try:
-                        verification = await self._verify(run)
-                    except ActivityError as error:
-                        if self._check_activity_cancellation(error):
-                            return await self._complete("cancelled", "Cancelled by the user.")
-                        self._no_progress += 1
-                        feedback = "Verification could not complete; the goal is not verified."
-                        await self._persist()
-                        continue
-                    self._state.input_tokens += max(0, verification.input_tokens)
-                    self._state.output_tokens += max(0, verification.output_tokens)
-                    self._state.artifacts = verification.artifacts
-                    if self._cancel_requested:
-                        return await self._complete("cancelled", "Cancelled by the user.")
-                    if not self._unlimited_execution() and self._remaining() <= 0:
-                        return await self._complete(
-                            "deadline_exceeded", "The goal's wall-clock deadline has elapsed."
-                        )
-                    if verification.passed:
-                        return await self._complete("succeeded", verification.feedback)
-                    self._no_progress += 1
-                    feedback = verification.feedback[:4000]
-                    self._append_observation(
-                        Observation(
-                            step=self._state.steps,
-                            tool="verify",
-                            success=False,
-                            content=feedback,
-                        )
-                    )
-                    await self._persist()
-                    continue
-
-                if decision.action is None:
-                    self._no_progress += 1
-                    feedback = "An act decision requires a concrete action."
-                    await self._persist()
-                    continue
-                try:
-                    tool_result = await self._execute(run, decision.action)
-                except ActivityError as error:
-                    if self._check_activity_cancellation(error):
-                        return await self._complete("cancelled", "Cancelled by the user.")
-                    tool_result = ToolResult(
-                        success=False,
-                        content="The tool failed after bounded retries; verify its state before trying again.",
-                    )
-                self._append_observation(
-                    Observation(
-                        step=self._state.steps,
-                        tool=decision.action.tool,
-                        success=tool_result.success,
-                        content=tool_result.content,
-                        progress_key=tool_result.progress_key,
-                    )
-                )
-                by_path = {artifact.path: artifact for artifact in self._state.artifacts}
-                by_path.update({artifact.path: artifact for artifact in tool_result.artifacts})
-                self._state.artifacts = list(by_path.values())[-20:]
-                progress_key = f"{decision.action.tool}:{tool_result.progress_key}"
-                if (
-                    tool_result.success
-                    and tool_result.progress_key
-                    and progress_key not in self._seen_progress
-                ):
-                    self._no_progress = 0
-                    self._seen_progress.add(progress_key)
-                else:
-                    self._no_progress += 1
-                feedback = "" if tool_result.success else tool_result.content[:4000]
-                await self._persist()
+            return await self._run_adaptive(run, feedback)
         except _StopExecution as stop:
             return await self._complete(stop.status, stop.reason)
         except asyncio.CancelledError:

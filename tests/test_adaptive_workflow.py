@@ -4,10 +4,10 @@ import asyncio
 from dataclasses import dataclass, field
 
 import pytest
-from temporalio import activity, workflow
+from temporalio import activity
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import ApplicationError
-from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
+from temporalio.worker import Replayer, Worker
 from test_workflow import Activities, act, finish, request
 from test_workflow import temporal_env as _temporal_env
 
@@ -18,8 +18,6 @@ from rocky.models import (
     ExecutionLimits,
     PlanInput,
     PlanResult,
-    RunInput,
-    RunState,
     TaskProgress,
     ToolInput,
     ToolResult,
@@ -357,45 +355,6 @@ async def test_model_handoff_and_progress_survive_actions_and_continue_as_new(te
     assert result.model_calls == 10
 
 
-@workflow.defn(name="RockyGoal")
-class SixPhaseHistoryWorkflow(GoalWorkflow):
-    """Capture real pre-adaptive commands without the new version marker."""
-
-    def _adaptive_execution(self) -> bool:
-        return False
-
-    @workflow.run
-    async def run(self, run: RunInput) -> RunState:
-        return await super().run(run)
-
-
-async def test_production_workflow_replays_captured_six_phase_history(temporal_env):
-    activities = Activities(decisions=[act(), finish()])
-    run = request()
-    async with Worker(
-        temporal_env.client,
-        task_queue=run.goal_id,
-        workflows=[SixPhaseHistoryWorkflow],
-        activities=activities.registered(),
-        workflow_runner=UnsandboxedWorkflowRunner(),
-    ):
-        handle = await temporal_env.client.start_workflow(
-            SixPhaseHistoryWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
-        )
-        result = await asyncio.wait_for(handle.result(), timeout=20)
-    assert result.status == "succeeded"
-    assert [item.phase for item in activities.phases] == [
-        "perceive",
-        "think",
-        "decide",
-        "act",
-        "reflect",
-        "complete",
-    ] * 2
-    replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
-    await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)
-
-
 @dataclass
 class BatchActivities(Activities):
     """Each read waits until the whole batch is in flight: serial dispatch deadlocks."""
@@ -692,43 +651,6 @@ async def test_refresh_allowance_survives_continue_as_new(temporal_env):
     assert result.status == "succeeded"
     assert activities.plan_run_ids[7] != activities.plan_run_ids[8]
     assert recovered(activities) == [10]
-
-
-@workflow.defn(name="RockyGoal")
-class PreRefreshWorkflow(GoalWorkflow):
-    """Capture adaptive commands recorded while every repeated read was a stall."""
-
-    def _refreshes_evidence(self, tool, success, fingerprint) -> bool:
-        return False
-
-    @workflow.run
-    async def run(self, run: RunInput) -> RunState:
-        return await super().run(run)
-
-
-async def test_production_workflow_replays_history_recorded_before_refreshes(temporal_env):
-    activities = ReadActivities(
-        decisions=[read("a.txt"), read("b.txt"), read("a.txt"), read("b.txt")]
-    )
-    run = request(max_no_progress=1)
-    async with Worker(
-        temporal_env.client,
-        task_queue=run.goal_id,
-        workflows=[PreRefreshWorkflow],
-        activities=activities.registered(),
-        workflow_runner=UnsandboxedWorkflowRunner(),
-    ):
-        handle = await temporal_env.client.start_workflow(
-            PreRefreshWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
-        )
-        # The old rule: recovery after the first re-read, blocked after the second.
-        await asyncio.wait_for(activities.blocked.wait(), timeout=15)
-        await handle.signal(PreRefreshWorkflow.cancel)
-        result = await asyncio.wait_for(handle.result(), timeout=15)
-    assert result.status == "cancelled"
-    assert len(activities.plans) == 4
-    replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
-    await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)
 
 
 async def test_batched_rereads_follow_the_refresh_rule(temporal_env):

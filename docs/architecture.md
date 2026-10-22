@@ -37,11 +37,12 @@ holds API projections and submission/command outboxes. Files and tool receipts
 live on a separate persistent workspace volume. Back up all three together;
 deleting any one cannot be repaired by merely restarting the worker.
 
-## Model-driven execution harness
+## Single model-driven execution loop
 
-The model chooses one useful action, wait, finish or blocked decision at a time.
-The harness enforces limits, persists each checkpoint and feeds actionable
-failures back to the next planning call. It does not impose a six-stage plan.
+The adaptive loop is the only execution loop. The model chooses an action, wait,
+finish or blocked decision at a time; an action may batch independent read-only
+operations. The harness enforces limits, persists each checkpoint and feeds
+actionable failures back to the next planning call. It does not impose a six-stage plan.
 Default rounds record `think` followed by the actual `act` or `complete` work;
 `perceive`, `decide`, `reflect` and `complete` remain optional extension points.
 No empty hook Activities are dispatched. Failed decisions are recorded and
@@ -99,13 +100,15 @@ The durable handoff approach is informed by Anthropic's
 [long-running agent harness](https://www.anthropic.com/research/effective-harnesses-for-long-running-agents)
 and extension hooks by LangChain's
 [custom harness middleware](https://www.langchain.com/blog/how-to-build-a-custom-agent-harness).
-Temporal version markers let old histories replay their original commands and
-adopt the adaptive loop at safe boundaries. Previously blocked tasks still need
-real owner input; deployment does not synthesize a wake or repeat external effects.
+This v0.1 release does not support replaying unfinished Temporal executions from
+the former legacy or six-phase loops, or earlier versions of the adaptive loop.
+End old running, waiting or blocked executions before upgrading and submit new
+goals to continue their objectives. Stored task records remain readable. No
+automatic history migration is provided; records and workspace files are retained.
+Replays and worker restarts within this execution version use the same single loop.
 
-History maintenance has its own boundary version markers, so pre-maintenance
-six-phase histories also replay unchanged. Active state keeps six observations
-of at most 2000 characters each while SQL retains complete tool results. A full
+Continuation checkpoints are captured only between complete rounds. Active state
+keeps six observations of at most 2000 characters each while SQL retains complete tool results. A full
 round boundary continues as a new Temporal run after 8 rounds, 8 MB or 1500 events,
 or when Temporal recommends it. Task ID, cumulative counters/revisions, recovery
 state, pending wake generations and command deduplication survive in a bounded
@@ -119,8 +122,8 @@ timeouts update the projection under an exact revision check, and a recheck of
 the run ID protects a recovered execution. Reads of engine failure diagnostics
 use close events only. The history-size termination message is recognized and
 sanitized; arbitrary failure text is never copied into task status. Reconciliation
-does not restart closed tasks. A completed action checkpoint can resume at
-reflection without repeating its external effect when explicitly recovered.
+does not restart closed tasks. There is no manual mid-phase checkpoint recovery
+path; normal worker restart replays this version's durable execution history.
 
 ## Lifecycles
 
@@ -283,9 +286,10 @@ runtime waits for both API health and worker readiness before accepting work.
 `contract.limits` defaults to 100 planning steps, 150 model calls, 500000 total
 input/output tokens and a 3600-second task timeout. Each field accepts null to
 explicitly disable that limit. Legacy flat max_steps/max_model_calls/
-max_output_tokens/deadline_seconds fields remain decodable historical metadata;
-the adaptive loop reads limits only. Checkpoints preserve cumulative counters
-and the original deadline across continue-as-new and worker restart. Input and
+max_output_tokens/deadline_seconds fields remain decode-only metadata so stored
+goal records remain readable; the single execution loop reads limits only.
+Checkpoints preserve cumulative counters and the original deadline across
+continue-as-new and worker restart. Input and
 approval waits also observe that deadline.
 
 Observed token usage is checked before further calls/actions. An in-flight

@@ -214,3 +214,23 @@ Validated on 2026-10-21 (America/Vancouver):
 - In the first run, auto-approval executed a model command whose backtick substitution
   ran `brew install atlas-cli`; the formula does not exist and nothing was installed.
   Command substitution in approved commands is not yet flagged.
+
+## Single execution loop
+
+Validated on 2026-10-22 (America/Vancouver):
+
+- Removed the legacy and fixed six-phase loops, all Temporal patch markers and
+  their runtime switches. `workflow.py` now has one adaptive execution loop and
+  decreased from 1290 to 895 lines. Continuation checkpoints retain only state
+  needed between complete rounds.
+- Python suite: **624 passed** across batches: 551 non-integration tests, 60
+  workflow tests and 13 other integration tests. Tests used the cached local
+  Temporal test service, local HTTP fixtures and mocked model transports; no
+  live model calls were made. HTTP fixtures require local port access outside
+  the restricted execution sandbox. Existing dependency warnings remain.
+- Current-version replay, worker replacement, cancellation, durable waits,
+  approval, budgets, recovery, evidence refresh and continuation remain covered.
+  The replay test also checks that new histories contain no patch markers.
+- Ruff lint/format and diff whitespace checks passed. Unfinished histories from
+  earlier execution versions are no longer supported; stored task records and
+  workspace files are retained, without automatic history migration.

@@ -64,8 +64,8 @@ class GoalContract(Model):
     allowed_tools: list[ToolName] = Field(default_factory=lambda: list(TOOL_NAMES))
     allowed_domains: list[str] = Field(default_factory=list, max_length=30)
     limits: ExecutionLimits = Field(default_factory=ExecutionLimits)
-    # Retained for decoding old clients and histories. Execution ignores these
-    # historical values: every task has unlimited steps, calls and runtime.
+    # Decode-only metadata retained so stored goal records remain readable.
+    # Current execution uses limits exclusively and ignores these flat values.
     max_steps: int | None = Field(default=None, ge=1, json_schema_extra={"deprecated": True})
     max_model_calls: int | None = Field(default=None, ge=1, json_schema_extra={"deprecated": True})
     max_output_tokens: int | None = Field(
@@ -322,7 +322,7 @@ class WakeCommand(Model):
 
 
 class RunCheckpoint(Model):
-    """Bounded continuation state; full transcripts remain in SQL storage."""
+    """Continuation state captured between rounds; full transcripts remain in SQL."""
 
     state: RunState
     feedback: str = ""
@@ -336,12 +336,6 @@ class RunCheckpoint(Model):
     wake_feedback: str = ""
     seen_wake_commands: list[str] = Field(default_factory=list)
     cancel_requested: bool = False
-    # Operator recovery may finish the remaining phases of a saved cycle.
-    resume_phase: Phase | None = None
-    decision: Decision | None = None
-    tool_result: ToolResult | None = None
-    verification: VerificationResult | None = None
-    adaptive: bool = False
 
 
 RunInput.model_rebuild()
