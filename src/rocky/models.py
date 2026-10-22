@@ -1,5 +1,6 @@
 """Shared API and durable workflow contracts; no I/O in this module."""
 
+import json
 from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal, get_args
 
@@ -9,9 +10,18 @@ from rocky.inference import ModelSettings
 
 Criterion = Annotated[str, StringConstraints(min_length=1, max_length=2000)]
 ToolName = Literal[
-    "read_file", "write_file", "list_files", "fetch_url", "http_request", "run_command"
+    "read_file",
+    "write_file",
+    "list_files",
+    "fetch_url",
+    "http_request",
+    "run_command",
+    "append_file",
+    "edit_file",
 ]
 TOOL_NAMES = get_args(ToolName)
+MAX_PARALLEL_ACTIONS = 8
+SAFE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 class Model(BaseModel):
@@ -84,6 +94,26 @@ class Action(Model):
     content: str | None = None
 
 
+def read_only_action(action: Action) -> bool:
+    """Whether an action only observes state, so it may run concurrently.
+
+    Downloads (an HTTP action with a path) write a local file and are excluded.
+    Unparseable HTTP options are not read-only; validation reports them later.
+    """
+    if action.tool in {"read_file", "list_files"}:
+        return True
+    if action.tool not in {"fetch_url", "http_request"} or action.path is not None:
+        return False
+    try:
+        options = json.loads(action.content) if action.content is not None else {}
+    except (ValueError, TypeError, RecursionError):
+        return False
+    if not isinstance(options, dict):
+        return False
+    method = options.get("method", "GET")
+    return isinstance(method, str) and method.upper() in SAFE_HTTP_METHODS
+
+
 ProgressItem = Annotated[str, StringConstraints(min_length=1, max_length=240)]
 
 
@@ -97,6 +127,8 @@ class Decision(Model):
     kind: Literal["act", "wait", "finish", "blocked"]
     reason: str = Field(max_length=2000)
     action: Action | None = None
+    # Independent read-only actions dispatched concurrently in one step.
+    actions: list[Action] | None = Field(default=None, max_length=MAX_PARALLEL_ACTIONS)
     wait_seconds: int | None = None
     handoff_summary: str | None = Field(default=None, max_length=4000)
     task_progress: TaskProgress | None = None
@@ -157,6 +189,8 @@ class PendingApproval(Model):
     operation_id: str
     action: Action
     reason: str
+    # Leading command words the owner may approve for the rest of the task.
+    command_prefix: list[str] | None = None
 
 
 class RunState(Model):
@@ -181,6 +215,7 @@ class RunState(Model):
     task_progress: TaskProgress = Field(default_factory=TaskProgress)
     pending_approval: PendingApproval | None = None
     deadline_at: str | None = None
+    approved_command_prefixes: list[list[str]] = Field(default_factory=list)
 
 
 class PlanInput(Model):
@@ -201,6 +236,8 @@ class ToolInput(Model):
     operation_id: str
     action: Action
     approved_action_fingerprints: list[str] = Field(default_factory=list)
+    # Owner grants from task-scoped approvals; only owner signals add entries.
+    approved_command_prefixes: list[list[str]] = Field(default_factory=list)
 
 
 class ToolResult(Model):
@@ -211,6 +248,7 @@ class ToolResult(Model):
     error_code: str = ""
     retry_hint: str = ""
     approval_required: str = ""
+    approval_command_prefix: list[str] = Field(default_factory=list)
 
 
 class VerifyInput(Model):

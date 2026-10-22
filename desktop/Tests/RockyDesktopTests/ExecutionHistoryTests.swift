@@ -181,6 +181,21 @@ final class ExecutionHistoryTests: XCTestCase {
         XCTAssertTrue(ExecutionEntry.build(from: []).isEmpty)
     }
 
+    func testParallelReadBatchShowsEveryObservationFromItsStep() {
+        let earlier = observation(step: 1, content: "旧结果")
+        let batch = ["a.py", "b.py", "c.py"].map {
+            ToolObservation(step: 2, tool: "read_file", success: true, content: $0, progress_key: $0)
+        }
+        var batchEvent = event(2, reservedStep: 2, reason: "并行读取文件")
+        batchEvent.state.observations = [earlier] + batch
+        let entries = ExecutionEntry.build(from: [event(1, reservedStep: 1, reason: "读取", observation: earlier), batchEvent])
+
+        XCTAssertEqual(entries.map { $0.observation?.content }, ["旧结果", "a.py", "b.py", "c.py"])
+        XCTAssertEqual(Set(entries.map(\.id)).count, entries.count)
+        XCTAssertEqual(entries[1].id, 2)
+        XCTAssertEqual(entries.dropFirst().map(\.firstStep), [2, 2, 2])
+    }
+
     private func observation(step: Int, success: Bool = true, content: String = "结果未变化", progressKey: String? = nil) -> ToolObservation {
         ToolObservation(step: step, tool: "http_request", success: success, content: content, progress_key: progressKey)
     }

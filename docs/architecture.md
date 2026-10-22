@@ -10,12 +10,21 @@ ordinary code owns state, execution scope, usage and completion gates.
    `REJECT_DUPLICATE`. If start succeeds but database acknowledgement fails,
    retry finds the same execution instead of starting a second goal.
 3. Model and verifier calls record attempted usage in the Workflow before dispatch.
-   SDK retries and model Activity retries are disabled. A failed/unknown-result
-   attempt remains included in the usage counters.
+   SDK retries are disabled. Model Activities retry (3 attempts, honoring
+   `Retry-After`) only for failures that produced no model output: HTTP 429,
+   408/409, 5xx/529 overload and failed connections. Read timeouts and completed
+   but unusable responses are `ModelDecisionError`s and are never repeated. One
+   logical call counts once in the usage counters, however many attempts it took.
+   Each request may take up to 300 seconds; the response cap
+   (`ROCKY_PLAN_RESPONSE_TOKENS`, default 16384, doubled for high reasoning effort)
+   includes reasoning tokens, and hitting it returns actionable feedback.
+   The instructions and schema form an identical prefix on every step: Anthropic
+   requests mark it with `cache_control`, official OpenAI requests send a stable
+   `prompt_cache_key`, and provider clients are reused across steps.
 4. Tools run as separate Activities. A per-goal file lock and a request-fingerprinted,
    atomic receipt make single-host retries idempotent. A file write completed
-   before its receipt can be safely replayed with the same content. HTTP requests
-   and shell commands write a durable dispatch marker first. If interrupted before
+   before its receipt can be safely replayed with the same content. HTTP requests,
+   shell commands, `append_file` and `edit_file` write a durable dispatch marker first. If interrupted before
    their final receipt, retries report an unknown outcome instead of repeating an
    external side effect; the planner must inspect state before a new operation.
 5. Every snapshot has a monotonic revision. The projection uses an atomic
@@ -138,7 +147,7 @@ and criteria. It cannot prove factual truth or browse sources independently;
 research deliverables still require appropriate evidence and human review.
 
 External text never grants permissions. The owner configures `ROCKY_TOOL_ACCESS`,
-which defaults to `full`. In full mode all six tools are available even when an
+which defaults to `full`. In full mode all eight tools are available even when an
 existing goal records narrower legacy allowlists. File tools accept absolute,
 relative, hidden and symlink paths. Shell commands run as the current OS user.
 HTTP requests accept all methods and arbitrary HTTP(S) destinations, including
@@ -154,10 +163,29 @@ model calls. Owner approval binds the goal, operation ID and exact action
 fingerprint; it resumes that same operation. Changed parameters require a new
 approval. An approval outbox and command deduplication survive delivery retries.
 The macOS client displays the operation with approve/cancel controls; the API
-uses `POST /goals/{id}/approve` with the current fingerprint. Only the owner's
+uses `POST /goals/{id}/approve` with the current fingerprint. A pending shell
+command also carries a `command_prefix` (for example `uv run pytest`); approving
+with `"scope": "task"` additionally lets later commands in the same task that
+start with that prefix run without pausing. `ROCKY_AUTO_APPROVE_COMMANDS`
+(comma-separated or JSON list, e.g. `ls,git status,uv run pytest`) is an
+owner allowlist of such prefixes for every task. Prefixes only match *simple*
+commands: anything containing `;`, `&`, `|`, `<`, `>`, `(`, `)`, `$`, backticks
+or a newline always needs exact approval, and wrappers such as `sudo`, `env` or
+`xargs` and inline interpreter code (`python -c`) are never offered as a class.
+A prefix approves what follows it: `python3 build.py` approves any arguments to
+that script, including after the script changes. Only the owner's
 explicit `ROCKY_APPROVAL_MODE=trusted` configuration bypasses the gate. The gate
 classifies tool/method, so it cannot recognize a mutating GET endpoint; ordinary
 file writes retain the selected filesystem policy.
+
+A decision may carry `actions`: up to 8 independent read-only actions
+(`read_file`, `list_files`, `fetch_url`, GET/HEAD/OPTIONS `http_request` without
+a download path). They run as concurrent Activities with operation IDs
+`step-NNNN-k`, share the goal lock in shared mode, and each produces its own
+observation and tool message. Writes, commands and mutations stay single
+actions. `append_file` adds text to a file and `edit_file` applies exact
+`old_text` → `new_text` replacements atomically, so long reports and small fixes
+no longer require rewriting a whole file in one response.
 
 Tool arguments are validated before dispatch, including unused fields and HTTP
 option types. Failures return safe `error_code` and `retry_hint` fields without

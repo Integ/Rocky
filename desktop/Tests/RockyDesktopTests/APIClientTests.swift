@@ -71,6 +71,25 @@ final class APIClientTests: XCTestCase {
         try await api.approve("goal-1", fingerprint: fingerprint)
     }
 
+    func testTaskScopedApprovalSendsExplicitScope() async throws {
+        let fingerprint = String(repeating: "b", count: 64)
+        InterceptingProtocol.handle = { request in
+            XCTAssertEqual(request.url?.path, "/goals/goal-1/approve")
+            var body = request.httpBody
+            if body == nil, let stream = request.httpBodyStream {
+                stream.open()
+                defer { stream.close() }
+                var bytes = [UInt8](repeating: 0, count: 1024)
+                let count = stream.read(&bytes, maxLength: bytes.count)
+                body = Data(bytes.prefix(max(0, count)))
+            }
+            let payload = try JSONSerialization.jsonObject(with: XCTUnwrap(body)) as! [String: String]
+            XCTAssertEqual(payload, ["fingerprint": fingerprint, "scope": "task"])
+            return (202, Data(#"{"status":"queued"}"#.utf8))
+        }
+        try await api.approve("goal-1", fingerprint: fingerprint, forTask: true)
+    }
+
     func testArchiveRestoreAndDeleteUseLifecycleEndpoints() async throws {
         for archived in [true, false] {
             InterceptingProtocol.handle = { request in

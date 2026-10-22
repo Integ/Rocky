@@ -1,11 +1,13 @@
 """Runtime configuration; provider credentials are kept separately from task data."""
 
+import json
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import SecretStr, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from rocky.command_policy import parse_prefix
 from rocky.inference import ModelSettings, ReasoningEffort
 
 
@@ -22,11 +24,42 @@ class Settings(BaseSettings):
     reasoning_effort: ReasoningEffort | None = None
     tool_access: Literal["full", "scoped"] = "full"
     approval_mode: Literal["required", "trusted"] = "required"
+    # Simple shell commands starting with one of these word prefixes (for
+    # example "ls", "git status" or "uv run pytest") run without approval.
+    # Commands with shell operators, substitutions or redirects never match.
+    auto_approve_commands: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # Per-request response caps. Reasoning tokens count toward them.
+    plan_response_tokens: int = Field(default=16_384, ge=1_024, le=128_000)
+    review_response_tokens: int = Field(default=8_192, ge=1_024, le=128_000)
     auth_mode: Literal["local", "token"] = "local"
     api_token: SecretStr | None = None
     host: str = "127.0.0.1"
     port: int = 8000
     max_concurrent_activities: int = 4
+
+    @field_validator("auto_approve_commands", mode="before")
+    @classmethod
+    def split_command_prefixes(cls, value):
+        # Accept a JSON list or comma/newline separated text from the environment.
+        if isinstance(value, str):
+            text = value.strip()
+            value = json.loads(text) if text.startswith("[") else text.replace("\n", ",").split(",")
+        return value
+
+    @field_validator("auto_approve_commands")
+    @classmethod
+    def valid_command_prefixes(cls, values: list[str]) -> list[str]:
+        result = []
+        for value in values:
+            if not value.strip():
+                continue
+            if parse_prefix(value) is None:
+                raise ValueError(
+                    "Auto-approved command prefixes must be plain words such as 'git status', "
+                    "without shell operators, substitutions or wrapper commands"
+                )
+            result.append(value.strip())
+        return result
 
     @model_validator(mode="after")
     def valid_inference_defaults(self) -> "Settings":
@@ -34,3 +67,6 @@ class Settings(BaseSettings):
         if self.auth_mode == "local" and self.host not in {"127.0.0.1", "localhost", "::1"}:
             raise ValueError("Local access mode requires a loopback bind host")
         return self
+
+    def auto_approved_prefixes(self) -> list[list[str]]:
+        return [words for value in self.auto_approve_commands if (words := parse_prefix(value))]

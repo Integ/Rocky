@@ -117,16 +117,22 @@ class StoreMemoryProvider:
             return content
         if row.get("role") == "assistant" and "kind" in payload and "reason" in payload:
             action = payload.get("action")
-            return serialize_memory(
-                {
-                    "kind": payload["kind"],
-                    "reason": payload["reason"],
-                    "action": {key: action.get(key) for key in ("tool", "path", "url")}
-                    if isinstance(action, dict)
-                    else None,
-                    "full_payload": "See execution record " + str(row.get("id", "")),
-                }
-            )
+            actions = payload.get("actions")
+            summary = {
+                "kind": payload["kind"],
+                "reason": payload["reason"],
+                "action": {key: action.get(key) for key in ("tool", "path", "url")}
+                if isinstance(action, dict)
+                else None,
+            }
+            if isinstance(actions, list):
+                summary["actions"] = [
+                    {key: item.get(key) for key in ("tool", "path", "url")}
+                    for item in actions
+                    if isinstance(item, dict)
+                ]
+            summary["full_payload"] = "See execution record " + str(row.get("id", ""))
+            return serialize_memory(summary)
         if row.get("role") == "tool" and "content" in payload and "success" in payload:
             # Put repair guidance before a possibly large response body, so it
             # survives clipping. Full results stay available in the SQL log.
@@ -141,7 +147,14 @@ class StoreMemoryProvider:
                 # Hashes/exports already live in resident state. The message ID
                 # locates the full audit record. Keep URL/status/exit metadata.
                 if key
-                not in {*metadata, "content", "progress_key", "artifacts", "approval_required"}
+                not in {
+                    *metadata,
+                    "content",
+                    "progress_key",
+                    "artifacts",
+                    "approval_required",
+                    "approval_command_prefix",
+                }
             )
             normalized = serialize_memory({**metadata, "content": payload["content"]})
             if isinstance(payload["content"], str) and len(payload["content"]) > 240:

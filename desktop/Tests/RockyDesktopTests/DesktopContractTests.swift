@@ -108,7 +108,7 @@ final class DesktopContractTests: XCTestCase {
         XCTAssertNil(encoded["deadline_seconds"])
     }
 
-    private static let fullTools = ["read_file", "write_file", "list_files", "fetch_url", "http_request", "run_command"]
+    private static let fullTools = ["read_file", "write_file", "list_files", "fetch_url", "http_request", "run_command", "append_file", "edit_file"]
 
     static let goalJSON = #"""
     {

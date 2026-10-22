@@ -7,7 +7,7 @@ records decisions, waits on durable timers and chooses which Activity runs next.
 import asyncio
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from temporalio import workflow
@@ -16,7 +16,9 @@ from temporalio.exceptions import ActivityError, ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from rocky.models import (
+        MAX_PARALLEL_ACTIONS,
         PHASES,
+        Action,
         Decision,
         ExecutionStep,
         Observation,
@@ -35,7 +37,23 @@ with workflow.unsafe.imports_passed_through():
         VerificationResult,
         VerifyInput,
         WakeCommand,
+        read_only_action,
     )
+
+# One model request may take up to the planner's 300-second provider timeout.
+# Rate limits, overload and connection failures produce no model output, so
+# the Activity retries them; ModelDecisionError marks responses never to repeat.
+_MODEL_ATTEMPT_SECONDS = 330
+_MODEL_ATTEMPTS = 3
+_MODEL_TOTAL_SECONDS = _MODEL_ATTEMPT_SECONDS * _MODEL_ATTEMPTS + 120
+_MODEL_RETRY = RetryPolicy(
+    initial_interval=timedelta(seconds=2),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=30),
+    maximum_attempts=_MODEL_ATTEMPTS,
+    non_retryable_error_types=["ModelDecisionError", "GoalCancelled"],
+)
+_REPORTED_MODEL_ERRORS = {"ModelDecisionError", "ModelTransientError"}
 
 
 @workflow.defn(name="RockyGoal")
@@ -182,9 +200,18 @@ class GoalWorkflow:
     def approval_command(self, command: WakeCommand) -> None:
         # This signal is dispatched only from the authenticated owner outbox.
         # Ordinary wake text and model/tool output can never authorize a tool.
+        # "task:<fingerprint>" also approves the pending command's prefix for
+        # later simple commands in this task; the tool layer matches it.
         pending = self._state.pending_approval
-        if pending is not None and command.message == pending.fingerprint:
-            self._approved_action = pending.fingerprint
+        scope, _, fingerprint = command.message.rpartition(":")
+        if pending is None or fingerprint != pending.fingerprint or scope not in {"", "task"}:
+            return
+        if scope == "task":
+            if not pending.command_prefix:
+                return
+            if pending.command_prefix not in self._state.approved_command_prefixes:
+                self._state.approved_command_prefixes.append(list(pending.command_prefix))
+        self._approved_action = pending.fingerprint
 
     def _remaining(self) -> float:
         assert self._deadline is not None
@@ -314,9 +341,9 @@ class GoalWorkflow:
             "rocky.plan",
             PlanInput(run=run, state=self._state.model_copy(deep=True), feedback=feedback),
             result_type=PlanResult,
-            start_to_close_timeout=self._timeout(90),
-            schedule_to_close_timeout=self._timeout(90),
-            retry_policy=RetryPolicy(maximum_attempts=1),
+            start_to_close_timeout=self._timeout(_MODEL_ATTEMPT_SECONDS),
+            schedule_to_close_timeout=self._timeout(_MODEL_TOTAL_SECONDS),
+            retry_policy=_MODEL_RETRY,
         )
 
     async def _verify(self, run: RunInput) -> VerificationResult:
@@ -327,21 +354,26 @@ class GoalWorkflow:
             "rocky.verify",
             VerifyInput(run=run, state=self._state.model_copy(deep=True)),
             result_type=VerificationResult,
-            start_to_close_timeout=self._timeout(90),
-            schedule_to_close_timeout=self._timeout(90),
-            retry_policy=RetryPolicy(maximum_attempts=1),
+            start_to_close_timeout=self._timeout(_MODEL_ATTEMPT_SECONDS),
+            schedule_to_close_timeout=self._timeout(_MODEL_TOTAL_SECONDS),
+            retry_policy=_MODEL_RETRY,
         )
 
-    async def _execute(self, run: RunInput, decision: Decision) -> ToolResult:
+    async def _execute(
+        self, run: RunInput, action: Action | None, operation_id: str | None = None
+    ) -> ToolResult:
         return await workflow.execute_activity(
             "rocky.execute",
             ToolInput(
                 run=run,
-                operation_id=f"step-{self._state.steps:04d}",
-                action=decision.action,
+                operation_id=operation_id or f"step-{self._state.steps:04d}",
+                action=action,
                 approved_action_fingerprints=[self._approved_action]
                 if self._approved_action
                 else [],
+                approved_command_prefixes=[
+                    list(prefix) for prefix in self._state.approved_command_prefixes
+                ],
             ),
             result_type=ToolResult,
             start_to_close_timeout=self._timeout(45),
@@ -417,16 +449,32 @@ class GoalWorkflow:
         if decision is None:
             return "Planning produced no usable decision."
         if decision.kind == "act":
-            if decision.action is None or decision.wait_seconds is not None:
+            if decision.actions is not None:
+                if decision.action is not None or decision.wait_seconds is not None:
+                    return "Set either action or actions, never both, and no wait duration."
+                if not 1 <= len(decision.actions) <= MAX_PARALLEL_ACTIONS:
+                    return f"actions must contain 1 to {MAX_PARALLEL_ACTIONS} read-only actions."
+                if not all(read_only_action(item) for item in decision.actions):
+                    return (
+                        "actions may contain only read_file, list_files, fetch_url and "
+                        "GET/HEAD/OPTIONS http_request actions with a null path. Propose "
+                        "writes, commands and mutating requests as a single action."
+                    )
+            elif decision.action is None or decision.wait_seconds is not None:
                 return "An act decision requires one concrete action and no wait duration."
         elif decision.kind == "wait":
             if (
                 decision.action is not None
+                or decision.actions is not None
                 or decision.wait_seconds is None
                 or not 1 <= decision.wait_seconds <= run.contract.max_wait_seconds
             ):
                 return "Provide a positive wait within the contract's maximum wait duration."
-        elif decision.action is not None or decision.wait_seconds is not None:
+        elif (
+            decision.action is not None
+            or decision.actions is not None
+            or decision.wait_seconds is not None
+        ):
             return "Only act may contain an action, and only wait may contain a wait duration."
         return ""
 
@@ -492,6 +540,7 @@ class GoalWorkflow:
             operation_id=f"step-{self._state.steps:04d}",
             action=decision.action,
             reason=result.content,
+            command_prefix=result.approval_command_prefix or None,
         )
         self._state.status = "blocked"
         self._state.reason = result.content
@@ -536,10 +585,12 @@ class GoalWorkflow:
                     )
                 )
             return {"verification": verification.model_dump(mode="json")}
-        cycle.result = await self._execute(run, decision)
+        if decision.actions is not None:
+            return await self._harness_batch(run, cycle, decision.actions)
+        cycle.result = await self._execute(run, decision.action)
         if self._adaptive and cycle.result.approval_required:
             await self._await_approval(decision, cycle.result)
-            cycle.result = await self._execute(run, decision)
+            cycle.result = await self._execute(run, decision.action)
             self._approved_action = ""
             if cycle.result.approval_required:
                 cycle.error = (
@@ -568,6 +619,75 @@ class GoalWorkflow:
         cycle.feedback = "" if result.success else content[:4000]
         return {"result": result.model_dump(mode="json")}
 
+    async def _harness_batch(self, run: RunInput, cycle: "_Cycle", actions: list[Action]) -> dict:
+        """Run independent read-only actions concurrently as one step.
+
+        Each action has its own operation identifier, receipt and observation.
+        Read-only actions never wait for approval; an unexpected approval
+        request becomes a failed result instead of a paused batch.
+        """
+        outcomes = await asyncio.gather(
+            *(
+                self._execute(run, action, f"step-{self._state.steps:04d}-{index}")
+                for index, action in enumerate(actions, 1)
+            ),
+            return_exceptions=True,
+        )
+        self._guard_dispatch()
+        for action, outcome in zip(actions, outcomes, strict=True):
+            if isinstance(outcome, ActivityError):
+                if self._check_activity_cancellation(outcome):
+                    raise _StopExecution("cancelled", "Cancelled by the user.")
+                outcome = ToolResult(
+                    success=False,
+                    content="The action could not complete after bounded retries.",
+                    error_code="tool_unavailable",
+                    retry_hint="Inspect its actual state before issuing it again.",
+                )
+            elif isinstance(outcome, BaseException):
+                raise outcome
+            elif outcome.approval_required:
+                outcome = ToolResult(
+                    success=False,
+                    content="This action requires owner approval and was not dispatched.",
+                    error_code="approval_required",
+                    retry_hint="Propose it as a single action so the owner can review it.",
+                )
+            cycle.results.append((action, outcome))
+            content = outcome.content
+            if not outcome.success:
+                content = "\n".join(
+                    part
+                    for part in (outcome.error_code, outcome.retry_hint, outcome.content)
+                    if part
+                )[:16000]
+            self._append_observation(
+                Observation(
+                    step=self._state.steps,
+                    tool=action.tool,
+                    success=outcome.success,
+                    content=content,
+                    progress_key=outcome.progress_key,
+                )
+            )
+        failures = [
+            f"{action.tool} {action.path or action.url or ''}: "
+            + "\n".join(
+                part
+                for part in (result.error_code, result.retry_hint, result.content[:500])
+                if part
+            )
+            for action, result in cycle.results
+            if not result.success
+        ]
+        cycle.feedback = "\n".join(failures)[:4000]
+        return {
+            "results": [
+                {"action": action.model_dump(mode="json"), "result": result.model_dump(mode="json")}
+                for action, result in cycle.results
+            ]
+        }
+
     def _reflect_cycle(self, run: RunInput, cycle: "_Cycle") -> dict:
         if cycle.error:
             self._no_progress += 1
@@ -592,6 +712,28 @@ class GoalWorkflow:
             ).hexdigest()
             if cycle.result.success and fingerprint not in self._seen_progress:
                 self._seen_progress.add(fingerprint)
+                self._no_progress = 0
+                self._state.recovery_attempts = 0
+            else:
+                self._no_progress += 1
+        elif cycle.results:
+            # A batch progresses when any action returned new evidence.
+            new = {
+                hashlib.sha256(
+                    json.dumps(
+                        {
+                            "action": action.model_dump(mode="json"),
+                            "result": result.progress_key or result.content,
+                            "success": True,
+                        },
+                        sort_keys=True,
+                    ).encode()
+                ).hexdigest()
+                for action, result in cycle.results
+                if result.success
+            } - self._seen_progress
+            if new:
+                self._seen_progress.update(new)
                 self._no_progress = 0
                 self._state.recovery_attempts = 0
             else:
@@ -630,6 +772,13 @@ class GoalWorkflow:
             if action:
                 summary.append(
                     f"Attempted {action.tool}; path={action.path!r}; url={action.url!r}."
+                )
+            elif decision and decision.actions:
+                summary.append(
+                    f"Attempted {len(decision.actions)} parallel reads: "
+                    + "; ".join(
+                        f"{item.tool} {item.path or item.url or ''}" for item in decision.actions
+                    )[:1000]
                 )
             for item in recent:
                 summary.append(
@@ -822,7 +971,7 @@ class GoalWorkflow:
                 cause = error.cause
                 cycle.error = (
                     cause.message[:4000]
-                    if isinstance(cause, ApplicationError) and cause.type == "ModelDecisionError"
+                    if isinstance(cause, ApplicationError) and cause.type in _REPORTED_MODEL_ERRORS
                     else "Planning could not complete. Check provider availability or return a valid decision on the next attempt."
                 )
                 await self._end_phase({"error": cycle.error}, failed=True)
@@ -848,6 +997,7 @@ class GoalWorkflow:
                     failed=bool(
                         cycle.error
                         or (cycle.result and not cycle.result.success)
+                        or (cycle.results and not any(item.success for _, item in cycle.results))
                         or (cycle.verification and not cycle.verification.passed)
                     ),
                 )
@@ -1031,7 +1181,7 @@ class GoalWorkflow:
                     await self._persist()
                     continue
                 try:
-                    tool_result = await self._execute(run, decision)
+                    tool_result = await self._execute(run, decision.action)
                 except ActivityError as error:
                     if self._check_activity_cancellation(error):
                         return await self._complete("cancelled", "Cancelled by the user.")
@@ -1082,6 +1232,8 @@ class _Cycle:
     feedback: str = ""
     decision: Decision | None = None
     result: ToolResult | None = None
+    # Results of a parallel read-only batch, in action order.
+    results: list[tuple[Action, ToolResult]] = field(default_factory=list)
     verification: VerificationResult | None = None
     error: str = ""
     blocked_reason: str = ""

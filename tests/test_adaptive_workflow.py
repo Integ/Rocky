@@ -1,11 +1,12 @@
 """Exercise the production decision loop, approvals and replay with Temporal."""
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pytest
 from temporalio import activity, workflow
 from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.exceptions import ApplicationError
 from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
 from test_workflow import Activities, act, finish, request
 from test_workflow import temporal_env as _temporal_env
@@ -15,6 +16,8 @@ from rocky.models import (
     Action,
     Decision,
     ExecutionLimits,
+    PlanInput,
+    PlanResult,
     RunInput,
     RunState,
     TaskProgress,
@@ -391,3 +394,203 @@ async def test_production_workflow_replays_captured_six_phase_history(temporal_e
     ] * 2
     replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
     await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)
+
+
+@dataclass
+class BatchActivities(Activities):
+    """Each read waits until the whole batch is in flight: serial dispatch deadlocks."""
+
+    batch_size: int = 0
+    in_flight: int = 0
+    all_started: asyncio.Event = field(default_factory=asyncio.Event)
+
+    @activity.defn(name="rocky.execute")
+    async def execute(self, value: ToolInput) -> ToolResult:
+        self.tools.append(value)
+        self.in_flight += 1
+        if self.in_flight >= self.batch_size:
+            self.all_started.set()
+        await asyncio.wait_for(self.all_started.wait(), timeout=10)
+        return ToolResult(
+            success=True, content=f"contents of {value.action.path}", progress_key=value.action.path
+        )
+
+
+async def test_independent_reads_run_concurrently_in_one_step(temporal_env):
+    reads = [Action(tool="read_file", path=f"src/module_{index}.py") for index in range(3)]
+    batch = [*reads, Action(tool="list_files", path="tests")]
+    activities = BatchActivities(
+        decisions=[Decision(kind="act", reason="Inspect the project", actions=batch), finish()],
+        batch_size=len(batch),
+    )
+    run = request()
+    async with worker(temporal_env, run, activities):
+        handle = await temporal_env.client.start_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        result = await asyncio.wait_for(handle.result(), timeout=20)
+    assert result.status == "succeeded"
+    # Activities start in any order; each keeps its own operation identifier.
+    dispatched = {item.operation_id: item.action for item in activities.tools}
+    assert dispatched == {f"step-0001-{index}": action for index, action in enumerate(batch, 1)}
+    # One planning call gathered four observations.
+    assert (result.steps, result.model_calls) == (2, 3)
+    observed = activities.plans[1].state.observations
+    assert [item.tool for item in observed] == ["read_file"] * 3 + ["list_files"]
+    assert observed[0].content == "contents of src/module_0.py"
+    assert "4 parallel reads" in activities.plans[1].state.handoff_summary
+    replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
+    await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [
+        Decision(
+            kind="act",
+            reason="Read and write together",
+            actions=[
+                Action(tool="read_file", path="a.txt"),
+                Action(tool="write_file", path="b.txt", content="x"),
+            ],
+        ),
+        Decision(
+            kind="act",
+            reason="Both forms",
+            action=Action(tool="read_file", path="a.txt"),
+            actions=[Action(tool="read_file", path="b.txt")],
+        ),
+        Decision(
+            kind="act",
+            reason="Batch a mutation",
+            actions=[Action(tool="http_request", url="https://e.com", content='{"method":"PUT"}')],
+        ),
+    ],
+)
+async def test_batches_with_mutations_are_rejected_before_any_dispatch(temporal_env, decision):
+    activities = Activities(decisions=[decision, finish()])
+    run = request()
+    async with worker(temporal_env, run, activities):
+        result = await asyncio.wait_for(
+            temporal_env.client.execute_workflow(
+                GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+            ),
+            timeout=20,
+        )
+    assert result.status == "succeeded"
+    assert not activities.tools
+    assert "action" in activities.plans[1].feedback
+
+
+async def test_task_scoped_approval_covers_later_similar_commands_only(temporal_env, tmp_path):
+    settings = Settings(workspace_root=tmp_path / "task-approval")
+    run = request()
+    decisions = [
+        Decision(
+            kind="act",
+            reason="Create the first file",
+            action=Action(tool="run_command", content="touch first.txt"),
+        ),
+        Decision(
+            kind="act",
+            reason="Create the second file",
+            action=Action(tool="run_command", content="touch second.txt"),
+        ),
+        Decision(
+            kind="act",
+            reason="Chain commands",
+            action=Action(tool="run_command", content="touch third.txt; touch fourth.txt"),
+        ),
+    ]
+    activities = ApprovalActivities(decisions=decisions, workspace_tools=WorkspaceTools(settings))
+    workspace = settings.workspace_root / run.goal_id
+    async with worker(temporal_env, run, activities):
+        handle = await temporal_env.client.start_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        await asyncio.wait_for(activities.blocked.wait(), timeout=15)
+        state = await handle.query(GoalWorkflow.state)
+        pending = state.pending_approval
+        assert pending.command_prefix == ["touch"]
+        # A wake message or an unscoped mismatch cannot grant the prefix.
+        await handle.signal(GoalWorkflow.wake, "task:" + pending.fingerprint)
+        await handle.signal(
+            GoalWorkflow.approval_command, WakeCommand(command_id="bad", message="all:" + "0" * 64)
+        )
+        assert (await handle.query(GoalWorkflow.state)).approved_command_prefixes == []
+        activities.blocked.clear()
+        await handle.signal(
+            GoalWorkflow.approval_command,
+            WakeCommand(command_id="task-grant", message="task:" + pending.fingerprint),
+        )
+
+        async def chained_pending():
+            while True:
+                current = await handle.query(GoalWorkflow.state)
+                if current.pending_approval and current.steps == 3:
+                    return current
+                await asyncio.sleep(0.05)
+
+        chained = await asyncio.wait_for(chained_pending(), timeout=15)
+        assert chained.approved_command_prefixes == [["touch"]]
+        assert chained.pending_approval.command_prefix is None
+        await handle.signal(GoalWorkflow.cancel)
+        result = await asyncio.wait_for(handle.result(), timeout=15)
+    assert result.status == "cancelled"
+    assert (workspace / "first.txt").exists() and (workspace / "second.txt").exists()
+    assert not (workspace / "third.txt").exists()
+    # Only the first command and the chained command paused for review.
+    paused = {
+        state.pending_approval.operation_id
+        for state in activities.snapshots
+        if state.pending_approval
+    }
+    assert paused == {"step-0001", "step-0003"}
+    replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
+    await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)
+
+
+@dataclass
+class RateLimitedActivities(Activities):
+    attempts: int = 0
+    failure_type: str = "ModelTransientError"
+
+    @activity.defn(name="rocky.plan")
+    async def plan(self, value: PlanInput) -> PlanResult:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise ApplicationError("rate limited", type=self.failure_type)
+        self.plans.append(value)
+        return PlanResult(decision=finish(), input_tokens=12, output_tokens=7)
+
+
+async def test_rate_limited_planning_is_retried_without_spending_a_step(temporal_env):
+    activities = RateLimitedActivities()
+    run = request()
+    async with worker(temporal_env, run, activities):
+        result = await asyncio.wait_for(
+            temporal_env.client.execute_workflow(
+                GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+            ),
+            timeout=30,
+        )
+    assert result.status == "succeeded"
+    assert activities.attempts == 2
+    assert (result.steps, result.model_calls) == (1, 2)
+
+
+async def test_unusable_model_responses_are_never_repeated(temporal_env):
+    activities = RateLimitedActivities(failure_type="ModelDecisionError")
+    run = request()
+    async with worker(temporal_env, run, activities):
+        result = await asyncio.wait_for(
+            temporal_env.client.execute_workflow(
+                GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+            ),
+            timeout=30,
+        )
+    assert result.status == "succeeded"
+    # The failed response became feedback for a new planning step.
+    assert activities.attempts == 2
+    assert result.steps == 2
+    assert activities.plans[0].feedback == "rate limited"

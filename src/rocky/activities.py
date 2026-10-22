@@ -1,6 +1,7 @@
 """All non-deterministic work is isolated in Temporal Activities."""
 
 import asyncio
+from datetime import timedelta
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -18,9 +19,20 @@ from rocky.models import (
     VerificationResult,
     VerifyInput,
 )
-from rocky.planner import OpenAIPlanner, PlannerError
+from rocky.planner import OpenAIPlanner, PlannerError, TransientModelError
 from rocky.store import Store
 from rocky.tools import WorkspaceTools
+
+
+def _model_failure(error: PlannerError) -> ApplicationError:
+    """Let Temporal retry only failures that produced no model output."""
+    if isinstance(error, TransientModelError):
+        return ApplicationError(
+            str(error),
+            type="ModelTransientError",
+            next_retry_delay=timedelta(seconds=error.retry_after) if error.retry_after else None,
+        )
+    return ApplicationError(str(error), type="ModelDecisionError", non_retryable=True)
 
 
 class Activities:
@@ -50,9 +62,7 @@ class Activities:
         try:
             return await self.planner.plan(request)
         except PlannerError as error:
-            raise ApplicationError(
-                str(error), type="ModelDecisionError", non_retryable=True
-            ) from None
+            raise _model_failure(error) from None
 
     @activity.defn(name="rocky.phase")
     async def phase(self, request: PhaseInput) -> PhaseResult:
@@ -79,7 +89,11 @@ class Activities:
             return files
         contents = await asyncio.to_thread(self.tools.review_text, request.run)
         await self.check_cancelled(request.run.goal_id)
-        verdict = await self.planner.review(request, contents)
+        try:
+            verdict = await self.planner.review(request, contents)
+        except PlannerError as error:
+            # A completed but unusable review consumed tokens; never repeat it.
+            raise _model_failure(error) from None
         verdict.artifacts = files.artifacts
         if verdict.passed:
             # Background jobs or another process may change an artifact while

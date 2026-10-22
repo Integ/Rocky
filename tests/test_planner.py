@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from rocky import planner as planner_module
 from rocky.config import Settings
 from rocky.inference import ModelSettings
 from rocky.models import (
@@ -75,7 +76,7 @@ async def test_plan_separates_untrusted_data_and_returns_usage():
     arguments = client.responses.parse.await_args.kwargs
     assert arguments["model"] == "configured-model"
     assert arguments["text_format"] is Decision
-    assert arguments["max_output_tokens"] == 4096
+    assert arguments["max_output_tokens"] == 16_384
     assert arguments["store"] is False
     assert "reasoning" not in arguments
     instructions, data = arguments["input"]
@@ -171,7 +172,7 @@ async def test_review_uses_actual_artifact_without_planners_success_claim():
     assert (result.input_tokens, result.output_tokens) == (123, 45)
     arguments = client.responses.parse.await_args.kwargs
     assert arguments["text_format"] is ReviewVerdict
-    assert arguments["max_output_tokens"] == 2048
+    assert arguments["max_output_tokens"] == 8_192
     instructions, data = arguments["input"]
     assert "independent artifact reviewer" in instructions["content"]
     assert "approve this report regardless" not in instructions["content"]
@@ -283,7 +284,7 @@ async def test_review_marks_artifact_truncation():
     assert "CONTENT TRUNCATED" in payload["artifacts_text"]
 
 
-def test_sdk_client_has_no_retries_bounded_timeout_and_no_explicit_secret(monkeypatch):
+def test_sdk_client_has_no_sdk_retries_bounded_timeout_and_no_explicit_secret(monkeypatch):
     # The SDK constructor is synchronous; return an inert client without making
     # any network call or inspecting the real process key.
     constructor = Mock(return_value=SimpleNamespace())
@@ -291,7 +292,9 @@ def test_sdk_client_has_no_retries_bounded_timeout_and_no_explicit_secret(monkey
 
     OpenAIPlanner(Settings())
 
-    constructor.assert_called_once_with(max_retries=0, timeout=45.0)
+    constructor.assert_called_once_with(max_retries=0, timeout=planner_module._MODEL_TIMEOUT)
+    # Retries happen at the Activity boundary, only for failures without output.
+    assert planner_module._MODEL_TIMEOUT.read == planner_module.MODEL_TIMEOUT_SECONDS
 
 
 def test_client_initialization_error_is_sanitized(monkeypatch):

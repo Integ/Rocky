@@ -11,7 +11,7 @@ struct GoalContract: Codable, Equatable {
     var objective: String
     var acceptance_criteria: [String]
     var deliverables: [Deliverable]
-    var allowed_tools: [String] = ["read_file", "write_file", "list_files", "fetch_url", "http_request", "run_command"]
+    var allowed_tools: [String] = ["read_file", "write_file", "list_files", "fetch_url", "http_request", "run_command", "append_file", "edit_file"]
     var allowed_domains: [String] = []
     var limits: TaskLimits?
 }
@@ -54,6 +54,8 @@ struct ToolObservation: Codable, Equatable, Hashable {
         switch tool {
         case "read_file": "读取文件"
         case "write_file": "写入文件"
+        case "append_file": "追加文件"
+        case "edit_file": "修改文件"
         case "list_files": "浏览文件"
         case "fetch_url": "读取网页"
         case "http_request": "网络请求"
@@ -114,6 +116,13 @@ struct PendingApproval: Codable, Equatable {
     var operation_id: String
     var action: ProposedAction
     var reason: String
+    /// Leading command words the owner may approve for the rest of the task.
+    var command_prefix: [String]?
+
+    var commandPrefixText: String? {
+        guard let command_prefix, !command_prefix.isEmpty else { return nil }
+        return command_prefix.joined(separator: " ")
+    }
 }
 
 struct ProposedAction: Codable, Equatable {
@@ -170,30 +179,36 @@ struct ExecutionEntry: Identifiable {
         for event in events {
             let state = event.state
             let snapshot = Snapshot(state)
-            // Dispatch snapshots carry the prior result; only a new observation owns a step.
-            let observation = state.observations?.last.flatMap {
-                seenObservations.insert($0.identity).inserted ? $0 : nil
+            // Dispatch snapshots carry the prior result; only new observations own a step.
+            // A parallel read batch records several observations for one step at once.
+            let lastStep = state.observations?.last?.step
+            let fresh = (state.observations ?? []).filter {
+                $0.step == lastStep && seenObservations.insert($0.identity).inserted
             }
-            guard observation != nil || snapshot != previous else { continue }
-            let entry = ExecutionEntry(
-                id: event.id, status: state.status, statusLabel: state.statusLabel,
-                reason: snapshot.reason,
-                displayReason: state.status == "running" && ["waiting", "blocked"].contains(previous?.status ?? "") && snapshot.reason == previous?.reason && observation == nil ? "恢复执行" : nil,
-                observation: observation, artifacts: snapshot.artifacts,
-                artifactsChanged: snapshot.artifacts != (previous?.artifacts ?? []),
-                wakeAt: state.wake_at, firstStep: observation?.step, lastStep: observation?.step,
-                firstTimestamp: state.updated_at, lastTimestamp: state.updated_at
-            )
-            if let observation, let last = entries.last,
-               last.status == entry.status, last.reason == entry.reason,
-               last.artifacts == entry.artifacts, last.wakeAt == entry.wakeAt,
-               observation.step > (last.lastStep ?? 0),
-               last.observation?.isEquivalentOperation(to: observation) == true {
-                entries[entries.count - 1].count += 1
-                entries[entries.count - 1].lastStep = observation.step
-                entries[entries.count - 1].lastTimestamp = state.updated_at
-            } else {
-                entries.append(entry)
+            guard !fresh.isEmpty || snapshot != previous else { continue }
+            for (index, observation) in (fresh.isEmpty ? [nil] : fresh.map(Optional.some)).enumerated() {
+                let entry = ExecutionEntry(
+                    // Extra batch entries get negative IDs, which never collide with event IDs.
+                    id: index == 0 ? event.id : -(event.id * 16 + index),
+                    status: state.status, statusLabel: state.statusLabel,
+                    reason: snapshot.reason,
+                    displayReason: state.status == "running" && ["waiting", "blocked"].contains(previous?.status ?? "") && snapshot.reason == previous?.reason && observation == nil ? "恢复执行" : nil,
+                    observation: observation, artifacts: snapshot.artifacts,
+                    artifactsChanged: index == 0 && snapshot.artifacts != (previous?.artifacts ?? []),
+                    wakeAt: state.wake_at, firstStep: observation?.step, lastStep: observation?.step,
+                    firstTimestamp: state.updated_at, lastTimestamp: state.updated_at
+                )
+                if let observation, let last = entries.last,
+                   last.status == entry.status, last.reason == entry.reason,
+                   last.artifacts == entry.artifacts, last.wakeAt == entry.wakeAt,
+                   observation.step > (last.lastStep ?? 0),
+                   last.observation?.isEquivalentOperation(to: observation) == true {
+                    entries[entries.count - 1].count += 1
+                    entries[entries.count - 1].lastStep = observation.step
+                    entries[entries.count - 1].lastTimestamp = state.updated_at
+                } else {
+                    entries.append(entry)
+                }
             }
             previous = snapshot
         }

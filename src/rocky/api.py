@@ -151,6 +151,8 @@ class MemoryRequest(Model):
 
 class ApprovalRequest(Model):
     fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    # "task" also approves later simple commands with the pending command prefix.
+    scope: Literal["action", "task"] = "action"
 
 
 def create_app(
@@ -482,6 +484,9 @@ def create_app(
 
     @app.post("/goals/{goal_id}/approve", status_code=202, dependencies=auth)
     def approve_goal(goal_id: str, request: ApprovalRequest):
-        return command(goal_id, "approve", request.fingerprint)
+        payload = (
+            request.fingerprint if request.scope == "action" else "task:" + request.fingerprint
+        )
+        return command(goal_id, "approve", payload)
 
     return app

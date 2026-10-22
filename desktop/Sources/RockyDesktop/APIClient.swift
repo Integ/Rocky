@@ -79,9 +79,11 @@ struct APIClient {
         let body = try message.map { try JSONEncoder().encode(["message": $0]) }
         let _: Receipt = try await request("/goals/\(id)/\(kind)", method: "POST", body: body)
     }
-    func approve(_ id: String, fingerprint: String) async throws {
+    func approve(_ id: String, fingerprint: String, forTask: Bool = false) async throws {
         struct Receipt: Decodable { var status: String }
-        let body = try JSONEncoder().encode(["fingerprint": fingerprint])
+        var payload = ["fingerprint": fingerprint]
+        if forTask { payload["scope"] = "task" }
+        let body = try JSONEncoder().encode(payload)
         let _: Receipt = try await request("/goals/\(id)/approve", method: "POST", body: body)
     }
     func artifact(_ id: String, path: String) async throws -> ArtifactContent {

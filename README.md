@@ -126,13 +126,13 @@ Compose 显式使用 `ROCKY_AUTH_MODE=token`，因为容器内请求来自容器
 }
 ```
 
-默认 `ROCKY_TOOL_ACCESS=full`。完整权限模式提供 `read_file`、`write_file`、`list_files`、`fetch_url`、`http_request` 和 `run_command`；允许任意 HTTP/HTTPS 地址、私网、本机端口、重定向、POST 表单/JSON、认证请求及登录 Cookie 会话。旧任务中保存的 `allowed_tools` / `allowed_domains` 不再限制执行。
+默认 `ROCKY_TOOL_ACCESS=full`。完整权限模式提供 `read_file`、`write_file`、`append_file`、`edit_file`、`list_files`、`fetch_url`、`http_request` 和 `run_command`；允许任意 HTTP/HTTPS 地址、私网、本机端口、重定向、POST 表单/JSON、认证请求及登录 Cookie 会话。旧任务中保存的 `allowed_tools` / `allowed_domains` 不再限制执行。
 
 工具以当前系统用户身份运行，可使用绝对路径、隐藏文件和 Shell。操作系统的文件权限、macOS 隐私授权及网站的验证码/MFA 仍按各自机制处理。产物相对路径仅用于结果核验和导出，不限制其他文件访问。
 
 `http_request` 的 `content` 为 JSON 配置，例如 `{"method":"POST","data":{"username":"…","password":"…"},"session":"platform"}`；后续请求使用相同 `session` 自动携带 Cookie。可用 `headers` / `json` / `body` / `auth` 配置其他认证方式，`path` 保存完整响应文件。会话按任务和名称隔离，私有持久存储，重启后可复用。`run_command` 的 `content` 为 Shell 命令，`path` 可指定工作目录。单次请求或命令最多 30 秒，较长计算可作为后台作业运行并在后续步骤查看文件结果。
 
-`ROCKY_APPROVAL_MODE=required` 是默认值：每条 Shell 命令，以及 GET/HEAD/OPTIONS 以外的 HTTP 请求，在执行前保存具体操作并等待用户批准。审批绑定任务、操作 ID 和完整参数，普通唤醒消息或网页中的“已批准”不会授权。原生客户端提供审批按钮；API 使用 `POST /goals/{id}/approve` 和 `{"fingerprint":"当前 pending_approval.fingerprint"}`。明确接受命令自行执行的单机所有者可配置 `ROCKY_APPROVAL_MODE=trusted`；完整工具权限本身不会关闭审批。此门禁按工具/方法分类，不能识别具有副作用的 GET 接口，文件写入仍按完整文件权限执行。
+`ROCKY_APPROVAL_MODE=required` 是默认值：每条 Shell 命令，以及 GET/HEAD/OPTIONS 以外的 HTTP 请求，在执行前保存具体操作并等待用户批准。审批绑定任务、操作 ID 和完整参数，普通唤醒消息或网页中的“已批准”不会授权。原生客户端提供审批按钮；API 使用 `POST /goals/{id}/approve` 和 `{"fingerprint":"当前 pending_approval.fingerprint"}`。待批准的简单命令会附带同类前缀（如 `uv run pytest`），客户端的“本任务内批准同类命令”或 API 的 `{"fingerprint":"…","scope":"task"}` 会让本任务后续以该前缀开头的简单命令直接执行。`ROCKY_AUTO_APPROVE_COMMANDS=ls,git status,uv run pytest` 可配置对所有任务生效的前缀白名单。含 `;`、`&&`、`|`、重定向、`$`、反引号或换行的命令永远需要逐条批准，`sudo`/`env`/`xargs` 等包装命令和 `python -c` 这类内联代码不会提供同类批准。明确接受命令自行执行的单机所有者可配置 `ROCKY_APPROVAL_MODE=trusted`；完整工具权限本身不会关闭审批。此门禁按工具/方法分类，不能识别具有副作用的 GET 接口，文件写入仍按完整文件权限执行。
 
 需要复用旧版受限部署时，可显式设置 `ROCKY_TOOL_ACCESS=scoped`；仅在该模式下恢复原工具/域名白名单和工作目录约束。macOS 应用固定使用完整权限。
 

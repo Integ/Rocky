@@ -440,6 +440,23 @@ class Store:
         if record["status"] not in {"completed", "failed"}:
             return
         output = record.get("output", {})
+        if record["phase"] == "act" and isinstance(output.get("results"), list):
+            # A parallel batch keeps one tool message per action, so recall can
+            # rank and clip each result and still say which action produced it.
+            for index, item in enumerate(output["results"], 1):
+                action = item.get("action") or {}
+                Store._add_message(
+                    session,
+                    goal_id,
+                    f"phase:{record['step_id']}:{index}",
+                    "tool",
+                    {
+                        **item.get("result", {}),
+                        "action": {key: action.get(key) for key in ("tool", "path", "url")},
+                    },
+                    record.get("completed_at") or record["started_at"],
+                )
+            return
         role, content = None, None
         if record["phase"] == "think" and output.get("decision") is not None:
             role, content = "assistant", output["decision"]
@@ -451,7 +468,19 @@ class Store:
             role, content = "system", output
         if role is None:
             return
-        message_id = f"phase:{record['step_id']}"
+        Store._add_message(
+            session,
+            goal_id,
+            f"phase:{record['step_id']}",
+            role,
+            content,
+            record.get("completed_at") or record["started_at"],
+        )
+
+    @staticmethod
+    def _add_message(
+        session: Session, goal_id: str, message_id: str, role: str, content, created_at: str
+    ) -> None:
         previous = session.scalar(
             select(MessageRow).where(
                 MessageRow.goal_id == goal_id, MessageRow.message_id == message_id
@@ -467,7 +496,7 @@ class Store:
                     if isinstance(content, str)
                     else json.dumps(content, ensure_ascii=False),
                     priority=0,
-                    created_at=record.get("completed_at") or record["started_at"],
+                    created_at=created_at,
                 )
             )
 
@@ -544,11 +573,19 @@ class Store:
                 raise KeyError(goal_id)
             if row.state["status"] in TERMINAL_STATUSES:
                 raise ValueError("Goal has already ended")
-            if kind == "approve" and (
-                not row.state.get("pending_approval")
-                or payload != row.state["pending_approval"].get("fingerprint")
-            ):
-                raise ValueError("Approval must match the task's current pending action")
+            if kind == "approve":
+                pending = row.state.get("pending_approval") or {}
+                scope, _, fingerprint = payload.rpartition(":")
+                if (
+                    not pending
+                    or fingerprint != pending.get("fingerprint")
+                    or scope not in {"", "task"}
+                ):
+                    raise ValueError("Approval must match the task's current pending action")
+                if scope == "task" and not pending.get("command_prefix"):
+                    raise ValueError(
+                        "This action can only be approved once; it has no reusable command prefix"
+                    )
             if kind == "cancel":
                 row.cancel_requested = True
             command_id = str(uuid4())

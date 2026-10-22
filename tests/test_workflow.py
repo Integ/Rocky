@@ -127,7 +127,11 @@ class Activities:
         self.plan_run_ids.append(activity.info().workflow_run_id)
         self.plan_started.set()
         if len(self.plans) <= self.planning_failures:
-            raise ApplicationError("Planning dependency unavailable", type="Transient")
+            # A persistent failure: transient provider errors are retried by
+            # the Activity policy and never reach the workflow's recovery path.
+            raise ApplicationError(
+                "Planning dependency unavailable", type="Transient", non_retryable=True
+            )
         if self.plan_gate is not None:
             await self.plan_gate.wait()
         if self.cancel_in_plan:

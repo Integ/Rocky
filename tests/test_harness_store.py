@@ -468,3 +468,33 @@ def test_delayed_knowledge_write_cannot_recreate_deleted_task_memory(tmp_path, m
         assert store.execution_steps("task-1") == []
     finally:
         store.close()
+
+
+def test_parallel_batch_results_become_separate_recallable_tool_messages(tmp_path):
+    store = Store(f"sqlite:///{tmp_path}/batch.db")
+    store.initialize()
+    store.create_goal("task-1", CONTRACT)
+    results = [
+        {
+            "action": {"tool": "read_file", "path": f"src/{name}.py", "url": None, "content": None},
+            "result": {"success": True, "content": f"{name} source", "progress_key": name},
+        }
+        for name in ("alpha", "beta")
+    ]
+    try:
+        store.save_state(snapshot(1, phase(phase="act", results=results)))
+        store.save_state(snapshot(2, phase(phase="act", results=results)))
+        tools = [item for item in store.conversation("task-1") if item["role"] == "tool"]
+        assert [item["id"] for item in tools] == ["phase:1:act:1", "phase:1:act:2"]
+        payloads = [json.loads(item["content"]) for item in tools]
+        assert [item["action"]["path"] for item in payloads] == ["src/alpha.py", "src/beta.py"]
+        assert "content" not in payloads[0]["action"]
+        memory = Activities(store, SimpleNamespace(), SimpleNamespace()).memory.build(
+            PlanInput(
+                run=RunInput(goal_id="task-1", contract=CONTRACT), state=RunState(goal_id="task-1")
+            )
+        )
+        recalled = " ".join(item["content"] for item in memory["conversation"])
+        assert "src/alpha.py" in recalled and "beta source" in recalled
+    finally:
+        store.close()

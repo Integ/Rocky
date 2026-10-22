@@ -120,6 +120,29 @@ def test_approval_api_only_accepts_current_pending_fingerprint(control):
     assert [item["kind"] for item in store.pending_commands()] == ["approve", "wake"]
 
 
+def test_task_scoped_approval_requires_a_reusable_command_prefix(control):
+    client, store = control
+    store.save_state(pending_state())
+    task_scope = {"fingerprint": FINGERPRINT, "scope": "task"}
+    # An HTTP mutation has no command class; it can only be approved once.
+    assert client.post("/goals/task/approve", headers=AUTH, json=task_scope).status_code == 409
+    assert (
+        client.post(
+            "/goals/task/approve", headers=AUTH, json={**task_scope, "scope": "forever"}
+        ).status_code
+        == 422
+    )
+    command = pending_state(revision=2)
+    command.pending_approval.action = Action(tool="run_command", content="uv run pytest -q")
+    command.pending_approval.command_prefix = ["uv", "run", "pytest"]
+    store.save_state(command)
+    accepted = client.post("/goals/task/approve", headers=AUTH, json=task_scope)
+    assert accepted.status_code == 202
+    assert store.pending_commands()[-1]["payload"] == "task:" + FINGERPRINT
+    with pytest.raises(ValueError):
+        store.enqueue_command("task", "approve", "other:" + FINGERPRINT)
+
+
 def test_execution_event_api_exposes_immutable_transitions_with_bounded_cursor(control):
     client, store = control
     record = ExecutionStep(

@@ -19,19 +19,32 @@ from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
+from rocky.command_policy import command_class, matches_prefix
 from rocky.config import Settings
 from rocky.http_tools import HTTPToolError, request_http
-from rocky.models import Artifact, RunInput, ToolInput, ToolResult, VerificationResult
+from rocky.models import (
+    Artifact,
+    RunInput,
+    ToolInput,
+    ToolResult,
+    VerificationResult,
+    read_only_action,
+)
 from rocky.network import FetchError, fetch_public_text
 from rocky.tool_contracts import (
     ActionValidationError,
     approval_fingerprint,
+    parse_edits,
     requires_approval,
     validate_action,
 )
 
 MAX_BYTES = 1_000_000
 MAX_CONTENT = 16000
+# Full-access edits load the file into memory; larger files need run_command.
+MAX_EDIT_BYTES = 20_000_000
+# Interrupted non-idempotent effects must be inspected, never silently repeated.
+_DISPATCH_MARKED = {"http_request", "run_command", "append_file", "edit_file"}
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 
@@ -134,6 +147,40 @@ def _read_regular(parent: int, name: str, *, max_bytes: int | None = MAX_BYTES) 
         return content
 
 
+def _apply_edits(text: str, edits: list[tuple[str, str, bool]]) -> str:
+    """Apply exact replacements in order; any failed edit leaves the file unchanged."""
+    for number, (old, new, replace_all) in enumerate(edits, 1):
+        count = text.count(old)
+        if count == 0:
+            raise ToolError(
+                f"Edit {number}: old_text was not found. Read the file again and copy the exact current text, including whitespace."
+            )
+        if count > 1 and not replace_all:
+            raise ToolError(
+                f"Edit {number}: old_text occurs {count} times. Include more surrounding text to make it unique, or set replace_all to true."
+            )
+        text = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+    return text
+
+
+def _replace_text(path: Path, text: str) -> None:
+    """Atomically replace a full-access file while keeping its permission bits."""
+    mode = stat.S_IMODE(path.stat().st_mode)
+    descriptor, temporary = tempfile.mkstemp(prefix=".rocky-tmp-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
 def _atomic_write(parent: int, name: str, content: bytes) -> None:
     try:
         existing = os.stat(name, dir_fd=parent, follow_symlinks=False)
@@ -163,6 +210,8 @@ class WorkspaceTools:
     def __init__(self, settings: Settings):
         self.full_access = settings.tool_access == "full"
         self.approval_mode = getattr(settings, "approval_mode", "required")
+        prefixes = getattr(settings, "auto_approved_prefixes", None)
+        self.auto_approved_prefixes = prefixes() if callable(prefixes) else []
         # The configured base holds default working directories and private receipts.
         self.root = settings.workspace_root.expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -180,7 +229,15 @@ class WorkspaceTools:
                 )
 
     @contextmanager
-    def _goal(self, goal_id: str, *, create: bool = True) -> Iterator[tuple[int, int]]:
+    def _goal(
+        self, goal_id: str, *, create: bool = True, shared: bool = False
+    ) -> Iterator[tuple[int, int]]:
+        """Open a goal under its operation lock.
+
+        Read-only operations share the lock so a parallel batch actually runs
+        concurrently; each writes only its own receipt atomically. Mutations
+        keep the exclusive lock and therefore never overlap any other operation.
+        """
         if not _IDENTIFIER.fullmatch(goal_id):
             raise ToolError("Invalid goal identifier")
         with ExitStack() as stack:
@@ -198,7 +255,7 @@ class WorkspaceTools:
             stack.callback(os.close, lock_fd)
             if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
                 raise ToolError("Invalid operation lock")
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            fcntl.flock(lock_fd, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
             yield goal_fd, receipt_fd
 
     def execute(self, request: ToolInput) -> ToolResult:
@@ -212,7 +269,10 @@ class WorkspaceTools:
                 raise ToolError("The tool is not authorized by this goal")
             fingerprint = _operation_fingerprint(request)
             receipt_name = _digest(request.operation_id.encode()) + ".json"
-            with self._goal(request.run.goal_id) as (goal_fd, receipts_fd):
+            with self._goal(request.run.goal_id, shared=read_only_action(request.action)) as (
+                goal_fd,
+                receipts_fd,
+            ):
                 try:
                     stored = json.loads(_read_regular(receipts_fd, receipt_name, max_bytes=200000))
                 except FileNotFoundError:
@@ -238,7 +298,11 @@ class WorkspaceTools:
                 # A rejected request can be corrected safely without an unknown
                 # outcome or a permanently cached denial.
                 options = validate_action(request.action, full_access=self.full_access)
-                if self.approval_mode != "trusted" and requires_approval(request.action, options):
+                if (
+                    self.approval_mode != "trusted"
+                    and requires_approval(request.action, options)
+                    and not self._prefix_approved(request)
+                ):
                     approval = approval_fingerprint(request)
                     if approval not in request.approved_action_fingerprints:
                         return ToolResult(
@@ -247,8 +311,13 @@ class WorkspaceTools:
                             error_code="approval_required",
                             retry_hint="Request owner approval for this exact action; keep its operation identifier and arguments unchanged after approval.",
                             approval_required=approval,
+                            approval_command_prefix=(
+                                command_class(request.action.content) or []
+                                if request.action.tool == "run_command"
+                                else []
+                            ),
                         )
-                if request.action.tool in {"http_request", "run_command"} or (
+                if request.action.tool in _DISPATCH_MARKED or (
                     self.full_access and request.action.tool == "fetch_url"
                 ):
                     # External side effects cannot be committed atomically with a
@@ -302,6 +371,13 @@ class WorkspaceTools:
                 hint="Ask the owner to inspect the workspace receipt storage; do not repeat an external effect with a different identifier.",
             )
 
+    def _prefix_approved(self, request: ToolInput) -> bool:
+        """Owner allowlist or a task-scoped grant covers this simple command."""
+        return request.action.tool == "run_command" and matches_prefix(
+            request.action.content,
+            [*self.auto_approved_prefixes, *request.approved_command_prefixes],
+        )
+
     def _execute(self, request: ToolInput, goal_fd: int) -> ToolResult:
         if self.full_access:
             return self._execute_full(request)
@@ -327,7 +403,8 @@ class WorkspaceTools:
             return ToolResult(
                 success=True, content=_clip(text), progress_key="list:" + _digest(text.encode())
             )
-        with _parent_directory(goal_fd, parts, create=action.tool == "write_file") as parent:
+        create = action.tool in {"write_file", "append_file"}
+        with _parent_directory(goal_fd, parts, create=create) as parent:
             if action.tool == "read_file":
                 content = _read_regular(parent, parts[-1])
                 try:
@@ -338,16 +415,36 @@ class WorkspaceTools:
                     success=True, content=_clip(text), progress_key="read:" + _digest(content)
                 )
             if action.content is None:
-                raise ToolError("write_file requires text content")
-            content = action.content.encode("utf-8")
+                raise ToolError(f"{action.tool} requires text content")
+            if action.tool == "write_file":
+                content = action.content.encode("utf-8")
+                summary = "Wrote {path} ({size} bytes)"
+            else:
+                try:
+                    existing = _read_regular(parent, parts[-1]).decode("utf-8")
+                except FileNotFoundError:
+                    if action.tool == "edit_file":
+                        raise ToolError(
+                            "edit_file requires an existing file; use write_file to create it"
+                        ) from None
+                    existing = ""
+                except UnicodeDecodeError as exc:
+                    raise ToolError("The file is not UTF-8 text") from exc
+                if action.tool == "append_file":
+                    content = (existing + action.content).encode("utf-8")
+                    summary = "Appended to {path} ({size} bytes total)"
+                else:
+                    edits = parse_edits(action.content)
+                    content = _apply_edits(existing, edits).encode("utf-8")
+                    summary = f"Applied {len(edits)} edit(s) to {{path}} ({{size}} bytes)"
             if len(content) > MAX_BYTES:
                 raise ToolError("File exceeds the maximum size")
             _atomic_write(parent, parts[-1], content)
             artifact = Artifact(path="/".join(parts), size=len(content), sha256=_digest(content))
             return ToolResult(
                 success=True,
-                content=f"Wrote {artifact.path} ({artifact.size} bytes)",
-                progress_key="write:" + artifact.path + ":" + artifact.sha256,
+                content=summary.format(path=artifact.path, size=artifact.size),
+                progress_key=f"{action.tool.split('_')[0]}:{artifact.path}:{artifact.sha256}",
                 artifacts=[artifact],
             )
 
@@ -515,6 +612,42 @@ class WorkspaceTools:
                 success=True,
                 content=f"Wrote {path}",
                 progress_key="write:" + str(path) + ":" + _digest(action.content.encode()),
+                artifacts=self._artifact(request, path),
+            )
+        if action.tool == "append_file":
+            if not action.content:
+                raise ToolError("append_file requires nonempty text content")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists() and not path.is_file():
+                raise ToolError("append_file requires a regular file")
+            with path.open("a", encoding="utf-8", newline="") as handle:
+                handle.write(action.content)
+            size = path.stat().st_size
+            return ToolResult(
+                success=True,
+                content=f"Appended {len(action.content)} characters to {path} ({size} bytes total)",
+                progress_key=f"append:{path}:{size}:{_digest(action.content.encode())}",
+                artifacts=self._artifact(request, path),
+            )
+        if action.tool == "edit_file":
+            if not path.is_file():
+                raise ToolError(
+                    "edit_file requires an existing regular file; use write_file to create it"
+                )
+            if path.stat().st_size > MAX_EDIT_BYTES:
+                raise ToolError("The file is too large to edit; use run_command instead")
+            try:
+                with path.open(encoding="utf-8", newline="") as handle:
+                    text = handle.read()
+            except UnicodeDecodeError:
+                raise ToolError("The file is not UTF-8 text") from None
+            edits = parse_edits(action.content)
+            updated = _apply_edits(text, edits)
+            _replace_text(path, updated)
+            return ToolResult(
+                success=True,
+                content=f"Applied {len(edits)} edit(s) to {path} ({len(updated.encode())} bytes)",
+                progress_key=f"edit:{path}:{_digest(updated.encode())}",
                 artifacts=self._artifact(request, path),
             )
         raise ToolError("Unknown tool")

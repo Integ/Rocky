@@ -216,8 +216,15 @@ struct WorkspaceView: View {
                                     HStack {
                                         Button("批准此操作") { Task { await model.approve() } }
                                             .buttonStyle(.borderedProminent)
+                                        if let prefix = approval.commandPrefixText {
+                                            Button("本任务内批准同类命令") { Task { await model.approve(forTask: true) } }
+                                                .help("本任务中以 \(prefix) 开头、且不含 ; && | > $ 等 Shell 操作符的命令将直接执行")
+                                        }
                                         Button("停止任务", role: .cancel) { Task { await model.cancel() } }
                                     }.disabled(model.pendingCommand != nil || !model.isConnected)
+                                    if let prefix = approval.commandPrefixText {
+                                        Text("同类命令：以 \(prefix) 开头的简单命令").font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                                    }
                                 }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
                                     .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
                             }

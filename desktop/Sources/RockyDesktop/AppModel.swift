@@ -207,14 +207,14 @@ final class AppModel: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
 
-    func approve() async {
+    func approve(forTask: Bool = false) async {
         guard let selected, let approval = selected.state.pending_approval,
               pendingCommand == nil, isConnected else { return }
         let generation = selectionGeneration
         do {
-            try await api.approve(selected.id, fingerprint: approval.fingerprint)
+            try await api.approve(selected.id, fingerprint: approval.fingerprint, forTask: forTask)
             if generation == selectionGeneration, selectedID == selected.id {
-                pendingCommand = "已批准此操作，等待执行"
+                pendingCommand = forTask ? "已批准本任务中的同类命令，等待执行" : "已批准此操作，等待执行"
             }
         } catch { self.error = error.localizedDescription }
     }

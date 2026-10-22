@@ -11,7 +11,9 @@ import json
 import httpx
 
 from rocky.http_tools import HTTPToolError, _request_options
-from rocky.models import Action, ToolInput
+from rocky.models import SAFE_HTTP_METHODS, Action, ToolInput
+
+MAX_EDITS = 50
 
 
 class ActionValidationError(ValueError):
@@ -65,15 +67,52 @@ def _json_object(content: str | None) -> dict:
     return value
 
 
+def parse_edits(content: str | None) -> list[tuple[str, str, bool]]:
+    """Parse edit_file content into ordered (old_text, new_text, replace_all) edits."""
+    if content is None:
+        raise ActionValidationError(
+            'edit_file requires content: a JSON object such as {"old_text":"...","new_text":"..."}.'
+        )
+    try:
+        value = json.loads(content)
+    except (ValueError, TypeError, RecursionError):
+        raise ActionValidationError(
+            "edit_file content must be valid JSON: "
+            '{"old_text":"exact current text","new_text":"replacement"} or {"edits":[...]}.'
+        ) from None
+    if not isinstance(value, dict):
+        raise ActionValidationError("edit_file content must be a JSON object.")
+    items = value["edits"] if "edits" in value else [value]
+    if "edits" in value and len(value) > 1:
+        raise ActionValidationError("Use either a single edit object or only an edits list.")
+    if not isinstance(items, list) or not 1 <= len(items) <= MAX_EDITS:
+        raise ActionValidationError(f"edits must be a list of 1 to {MAX_EDITS} edit objects.")
+    edits = []
+    for number, item in enumerate(items, 1):
+        if not isinstance(item, dict) or set(item) - {"old_text", "new_text", "replace_all"}:
+            raise ActionValidationError(
+                f"Edit {number} must contain only old_text, new_text and optional replace_all."
+            )
+        old, new, replace_all = item.get("old_text"), item.get("new_text"), item.get("replace_all")
+        if not isinstance(old, str) or not old or not isinstance(new, str):
+            raise ActionValidationError(
+                f"Edit {number} requires nonempty old_text and string new_text."
+            )
+        if replace_all is not None and not isinstance(replace_all, bool):
+            raise ActionValidationError(f"Edit {number}: replace_all must be true or false.")
+        edits.append((old, new, bool(replace_all)))
+    return edits
+
+
 def validate_action(action: Action, *, full_access: bool) -> dict | None:
     """Validate required/unused fields; return parsed HTTP options when relevant."""
     if action.path is not None and (not isinstance(action.path, str) or "\x00" in action.path):
         raise ActionValidationError(
             "path must be text without NUL characters; choose a valid path."
         )
-    if action.tool in {"read_file", "write_file"} and not action.path:
+    if action.tool in {"read_file", "write_file", "append_file", "edit_file"} and not action.path:
         raise ActionValidationError(
-            f"{action.tool} requires path; supply the file to read or write."
+            f"{action.tool} requires path; supply the file to read or change."
         )
     if action.tool not in {"fetch_url", "http_request"} and action.url is not None:
         raise ActionValidationError(f"{action.tool} does not accept url; set url to null.")
@@ -83,6 +122,10 @@ def validate_action(action: Action, *, full_access: bool) -> dict | None:
         raise ActionValidationError(
             "write_file requires content; supply the complete text to write."
         )
+    if action.tool == "append_file" and not action.content:
+        raise ActionValidationError("append_file requires nonempty content to append.")
+    if action.tool == "edit_file":
+        parse_edits(action.content)
     if action.tool == "run_command":
         if not action.content or not action.content.strip() or "\x00" in action.content:
             raise ActionValidationError(
@@ -130,5 +173,5 @@ def requires_approval(action: Action, options: dict | None = None) -> bool:
     """Opaque shell code and potentially mutating HTTP calls need owner approval."""
     return action.tool == "run_command" or (
         action.tool in {"http_request", "fetch_url"}
-        and (options or {}).get("method", "GET").upper() not in {"GET", "HEAD", "OPTIONS"}
+        and (options or {}).get("method", "GET").upper() not in SAFE_HTTP_METHODS
     )
