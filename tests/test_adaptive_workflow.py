@@ -594,3 +594,159 @@ async def test_unusable_model_responses_are_never_repeated(temporal_env):
     assert activities.attempts == 2
     assert result.steps == 2
     assert activities.plans[0].feedback == "rate limited"
+
+
+@dataclass
+class ReadActivities(Activities):
+    """Each path has stable content, so reading it again returns identical evidence."""
+
+    @activity.defn(name="rocky.execute")
+    async def execute(self, value: ToolInput) -> ToolResult:
+        self.tools.append(value)
+        return ToolResult(
+            success=True,
+            content=f"contents of {value.action.path}",
+            progress_key=f"read:{value.action.path}",
+        )
+
+
+def read(path: str) -> Decision:
+    return Decision(kind="act", reason=f"Read {path}", action=Action(tool="read_file", path=path))
+
+
+def recovered(activities: Activities) -> list[int]:
+    return [
+        index for index, plan in enumerate(activities.plans) if "Recovery required" in plan.feedback
+    ]
+
+
+async def test_rereading_evidence_that_left_the_recent_window_is_not_a_stall(temporal_env):
+    write = Decision(
+        kind="act",
+        reason="Write the combined report",
+        action=Action(tool="write_file", path="report.md", content="# Report"),
+    )
+    activities = ReadActivities(
+        decisions=[read("a.txt"), read("b.txt"), read("a.txt"), read("b.txt"), write, finish()]
+    )
+    # Two stalls would enter recovery: the earlier rule counted both re-reads.
+    run = request(max_no_progress=2)
+    async with worker(temporal_env, run, activities):
+        handle = await temporal_env.client.start_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        result = await asyncio.wait_for(handle.result(), timeout=20)
+    assert result.status == "succeeded"
+    assert len(activities.plans) == 6
+    assert recovered(activities) == []
+    assert all(plan.state.recovery_attempts == 0 for plan in activities.plans)
+    replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
+    await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)
+
+
+async def test_immediate_and_repeated_rereads_still_trigger_recovery(temporal_env):
+    activities = ReadActivities(
+        decisions=[
+            read("a.txt"),
+            read("b.txt"),
+            read("a.txt"),  # refresh: neutral
+            read("b.txt"),  # refresh: neutral
+            read("b.txt"),  # the planner just saw this result: stall 1
+            read("a.txt"),  # second refresh of the same evidence: stall 2
+            finish(),
+        ]
+    )
+    run = request(max_no_progress=2)
+    async with worker(temporal_env, run, activities):
+        result = await asyncio.wait_for(
+            temporal_env.client.execute_workflow(
+                GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+            ),
+            timeout=20,
+        )
+    assert result.status == "succeeded"
+    assert recovered(activities) == [6]
+    assert activities.plans[6].state.recovery_attempts == 1
+
+
+async def test_refresh_allowance_survives_continue_as_new(temporal_env):
+    sources = [read(f"s{index}.txt") for index in range(6)]
+    activities = ReadActivities(
+        decisions=[
+            *sources,
+            read("s0.txt"),  # cycle 7: refresh
+            read("s6.txt"),  # cycle 8: new evidence; the next cycle starts a new run
+            read("s6.txt"),  # immediate repeat across the run boundary: stall 1
+            read("s0.txt"),  # already refreshed in the previous run: stall 2
+            finish(),
+        ]
+    )
+    run = request(max_no_progress=2)
+    async with worker(temporal_env, run, activities):
+        result = await asyncio.wait_for(
+            temporal_env.client.execute_workflow(
+                GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+            ),
+            timeout=30,
+        )
+    assert result.status == "succeeded"
+    assert activities.plan_run_ids[7] != activities.plan_run_ids[8]
+    assert recovered(activities) == [10]
+
+
+@workflow.defn(name="RockyGoal")
+class PreRefreshWorkflow(GoalWorkflow):
+    """Capture adaptive commands recorded while every repeated read was a stall."""
+
+    def _refreshes_evidence(self, tool, success, fingerprint) -> bool:
+        return False
+
+    @workflow.run
+    async def run(self, run: RunInput) -> RunState:
+        return await super().run(run)
+
+
+async def test_production_workflow_replays_history_recorded_before_refreshes(temporal_env):
+    activities = ReadActivities(
+        decisions=[read("a.txt"), read("b.txt"), read("a.txt"), read("b.txt")]
+    )
+    run = request(max_no_progress=1)
+    async with Worker(
+        temporal_env.client,
+        task_queue=run.goal_id,
+        workflows=[PreRefreshWorkflow],
+        activities=activities.registered(),
+        workflow_runner=UnsandboxedWorkflowRunner(),
+    ):
+        handle = await temporal_env.client.start_workflow(
+            PreRefreshWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        # The old rule: recovery after the first re-read, blocked after the second.
+        await asyncio.wait_for(activities.blocked.wait(), timeout=15)
+        await handle.signal(PreRefreshWorkflow.cancel)
+        result = await asyncio.wait_for(handle.result(), timeout=15)
+    assert result.status == "cancelled"
+    assert len(activities.plans) == 4
+    replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
+    await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)
+
+
+async def test_batched_rereads_follow_the_refresh_rule(temporal_env):
+    again = Decision(
+        kind="act",
+        reason="Re-read both sources",
+        actions=[Action(tool="read_file", path="a.txt"), Action(tool="read_file", path="b.txt")],
+    )
+    # The first batch refreshes a.txt (b.txt was just seen); repeating the same
+    # batch right away re-reads what the planner just saw and is a stall.
+    activities = ReadActivities(decisions=[read("a.txt"), read("b.txt"), again, again, finish()])
+    run = request(max_no_progress=1)
+    async with worker(temporal_env, run, activities):
+        handle = await temporal_env.client.start_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        result = await asyncio.wait_for(handle.result(), timeout=20)
+    assert result.status == "succeeded"
+    assert recovered(activities) == [4]
+    replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
+    await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)

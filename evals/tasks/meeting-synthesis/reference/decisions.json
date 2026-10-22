@@ -1,0 +1,76 @@
+{
+  "decisions": [
+    {
+      "id": "DEC-01",
+      "summary": "Adopt PostgreSQL 17 for the billing service",
+      "owner": "Priya",
+      "status": "active"
+    },
+    {
+      "id": "DEC-02",
+      "summary": "Ship the mobile beta on 2026-10-15",
+      "owner": "Marco",
+      "status": "superseded"
+    },
+    {
+      "id": "DEC-03",
+      "summary": "Rotate service API keys every 90 days",
+      "owner": "Aiko",
+      "status": "active"
+    },
+    {
+      "id": "DEC-04",
+      "summary": "Require hardware security keys for production access",
+      "owner": "Tomás",
+      "status": "active"
+    },
+    {
+      "id": "DEC-05",
+      "summary": "Retain raw event logs for 400 days",
+      "owner": "Lena",
+      "status": "active"
+    },
+    {
+      "id": "DEC-06",
+      "summary": "Run nightly reports at 02:00 UTC",
+      "owner": "Samir",
+      "status": "superseded"
+    },
+    {
+      "id": "DEC-07",
+      "summary": "Remove the legacy CSV export in Q1",
+      "owner": "Grace",
+      "status": "active"
+    },
+    {
+      "id": "DEC-08",
+      "summary": "Localise onboarding into Japanese and German",
+      "owner": "Kwame",
+      "status": "active"
+    },
+    {
+      "id": "DEC-09",
+      "summary": "Move the mobile beta to 2026-11-05",
+      "owner": "Marco",
+      "status": "active"
+    },
+    {
+      "id": "DEC-10",
+      "summary": "Freeze the public API schema from 2026-10-20",
+      "owner": "Priya",
+      "status": "active"
+    },
+    {
+      "id": "DEC-11",
+      "summary": "Add a second on-call rotation for EU hours",
+      "owner": "Aiko",
+      "status": "active"
+    },
+    {
+      "id": "DEC-12",
+      "summary": "Run nightly reports at 04:30 UTC",
+      "owner": "Lena",
+      "status": "active"
+    }
+  ]
+}

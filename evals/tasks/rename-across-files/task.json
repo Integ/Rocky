@@ -1,0 +1,45 @@
+{
+  "id": "rename-across-files",
+  "category": "code",
+  "description": "Rename a function across a package while keeping a deprecated alias.",
+  "contract": {
+    "objective": "Rename the function calc_total to compute_total throughout the shop package and update every call site. Export compute_total from the shop package. Keep calc_total importable from shop.cart and from shop as a deprecated alias: calling it must emit a DeprecationWarning and return the same result as compute_total. Code inside the package must not call the deprecated alias.",
+    "acceptance_criteria": [
+      "compute_total is defined in shop/cart.py and exported by shop",
+      "calc_total remains as a warning alias",
+      "No call site inside the package uses calc_total"
+    ],
+    "deliverables": [
+      {
+        "path": "shop/cart.py",
+        "contains": [
+          "def compute_total"
+        ]
+      }
+    ]
+  },
+  "checks": [
+    {
+      "type": "command",
+      "argv": [
+        "{python}",
+        "-m",
+        "unittest",
+        "-q",
+        "test_hidden_shop"
+      ]
+    },
+    {
+      "type": "regex",
+      "path": "shop/checkout.py",
+      "pattern": "calc_total",
+      "negate": true
+    },
+    {
+      "type": "regex",
+      "path": "shop/receipts.py",
+      "pattern": "calc_total",
+      "negate": true
+    }
+  ]
+}

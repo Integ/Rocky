@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     auto_approve_commands: Annotated[list[str], NoDecode] = Field(default_factory=list)
     # Per-request response caps. Reasoning tokens count toward them.
     plan_response_tokens: int = Field(default=16_384, ge=1_024, le=128_000)
-    review_response_tokens: int = Field(default=8_192, ge=1_024, le=128_000)
+    review_response_tokens: int = Field(default=12_000, ge=1_024, le=128_000)
     auth_mode: Literal["local", "token"] = "local"
     api_token: SecretStr | None = None
     host: str = "127.0.0.1"

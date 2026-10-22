@@ -1,0 +1,70 @@
+{
+  "id": "csv-summary",
+  "category": "data",
+  "description": "Aggregate a 180-row sales CSV into exact JSON figures.",
+  "contract": {
+    "objective": "Analyse sales.csv in the task workspace and write summary.json with exactly these keys: \"row_count\" (number of data rows), \"total_revenue\" (sum of units × unit_price over all rows, rounded to 2 decimals), \"revenue_by_region\" (object mapping each region to its revenue, rounded to 2 decimals) and \"top_product_by_units\" (the product with the most units sold). Numbers must be JSON numbers, not strings.",
+    "acceptance_criteria": [
+      "summary.json is valid JSON with the four requested keys",
+      "Every figure is computed from all rows of sales.csv"
+    ],
+    "deliverables": [
+      {
+        "path": "summary.json",
+        "contains": [
+          "total_revenue",
+          "revenue_by_region"
+        ]
+      }
+    ]
+  },
+  "checks": [
+    {
+      "type": "json",
+      "path": "summary.json",
+      "pointer": "/row_count",
+      "equals": 180
+    },
+    {
+      "type": "json",
+      "path": "summary.json",
+      "pointer": "/total_revenue",
+      "equals": 68934.4,
+      "tolerance": 0.011
+    },
+    {
+      "type": "json",
+      "path": "summary.json",
+      "pointer": "/revenue_by_region/North",
+      "equals": 22773.62,
+      "tolerance": 0.011
+    },
+    {
+      "type": "json",
+      "path": "summary.json",
+      "pointer": "/revenue_by_region/South",
+      "equals": 15876.24,
+      "tolerance": 0.011
+    },
+    {
+      "type": "json",
+      "path": "summary.json",
+      "pointer": "/revenue_by_region/East",
+      "equals": 21190.14,
+      "tolerance": 0.011
+    },
+    {
+      "type": "json",
+      "path": "summary.json",
+      "pointer": "/revenue_by_region/West",
+      "equals": 9094.4,
+      "tolerance": 0.011
+    },
+    {
+      "type": "json",
+      "path": "summary.json",
+      "pointer": "/top_product_by_units",
+      "equals": "Widget"
+    }
+  ]
+}

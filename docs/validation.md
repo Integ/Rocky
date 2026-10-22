@@ -154,3 +154,63 @@ current architecture uses optional checkpoints and `contract.limits`.
   was rebuilt with the updated backend and native controls; strict deep signing
   verification passed. Existing Starlette/httpx and Temporal sandbox dependency
   warnings remain. Historic live-model results above do not validate this code.
+
+## Planner visibility and refreshed evidence
+
+Validated on 2026-10-21 (America/Vancouver):
+
+- Full Python suite: **496 passed**, using the cached Temporal test service and
+  mocked model transports. Ruff lint/format and diff whitespace checks passed.
+- Measured with the memory builder: after reading a 19,529-byte Chinese text file,
+  the next planning call previously received about 600 bytes of it; it now receives
+  the whole file. A 15 KB code read stays whole while older results are shortened.
+- New checks cover the newest-result share, unescaped tool bodies, memory shrinking
+  under a large contract instead of failing, neutral one-time refreshes, immediate
+  and second repeats still entering recovery, refresh state across continue-as-new,
+  and replay of an adaptive history recorded before the rule.
+- No live model calls were made. Per-step input tokens can grow up to about
+  24,000 conservative tokens of memory; the default 500,000-token task limit is unchanged.
+
+## Evaluation suite
+
+Validated on 2026-10-21 (America/Vancouver):
+
+- Added `evals/`: ten representative tasks (data, log analysis, three code tasks,
+  multi-file synthesis, document QA, long-form writing, a local login/pagination API
+  and a missing-input case) with an independent grader, step metrics, reports and
+  baseline comparison. `scripts/run_evals.py run` executes them in-process against a
+  live model; nothing in this entry was run against a live model.
+- Every task's reference solution passes its checks and its untouched fixtures fail
+  them; expected answers are checked to be absent from the planner-visible contract.
+- Runner integration tests drive the real workflow, tools and SQLite store with a
+  scripted planner on both the time-skipping and local Temporal servers: approval
+  counting and auto-approval, the cancel policy, a false success caught only by the
+  grader, a missing-input stop graded as correct, and the local API task through
+  Rocky's own HTTP tools.
+
+## Evidence-based, structured review
+
+Validated on 2026-10-21 (America/Vancouver):
+
+- Full Python suite: **553 passed**; Ruff lint/format and diff whitespace checks passed.
+- Tool results list the files each action changed; independent review receives sources,
+  changed files, deliverable provenance and the action log, and returns cited claims that
+  the application audits. Values the application can trace itself need no citation.
+- Five live evaluation runs with `gpt-4.1-mini` and `--approvals auto`, about $2.01 in
+  total at list prices. Each run is a single sample:
+
+  | Code state | Passed | False successes |
+  |---|---|---|
+  | Original verifier | 3/10 | 3 (csv-summary, log-triage, meeting-synthesis) |
+  | Review evidence | 4/10 | 3 (csv-summary, docs-qa, meeting-synthesis) |
+  | First claim audit | 1/10 | 0 (supported claims were rejected) |
+  | Application-verified values | 5/10 | 0 |
+  | Final quote and citation matching | 5/10 | 2 (add-feature, rename-across-files) |
+
+- Replaying the audit on the recorded runs: every earlier false success on a JSON
+  deliverable is rejected even when the reviewer passes everything, and every correct,
+  reviewer-approved JSON result passes. The two remaining false successes are code that
+  fails hidden tests; non-JSON deliverables still depend on the reviewer's judgment.
+- In the first run, auto-approval executed a model command whose backtick substitution
+  ran `brew install atlas-cli`; the formula does not exist and nothing was installed.
+  Command substitution in approved commands is not yet flagged.

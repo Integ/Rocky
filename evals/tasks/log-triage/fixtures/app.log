@@ -1,0 +1,320 @@
+2026-10-01T00:01:27Z INFO  request completed request_id=req-514002 duration_ms=77
+2026-10-01T00:01:56Z INFO  config reloaded request_id=req-160816 duration_ms=222
+2026-10-01T00:02:10Z ERROR [E101] database query exceeded 5s timeout request_id=req-538485 service=api-gateway
+2026-10-01T00:02:38Z INFO  config reloaded request_id=req-161981 duration_ms=129
+2026-10-01T00:03:40Z INFO  request completed request_id=req-711316 duration_ms=593
+2026-10-01T00:05:26Z ERROR [E101] database query exceeded 5s timeout request_id=req-331821 service=api-gateway
+2026-10-01T00:06:05Z WARN  queue depth above 80% request_id=req-251262 service=api-gateway
+2026-10-01T00:06:40Z INFO  user session refreshed request_id=req-687472 duration_ms=108
+2026-10-01T00:07:33Z INFO  request completed request_id=req-674351 duration_ms=580
+2026-10-01T00:07:53Z INFO  config reloaded request_id=req-620528 duration_ms=440
+2026-10-01T00:09:18Z INFO  background sync finished request_id=req-575198 duration_ms=309
+2026-10-01T00:10:26Z INFO  user session refreshed request_id=req-832948 duration_ms=86
+2026-10-01T00:11:47Z INFO  health check ok request_id=req-460160 duration_ms=297
+2026-10-01T00:12:10Z ERROR [E101] database query exceeded 5s timeout request_id=req-538433 service=api-gateway
+2026-10-01T00:13:42Z ERROR [E202] payment provider declined charge request_id=req-612714 service=api-gateway
+2026-10-01T00:14:06Z INFO  background sync finished request_id=req-700861 duration_ms=351
+2026-10-01T00:15:40Z INFO  health check ok request_id=req-708064 duration_ms=73
+2026-10-01T00:16:08Z INFO  request completed request_id=req-597128 duration_ms=65
+2026-10-01T00:17:32Z INFO  health check ok request_id=req-814328 duration_ms=294
+2026-10-01T00:19:15Z INFO  request completed request_id=req-463861 duration_ms=475
+2026-10-01T00:20:50Z ERROR [E202] payment provider declined charge request_id=req-222783 service=api-gateway
+2026-10-01T00:21:50Z INFO  user session refreshed request_id=req-235623 duration_ms=410
+2026-10-01T00:23:35Z INFO  request completed request_id=req-620625 duration_ms=173
+2026-10-01T00:25:34Z INFO  user session refreshed request_id=req-391335 duration_ms=841
+2026-10-01T00:27:29Z INFO  health check ok request_id=req-391945 duration_ms=370
+2026-10-01T00:29:11Z INFO  request completed request_id=req-258252 duration_ms=183
+2026-10-01T00:29:54Z WARN  slow response from inventory service request_id=req-344670 service=api-gateway
+2026-10-01T00:32:03Z INFO  background sync finished request_id=req-291200 duration_ms=291
+2026-10-01T00:32:09Z ERROR [E202] payment provider declined charge request_id=req-660559 service=api-gateway
+2026-10-01T00:33:35Z INFO  config reloaded request_id=req-824035 duration_ms=635
+2026-10-01T00:33:53Z INFO  config reloaded request_id=req-917857 duration_ms=404
+2026-10-01T00:35:39Z INFO  health check ok request_id=req-208566 duration_ms=652
+2026-10-01T00:37:26Z ERROR [E404] email template not found request_id=req-170619 service=api-gateway
+2026-10-01T00:39:23Z ERROR [E303] cache stampede detected for key request_id=req-456572 service=api-gateway
+2026-10-01T00:39:54Z ERROR [E303] cache stampede detected for key request_id=req-258612 service=api-gateway
+2026-10-01T00:41:32Z INFO  user session refreshed request_id=req-173731 duration_ms=631
+2026-10-01T00:43:13Z ERROR [E404] email template not found request_id=req-364511 service=api-gateway
+2026-10-01T00:44:51Z INFO  health check ok request_id=req-220956 duration_ms=480
+2026-10-01T00:46:58Z INFO  user session refreshed request_id=req-190056 duration_ms=107
+2026-10-01T00:48:30Z INFO  user session refreshed request_id=req-601871 duration_ms=531
+2026-10-01T00:48:40Z WARN  retrying webhook delivery request_id=req-653918 service=api-gateway
+2026-10-01T00:49:22Z INFO  config reloaded request_id=req-128356 duration_ms=308
+2026-10-01T00:49:50Z INFO  config reloaded request_id=req-373799 duration_ms=378
+2026-10-01T00:50:37Z INFO  config reloaded request_id=req-333615 duration_ms=557
+2026-10-01T00:52:50Z INFO  config reloaded request_id=req-333876 duration_ms=833
+2026-10-01T00:53:44Z INFO  health check ok request_id=req-958084 duration_ms=760
+2026-10-01T00:54:47Z WARN  retrying webhook delivery request_id=req-616719 service=api-gateway
+2026-10-01T00:54:59Z INFO  background sync finished request_id=req-928494 duration_ms=486
+2026-10-01T00:56:10Z WARN  retrying webhook delivery request_id=req-734534 service=api-gateway
+2026-10-01T00:58:09Z INFO  background sync finished request_id=req-858254 duration_ms=376
+2026-10-01T00:58:34Z WARN  retrying webhook delivery request_id=req-337865 service=api-gateway
+2026-10-01T00:59:29Z INFO  config reloaded request_id=req-606098 duration_ms=627
+2026-10-01T00:59:34Z INFO  background sync finished request_id=req-784697 duration_ms=821
+2026-10-01T01:00:00Z INFO  health check ok request_id=req-225728 duration_ms=804
+2026-10-01T01:00:56Z INFO  health check ok request_id=req-287193 duration_ms=811
+2026-10-01T01:02:26Z ERROR [E202] payment provider declined charge request_id=req-856888 service=api-gateway
+2026-10-01T01:04:13Z INFO  user session refreshed request_id=req-189044 duration_ms=177
+2026-10-01T01:04:50Z ERROR [E303] cache stampede detected for key request_id=req-719511 service=api-gateway
+2026-10-01T01:05:32Z INFO  health check ok request_id=req-724815 duration_ms=676
+2026-10-01T01:07:06Z ERROR [E101] database query exceeded 5s timeout request_id=req-674919 service=api-gateway
+2026-10-01T01:07:14Z INFO  request completed request_id=req-861654 duration_ms=542
+2026-10-01T01:07:54Z INFO  user session refreshed request_id=req-304268 duration_ms=31
+2026-10-01T01:09:03Z WARN  slow response from inventory service request_id=req-625506 service=api-gateway
+2026-10-01T01:10:31Z WARN  slow response from inventory service request_id=req-539366 service=api-gateway
+2026-10-01T01:10:51Z INFO  health check ok request_id=req-470969 duration_ms=681
+2026-10-01T01:13:08Z INFO  user session refreshed request_id=req-626017 duration_ms=547
+2026-10-01T01:13:51Z INFO  health check ok request_id=req-119613 duration_ms=798
+2026-10-01T01:14:42Z INFO  user session refreshed request_id=req-913735 duration_ms=179
+2026-10-01T01:15:23Z INFO  request completed request_id=req-860420 duration_ms=572
+2026-10-01T01:15:43Z INFO  config reloaded request_id=req-643528 duration_ms=571
+2026-10-01T01:17:51Z INFO  config reloaded request_id=req-211263 duration_ms=61
+2026-10-01T01:18:59Z WARN  slow response from inventory service request_id=req-144248 service=api-gateway
+2026-10-01T01:21:13Z INFO  request completed request_id=req-129219 duration_ms=456
+2026-10-01T01:22:41Z INFO  config reloaded request_id=req-630110 duration_ms=527
+2026-10-01T01:23:37Z INFO  config reloaded request_id=req-574318 duration_ms=549
+2026-10-01T01:25:44Z INFO  config reloaded request_id=req-359685 duration_ms=900
+2026-10-01T01:26:55Z INFO  health check ok request_id=req-312429 duration_ms=143
+2026-10-01T01:28:46Z ERROR [E202] payment provider declined charge request_id=req-563594 service=api-gateway
+2026-10-01T01:29:52Z INFO  background sync finished request_id=req-323021 duration_ms=805
+2026-10-01T01:30:28Z INFO  background sync finished request_id=req-261949 duration_ms=149
+2026-10-01T01:31:37Z INFO  user session refreshed request_id=req-590456 duration_ms=767
+2026-10-01T01:32:06Z INFO  user session refreshed request_id=req-610929 duration_ms=686
+2026-10-01T01:33:08Z ERROR [E404] email template not found request_id=req-552483 service=api-gateway
+2026-10-01T01:34:56Z INFO  background sync finished request_id=req-305253 duration_ms=329
+2026-10-01T01:35:24Z INFO  background sync finished request_id=req-120429 duration_ms=570
+2026-10-01T01:37:26Z INFO  health check ok request_id=req-118960 duration_ms=342
+2026-10-01T01:39:43Z INFO  request completed request_id=req-637145 duration_ms=118
+2026-10-01T01:40:46Z INFO  request completed request_id=req-209869 duration_ms=274
+2026-10-01T01:42:00Z ERROR [E101] database query exceeded 5s timeout request_id=req-916838 service=api-gateway
+2026-10-01T01:42:38Z INFO  background sync finished request_id=req-990857 duration_ms=418
+2026-10-01T01:43:21Z INFO  config reloaded request_id=req-639788 duration_ms=509
+2026-10-01T01:44:49Z ERROR [E303] cache stampede detected for key request_id=req-160320 service=api-gateway
+2026-10-01T01:45:40Z INFO  background sync finished request_id=req-175931 duration_ms=20
+2026-10-01T01:46:07Z INFO  config reloaded request_id=req-187810 duration_ms=879
+2026-10-01T01:47:08Z ERROR [E202] payment provider declined charge request_id=req-227588 service=api-gateway
+2026-10-01T01:48:39Z INFO  background sync finished request_id=req-538053 duration_ms=639
+2026-10-01T01:49:17Z ERROR [E101] database query exceeded 5s timeout request_id=req-844003 service=api-gateway
+2026-10-01T01:49:50Z INFO  request completed request_id=req-374617 duration_ms=188
+2026-10-01T01:50:46Z INFO  background sync finished request_id=req-759209 duration_ms=546
+2026-10-01T01:51:43Z WARN  queue depth above 80% request_id=req-624380 service=api-gateway
+2026-10-01T01:52:33Z WARN  slow response from inventory service request_id=req-942718 service=api-gateway
+2026-10-01T01:53:42Z ERROR [E303] cache stampede detected for key request_id=req-119329 service=api-gateway
+2026-10-01T01:54:35Z INFO  health check ok request_id=req-357613 duration_ms=111
+2026-10-01T01:56:30Z INFO  health check ok request_id=req-672424 duration_ms=521
+2026-10-01T01:57:53Z INFO  background sync finished request_id=req-340717 duration_ms=206
+2026-10-01T01:58:33Z INFO  request completed request_id=req-464434 duration_ms=860
+2026-10-01T01:59:11Z ERROR [E303] cache stampede detected for key request_id=req-755830 service=api-gateway
+2026-10-01T02:00:21Z INFO  request completed request_id=req-158092 duration_ms=684
+2026-10-01T02:02:03Z INFO  background sync finished request_id=req-803115 duration_ms=616
+2026-10-01T02:03:10Z INFO  health check ok request_id=req-147434 duration_ms=192
+2026-10-01T02:03:55Z WARN  retrying webhook delivery request_id=req-103798 service=api-gateway
+2026-10-01T02:05:33Z INFO  background sync finished request_id=req-673648 duration_ms=253
+2026-10-01T02:05:46Z INFO  user session refreshed request_id=req-424584 duration_ms=368
+2026-10-01T02:06:37Z ERROR [E101] database query exceeded 5s timeout request_id=req-500164 service=api-gateway
+2026-10-01T02:07:53Z INFO  user session refreshed request_id=req-310742 duration_ms=519
+2026-10-01T02:07:59Z ERROR [E101] database query exceeded 5s timeout request_id=req-956733 service=api-gateway
+2026-10-01T02:09:46Z INFO  request completed request_id=req-513116 duration_ms=309
+2026-10-01T02:11:08Z INFO  config reloaded request_id=req-188586 duration_ms=544
+2026-10-01T02:11:52Z INFO  config reloaded request_id=req-850773 duration_ms=401
+2026-10-01T02:13:20Z INFO  user session refreshed request_id=req-618196 duration_ms=293
+2026-10-01T02:14:02Z ERROR [E303] cache stampede detected for key request_id=req-975864 service=api-gateway
+2026-10-01T02:16:18Z INFO  config reloaded request_id=req-869499 duration_ms=145
+2026-10-01T02:18:37Z INFO  request completed request_id=req-696093 duration_ms=849
+2026-10-01T02:19:40Z ERROR [E101] database query exceeded 5s timeout request_id=req-143895 service=api-gateway
+2026-10-01T02:21:17Z INFO  health check ok request_id=req-494912 duration_ms=574
+2026-10-01T02:21:34Z INFO  config reloaded request_id=req-756646 duration_ms=700
+2026-10-01T02:22:41Z INFO  health check ok request_id=req-103475 duration_ms=819
+2026-10-01T02:23:03Z INFO  config reloaded request_id=req-627403 duration_ms=97
+2026-10-01T02:25:22Z ERROR [E202] payment provider declined charge request_id=req-872578 service=api-gateway
+2026-10-01T02:25:46Z INFO  user session refreshed request_id=req-346190 duration_ms=239
+2026-10-01T02:27:48Z INFO  request completed request_id=req-501143 duration_ms=493
+2026-10-01T02:29:06Z INFO  user session refreshed request_id=req-746944 duration_ms=82
+2026-10-01T02:29:48Z INFO  background sync finished request_id=req-783183 duration_ms=639
+2026-10-01T02:30:27Z ERROR [E202] payment provider declined charge request_id=req-163607 service=api-gateway
+2026-10-01T02:30:57Z INFO  health check ok request_id=req-808530 duration_ms=300
+2026-10-01T02:33:14Z WARN  retrying webhook delivery request_id=req-588529 service=api-gateway
+2026-10-01T02:33:49Z INFO  user session refreshed request_id=req-675748 duration_ms=322
+2026-10-01T02:34:15Z INFO  background sync finished request_id=req-118354 duration_ms=472
+2026-10-01T02:34:39Z INFO  background sync finished request_id=req-571283 duration_ms=399
+2026-10-01T02:35:37Z INFO  request completed request_id=req-320944 duration_ms=598
+2026-10-01T02:36:05Z ERROR [E101] database query exceeded 5s timeout request_id=req-649522 service=api-gateway
+2026-10-01T02:37:42Z ERROR [E303] cache stampede detected for key request_id=req-960059 service=api-gateway
+2026-10-01T02:38:58Z INFO  background sync finished request_id=req-837502 duration_ms=239
+2026-10-01T02:41:10Z INFO  health check ok request_id=req-609755 duration_ms=28
+2026-10-01T02:41:55Z ERROR [E303] cache stampede detected for key request_id=req-615580 service=api-gateway
+2026-10-01T02:43:43Z WARN  retrying webhook delivery request_id=req-247542 service=api-gateway
+2026-10-01T02:45:16Z INFO  background sync finished request_id=req-226782 duration_ms=4
+2026-10-01T02:46:44Z INFO  health check ok request_id=req-979871 duration_ms=125
+2026-10-01T02:47:39Z INFO  background sync finished request_id=req-875849 duration_ms=262
+2026-10-01T02:49:19Z ERROR [E404] email template not found request_id=req-509113 service=api-gateway
+2026-10-01T02:49:43Z INFO  background sync finished request_id=req-548845 duration_ms=877
+2026-10-01T02:50:00Z WARN  queue depth above 80% request_id=req-154124 service=api-gateway
+2026-10-01T02:51:18Z INFO  user session refreshed request_id=req-256148 duration_ms=275
+2026-10-01T02:53:14Z INFO  background sync finished request_id=req-299071 duration_ms=806
+2026-10-01T02:55:08Z INFO  health check ok request_id=req-951404 duration_ms=899
+2026-10-01T02:56:05Z INFO  health check ok request_id=req-151879 duration_ms=464
+2026-10-01T02:56:45Z INFO  health check ok request_id=req-400111 duration_ms=53
+2026-10-01T02:57:22Z ERROR [E202] payment provider declined charge request_id=req-535019 service=api-gateway
+2026-10-01T02:58:43Z WARN  queue depth above 80% request_id=req-874630 service=api-gateway
+2026-10-01T02:59:54Z INFO  background sync finished request_id=req-350258 duration_ms=497
+2026-10-01T03:01:39Z ERROR [E101] database query exceeded 5s timeout request_id=req-774449 service=api-gateway
+2026-10-01T03:02:37Z INFO  health check ok request_id=req-951261 duration_ms=566
+2026-10-01T03:03:38Z INFO  health check ok request_id=req-449002 duration_ms=440
+2026-10-01T03:04:18Z INFO  request completed request_id=req-355942 duration_ms=181
+2026-10-01T03:05:50Z INFO  user session refreshed request_id=req-434797 duration_ms=380
+2026-10-01T03:07:01Z INFO  request completed request_id=req-311961 duration_ms=770
+2026-10-01T03:08:51Z INFO  config reloaded request_id=req-882070 duration_ms=218
+2026-10-01T03:10:32Z WARN  slow response from inventory service request_id=req-888645 service=api-gateway
+2026-10-01T03:12:44Z WARN  slow response from inventory service request_id=req-477639 service=api-gateway
+2026-10-01T03:14:57Z INFO  user session refreshed request_id=req-928702 duration_ms=97
+2026-10-01T03:16:11Z INFO  health check ok request_id=req-503241 duration_ms=664
+2026-10-01T03:18:10Z INFO  request completed request_id=req-427172 duration_ms=133
+2026-10-01T03:18:23Z INFO  health check ok request_id=req-900787 duration_ms=604
+2026-10-01T03:20:33Z ERROR [E303] cache stampede detected for key request_id=req-510539 service=api-gateway
+2026-10-01T03:22:53Z INFO  user session refreshed request_id=req-570758 duration_ms=804
+2026-10-01T03:23:25Z WARN  queue depth above 80% request_id=req-259455 service=api-gateway
+2026-10-01T03:23:57Z INFO  health check ok request_id=req-856794 duration_ms=90
+2026-10-01T03:24:12Z ERROR [E101] database query exceeded 5s timeout request_id=req-231755 service=api-gateway
+2026-10-01T03:24:26Z INFO  user session refreshed request_id=req-418538 duration_ms=644
+2026-10-01T03:25:35Z INFO  request completed request_id=req-558679 duration_ms=104
+2026-10-01T03:25:58Z WARN  slow response from inventory service request_id=req-711205 service=api-gateway
+2026-10-01T03:27:42Z WARN  queue depth above 80% request_id=req-928885 service=api-gateway
+2026-10-01T03:27:47Z ERROR [E404] email template not found request_id=req-416167 service=api-gateway
+2026-10-01T03:29:03Z INFO  user session refreshed request_id=req-775886 duration_ms=489
+2026-10-01T03:31:22Z WARN  slow response from inventory service request_id=req-359059 service=api-gateway
+2026-10-01T03:33:12Z INFO  request completed request_id=req-422329 duration_ms=25
+2026-10-01T03:34:06Z INFO  health check ok request_id=req-807225 duration_ms=86
+2026-10-01T03:35:16Z WARN  retrying webhook delivery request_id=req-544934 service=api-gateway
+2026-10-01T03:36:19Z INFO  background sync finished request_id=req-829623 duration_ms=738
+2026-10-01T03:38:11Z INFO  user session refreshed request_id=req-515611 duration_ms=9
+2026-10-01T03:39:30Z INFO  request completed request_id=req-629403 duration_ms=213
+2026-10-01T03:41:41Z INFO  user session refreshed request_id=req-426857 duration_ms=239
+2026-10-01T03:43:45Z WARN  retrying webhook delivery request_id=req-897411 service=api-gateway
+2026-10-01T03:44:17Z INFO  config reloaded request_id=req-619846 duration_ms=194
+2026-10-01T03:45:19Z INFO  request completed request_id=req-797611 duration_ms=612
+2026-10-01T03:46:01Z INFO  user session refreshed request_id=req-156998 duration_ms=27
+2026-10-01T03:46:42Z INFO  request completed request_id=req-844340 duration_ms=191
+2026-10-01T03:48:27Z INFO  background sync finished request_id=req-846622 duration_ms=753
+2026-10-01T03:49:00Z INFO  background sync finished request_id=req-273679 duration_ms=198
+2026-10-01T03:49:52Z INFO  health check ok request_id=req-650290 duration_ms=35
+2026-10-01T03:51:16Z INFO  background sync finished request_id=req-497011 duration_ms=342
+2026-10-01T03:53:14Z ERROR [E101] database query exceeded 5s timeout request_id=req-103010 service=api-gateway
+2026-10-01T03:53:39Z INFO  config reloaded request_id=req-229717 duration_ms=780
+2026-10-01T03:54:37Z INFO  background sync finished request_id=req-906074 duration_ms=844
+2026-10-01T03:56:32Z ERROR [E202] payment provider declined charge request_id=req-839515 service=api-gateway
+2026-10-01T03:58:12Z INFO  user session refreshed request_id=req-568029 duration_ms=334
+2026-10-01T03:59:50Z INFO  request completed request_id=req-597585 duration_ms=649
+2026-10-01T04:01:40Z WARN  retrying webhook delivery request_id=req-755788 service=api-gateway
+2026-10-01T04:01:55Z INFO  request completed request_id=req-586592 duration_ms=825
+2026-10-01T04:02:15Z WARN  slow response from inventory service request_id=req-883587 service=api-gateway
+2026-10-01T04:03:46Z INFO  config reloaded request_id=req-451242 duration_ms=47
+2026-10-01T04:04:58Z INFO  background sync finished request_id=req-823074 duration_ms=285
+2026-10-01T04:06:19Z ERROR [E303] cache stampede detected for key request_id=req-892358 service=api-gateway
+2026-10-01T04:06:40Z ERROR [E101] database query exceeded 5s timeout request_id=req-345226 service=api-gateway
+2026-10-01T04:08:44Z INFO  background sync finished request_id=req-505290 duration_ms=443
+2026-10-01T04:10:55Z ERROR [E101] database query exceeded 5s timeout request_id=req-620660 service=api-gateway
+2026-10-01T04:12:17Z INFO  user session refreshed request_id=req-910349 duration_ms=624
+2026-10-01T04:13:22Z INFO  health check ok request_id=req-435071 duration_ms=373
+2026-10-01T04:13:47Z INFO  user session refreshed request_id=req-510711 duration_ms=256
+2026-10-01T04:15:36Z ERROR [E202] payment provider declined charge request_id=req-135508 service=api-gateway
+2026-10-01T04:17:04Z ERROR [E303] cache stampede detected for key request_id=req-547274 service=api-gateway
+2026-10-01T04:17:27Z WARN  slow response from inventory service request_id=req-188166 service=api-gateway
+2026-10-01T04:17:56Z INFO  health check ok request_id=req-844249 duration_ms=180
+2026-10-01T04:19:00Z ERROR [E303] cache stampede detected for key request_id=req-583313 service=api-gateway
+2026-10-01T04:20:05Z INFO  request completed request_id=req-988130 duration_ms=801
+2026-10-01T04:21:25Z WARN  retrying webhook delivery request_id=req-694421 service=api-gateway
+2026-10-01T04:23:05Z WARN  slow response from inventory service request_id=req-372981 service=api-gateway
+2026-10-01T04:25:02Z WARN  slow response from inventory service request_id=req-357257 service=api-gateway
+2026-10-01T04:25:46Z WARN  slow response from inventory service request_id=req-706371 service=api-gateway
+2026-10-01T04:27:14Z ERROR [E404] email template not found request_id=req-363878 service=api-gateway
+2026-10-01T04:29:28Z INFO  request completed request_id=req-781197 duration_ms=672
+2026-10-01T04:31:31Z INFO  request completed request_id=req-207303 duration_ms=489
+2026-10-01T04:32:35Z INFO  request completed request_id=req-492037 duration_ms=900
+2026-10-01T04:33:55Z WARN  slow response from inventory service request_id=req-152838 service=api-gateway
+2026-10-01T04:34:49Z INFO  config reloaded request_id=req-490318 duration_ms=889
+2026-10-01T04:35:39Z INFO  request completed request_id=req-372575 duration_ms=111
+2026-10-01T04:37:13Z WARN  retrying webhook delivery request_id=req-486618 service=api-gateway
+2026-10-01T04:37:54Z ERROR [E101] database query exceeded 5s timeout request_id=req-367296 service=api-gateway
+2026-10-01T04:38:51Z INFO  background sync finished request_id=req-958608 duration_ms=421
+2026-10-01T04:40:31Z WARN  slow response from inventory service request_id=req-427360 service=api-gateway
+2026-10-01T04:41:28Z ERROR [E303] cache stampede detected for key request_id=req-619700 service=api-gateway
+2026-10-01T04:41:49Z INFO  health check ok request_id=req-934502 duration_ms=682
+2026-10-01T04:42:33Z INFO  user session refreshed request_id=req-195580 duration_ms=410
+2026-10-01T04:43:47Z INFO  background sync finished request_id=req-397062 duration_ms=430
+2026-10-01T04:44:05Z WARN  retrying webhook delivery request_id=req-694039 service=api-gateway
+2026-10-01T04:45:56Z INFO  background sync finished request_id=req-903904 duration_ms=662
+2026-10-01T04:46:51Z INFO  user session refreshed request_id=req-524645 duration_ms=9
+2026-10-01T04:48:47Z INFO  request completed request_id=req-544339 duration_ms=843
+2026-10-01T04:49:15Z INFO  health check ok request_id=req-482444 duration_ms=794
+2026-10-01T04:50:01Z ERROR [E303] cache stampede detected for key request_id=req-154206 service=api-gateway
+2026-10-01T04:51:47Z ERROR [E303] cache stampede detected for key request_id=req-752418 service=api-gateway
+2026-10-01T04:54:01Z ERROR [E101] database query exceeded 5s timeout request_id=req-464846 service=api-gateway
+2026-10-01T04:56:19Z ERROR [E101] database query exceeded 5s timeout request_id=req-170356 service=api-gateway
+2026-10-01T04:58:29Z INFO  user session refreshed request_id=req-930624 duration_ms=311
+2026-10-01T04:59:06Z INFO  health check ok request_id=req-145610 duration_ms=325
+2026-10-01T04:59:24Z INFO  health check ok request_id=req-767279 duration_ms=91
+2026-10-01T05:00:10Z INFO  user session refreshed request_id=req-998197 duration_ms=638
+2026-10-01T05:01:58Z INFO  health check ok request_id=req-305639 duration_ms=190
+2026-10-01T05:02:58Z ERROR [E101] database query exceeded 5s timeout request_id=req-643049 service=api-gateway
+2026-10-01T05:04:34Z ERROR [E404] email template not found request_id=req-359060 service=api-gateway
+2026-10-01T05:05:28Z ERROR [E303] cache stampede detected for key request_id=req-689659 service=api-gateway
+2026-10-01T05:05:42Z INFO  request completed request_id=req-439951 duration_ms=402
+2026-10-01T05:07:43Z INFO  background sync finished request_id=req-757501 duration_ms=667
+2026-10-01T05:09:35Z WARN  retrying webhook delivery request_id=req-361366 service=api-gateway
+2026-10-01T05:11:19Z INFO  config reloaded request_id=req-568492 duration_ms=451
+2026-10-01T05:12:09Z ERROR [E404] email template not found request_id=req-748955 service=api-gateway
+2026-10-01T05:14:13Z WARN  queue depth above 80% request_id=req-900656 service=api-gateway
+2026-10-01T05:16:15Z INFO  health check ok request_id=req-949901 duration_ms=412
+2026-10-01T05:16:47Z ERROR [E202] payment provider declined charge request_id=req-475993 service=api-gateway
+2026-10-01T05:17:15Z INFO  config reloaded request_id=req-628840 duration_ms=675
+2026-10-01T05:17:30Z ERROR [E101] database query exceeded 5s timeout request_id=req-236599 service=api-gateway
+2026-10-01T05:18:55Z INFO  request completed request_id=req-636327 duration_ms=58
+2026-10-01T05:21:09Z INFO  user session refreshed request_id=req-784453 duration_ms=29
+2026-10-01T05:21:30Z INFO  request completed request_id=req-867646 duration_ms=201
+2026-10-01T05:22:08Z INFO  background sync finished request_id=req-615763 duration_ms=833
+2026-10-01T05:22:55Z INFO  user session refreshed request_id=req-856106 duration_ms=70
+2026-10-01T05:24:29Z INFO  user session refreshed request_id=req-364472 duration_ms=334
+2026-10-01T05:25:44Z INFO  user session refreshed request_id=req-578573 duration_ms=263
+2026-10-01T05:27:57Z INFO  user session refreshed request_id=req-603429 duration_ms=609
+2026-10-01T05:29:09Z INFO  background sync finished request_id=req-348931 duration_ms=384
+2026-10-01T05:29:23Z WARN  slow response from inventory service request_id=req-523064 service=api-gateway
+2026-10-01T05:30:39Z INFO  user session refreshed request_id=req-495146 duration_ms=814
+2026-10-01T05:31:51Z ERROR [E101] database query exceeded 5s timeout request_id=req-656501 service=api-gateway
+2026-10-01T05:33:28Z INFO  config reloaded request_id=req-575045 duration_ms=536
+2026-10-01T05:33:59Z WARN  queue depth above 80% request_id=req-661723 service=api-gateway
+2026-10-01T05:35:44Z INFO  background sync finished request_id=req-489510 duration_ms=387
+2026-10-01T05:37:23Z INFO  background sync finished request_id=req-477750 duration_ms=785
+2026-10-01T05:37:48Z INFO  config reloaded request_id=req-285342 duration_ms=764
+2026-10-01T05:38:05Z WARN  retrying webhook delivery request_id=req-641177 service=api-gateway
+2026-10-01T05:39:29Z INFO  background sync finished request_id=req-714329 duration_ms=753
+2026-10-01T05:39:34Z INFO  user session refreshed request_id=req-332403 duration_ms=300
+2026-10-01T05:41:29Z INFO  request completed request_id=req-481785 duration_ms=138
+2026-10-01T05:43:39Z WARN  slow response from inventory service request_id=req-784833 service=api-gateway
+2026-10-01T05:43:49Z ERROR [E202] payment provider declined charge request_id=req-694669 service=api-gateway
+2026-10-01T05:44:21Z INFO  user session refreshed request_id=req-660058 duration_ms=426
+2026-10-01T05:45:43Z INFO  background sync finished request_id=req-314102 duration_ms=641
+2026-10-01T05:47:49Z ERROR [E303] cache stampede detected for key request_id=req-114797 service=api-gateway
+2026-10-01T05:48:56Z INFO  request completed request_id=req-572753 duration_ms=68
+2026-10-01T05:49:38Z INFO  background sync finished request_id=req-920150 duration_ms=414
+2026-10-01T05:50:50Z INFO  config reloaded request_id=req-158857 duration_ms=361
+2026-10-01T05:52:48Z INFO  health check ok request_id=req-642724 duration_ms=257
+2026-10-01T05:53:35Z INFO  request completed request_id=req-146139 duration_ms=547
+2026-10-01T05:53:46Z INFO  user session refreshed request_id=req-349213 duration_ms=62
+2026-10-01T05:54:17Z ERROR [E303] cache stampede detected for key request_id=req-677684 service=api-gateway
+2026-10-01T05:55:12Z ERROR [E303] cache stampede detected for key request_id=req-309210 service=api-gateway
+2026-10-01T05:57:26Z INFO  config reloaded request_id=req-535415 duration_ms=181
+2026-10-01T05:59:41Z WARN  queue depth above 80% request_id=req-414851 service=api-gateway
+2026-10-01T05:59:58Z INFO  health check ok request_id=req-859489 duration_ms=735
+2026-10-01T06:00:04Z INFO  health check ok request_id=req-557858 duration_ms=85
+2026-10-01T06:02:04Z ERROR [E101] database query exceeded 5s timeout request_id=req-210395 service=api-gateway
+2026-10-01T06:02:18Z ERROR [E303] cache stampede detected for key request_id=req-886069 service=api-gateway
+2026-10-01T06:03:30Z INFO  config reloaded request_id=req-378908 duration_ms=698
+2026-10-01T06:05:26Z INFO  background sync finished request_id=req-648661 duration_ms=305
+2026-10-01T06:06:26Z ERROR [E101] database query exceeded 5s timeout request_id=req-632077 service=api-gateway
+2026-10-01T06:07:37Z INFO  user session refreshed request_id=req-982610 duration_ms=166
+2026-10-01T06:09:05Z WARN  retrying webhook delivery request_id=req-507589 service=api-gateway
+2026-10-01T06:10:11Z INFO  config reloaded request_id=req-993311 duration_ms=483
+2026-10-01T06:12:16Z INFO  request completed request_id=req-831505 duration_ms=881
+2026-10-01T06:12:27Z INFO  user session refreshed request_id=req-859822 duration_ms=587
+2026-10-01T06:13:50Z INFO  config reloaded request_id=req-510583 duration_ms=602

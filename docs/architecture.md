@@ -69,8 +69,12 @@ resident. The planner can update an accumulated `handoff_summary`; it retains
 older conclusions and failed approaches instead of replacing them with only
 the last few observations. `MemoryManager` reserves separate shares for summary,
 recent raw history and retrieved knowledge: 40/40/20 when all are present, within
-a 2000-token serialized envelope. Empty or unused shares flow to later layers.
-Several recent result excerpts survive even with a large summary. The default
+a 24000-token serialized envelope. Empty or unused shares flow to later layers.
+The newest tool result may use most of the recent-history share, so a typical
+file read or command output reaches the next decision whole; older results are
+shortened first and still keep excerpts. Tool bodies follow their metadata as raw
+text rather than nested JSON strings. The planner lowers the envelope to the room
+the essential layers leave inside the whole-request bound. The default
 counter uses UTF-8 bytes as a conservative token upper bound; provider tokenizers
 can be injected. The model boundary independently checks the entire envelope.
 
@@ -135,16 +139,65 @@ reflection without repeating its external effect when explicitly recovered.
   At the first stalled threshold reflection requests a changed strategy and
   preserves a handoff summary. Only another stalled window without new evidence
   enters blocked sleep. Fresh results and real wake input restore the recovery
-  allowance; a timer alone does not. Fingerprints detect repetition rather than
-  semantic correctness, which remains the independent verifier's responsibility.
+  allowance; a timer alone does not. Planning memory is a bounded window, so a
+  repeated successful `read_file`, `list_files` or `fetch_url` whose earlier
+  result has rolled out is a neutral refresh: it is neither a stall nor progress.
+  Each observation gets one refresh, never immediately after the planner saw it;
+  the allowance is checkpointed across continued runs, and histories recorded
+  before this rule replay with every repeat counted as a stall. Fingerprints
+  detect repetition rather than semantic correctness, which remains the
+  independent verifier's responsibility.
 
 ## Completion and trust
 
 A finish decision invokes independent verification. Deterministic checks read
 declared files, check minimum size/required text and hash their bytes. A separate
 structured model review checks actual artifact excerpts against the objective
-and criteria. It cannot prove factual truth or browse sources independently;
-research deliverables still require appropriate evidence and human review.
+and criteria, together with evidence the application collects from the
+execution record and the files on disk rather than from planner claims:
+source files the task read or found unchanged in its workspace (size, line
+count and whether `read_file` returned them completely), other files the task
+created or modified (diffed against their first read content), which recorded
+actions wrote each deliverable, and the chronological tool actions with output
+excerpts. Every tool result lists the files it changed; shell commands report
+changes under their working directory from before/after snapshots that skip
+VCS, dependency and cache trees and stop at 5000 files. The review must trace
+figures to sources or observed outputs and reject partial reads presented as
+complete or computed results overwritten by unsupported content. Evidence is
+fitted into the request bound: action outputs shrink first, then file text gets
+max-min fair shares while every file keeps its metadata.
+
+The review is structured, and the application, not the reviewer, decides
+whether figures are supported. For JSON deliverables it extracts every number
+and every short name, code, date or path (up to 60; plain lowercase labels such
+as statuses are left to the reviewer's judgment) and first verifies what it
+can itself: a value is computed when the deliverable was last written by a
+command that does not state it literally; a distinctive value (not a one- or
+two-digit number) is stated when a single line of a source, a changed file or
+an action output contains it, or every name, code and number of a paraphrase;
+a cited path holds when that file states the value paired with it (a record
+sibling, or the value under the same key in a parallel object), however small. A field of a
+record in an array counts only on a line that also names an identifier of that
+record. The reviewer sees these checked values and returns claims only for the
+rest, plus the figures, facts and properties of other deliverables: each claim
+has a kind (quoted, computed or judgment), a location and a verbatim quote.
+Locations are matched loosely (`source:`, `file:`, `artifact:`, bare or
+directory-relative paths, several locations). Each quoted line must appear in
+order at the location, so skipped lines are tolerated, as are ellipses, JSON
+escapes, Markdown emphasis and dash variants; a record field and its record
+identifier must still share one quoted line. Quoting the very file a citation
+names supports that citation. The audit then rejects a pass
+when a claim is unsupported, cites a missing location or a quote that is not
+there, judges a number, judges a name that the evidence states, cites a
+deliverable for its own reported values, attributes a computed value to
+something other than a command whose output or written deliverable shows it,
+omits a value nobody verified, or disputes a value the application verified.
+Rejections list each value with the reason, so the planner can compute or
+correct it. The audit checks provenance, not arithmetic: a real but buggy
+computation still passes, and deliverables that are not JSON still depend on
+the reviewer's judgment for their content.
+Review still cannot prove factual truth or browse sources independently;
+research deliverables require appropriate evidence and human review.
 
 External text never grants permissions. The owner configures `ROCKY_TOOL_ACCESS`,
 which defaults to `full`. In full mode all eight tools are available even when an

@@ -70,6 +70,10 @@ class GoalWorkflow:
         self._deadline = None
         self._no_progress = 0
         self._seen_progress: set[str] = set()
+        self._refreshed_progress: set[str] = set()
+        self._last_progress = ""
+        # Fingerprints of the batch the planner saw last, like _last_progress.
+        self._last_batch: set[str] = set()
         self._seen_wake_commands: set[str] = set()
         self._unlimited = False
         self._execution_boundary = 0
@@ -90,6 +94,9 @@ class GoalWorkflow:
             self._state = checkpoint.state.model_copy(deep=True)
             self._no_progress = checkpoint.no_progress
             self._seen_progress = set(checkpoint.seen_progress)
+            self._refreshed_progress = set(checkpoint.refreshed_progress)
+            self._last_progress = checkpoint.last_progress
+            self._last_batch = set(checkpoint.last_batch_progress)
             self._wake_generation = checkpoint.wake_generation
             self._consumed_wake_generation = checkpoint.consumed_wake_generation
             self._wake_feedback = checkpoint.wake_feedback
@@ -127,6 +134,9 @@ class GoalWorkflow:
             feedback=feedback[:4000],
             no_progress=self._no_progress,
             seen_progress=sorted(self._seen_progress)[-256:],
+            refreshed_progress=sorted(self._refreshed_progress)[-256:],
+            last_progress=self._last_progress,
+            last_batch_progress=sorted(self._last_batch),
             wake_generation=self._wake_generation,
             consumed_wake_generation=self._consumed_wake_generation,
             wake_feedback=self._wake_feedback,
@@ -688,6 +698,29 @@ class GoalWorkflow:
             ]
         }
 
+    def _refreshes_evidence(self, tool: str, success: bool, fingerprint: str) -> bool:
+        """Re-reading evidence that left the planner's recent window is not a stall.
+
+        Planning memory holds a bounded window of results, so a long task may
+        need an unchanged file again. Each observation may be refreshed once,
+        never right after the planner saw it (alone or in a parallel batch). A
+        refresh is still not new evidence: it neither counts as a stall nor
+        resets the counter.
+        """
+        if (
+            not self._adaptive
+            or not success
+            or tool not in _OBSERVATION_TOOLS
+            or fingerprint == self._last_progress
+            or fingerprint in self._last_batch
+            or fingerprint in self._refreshed_progress
+            # Earlier histories counted every repeat; replay must keep doing so.
+            or not workflow.patched("refresh-rolled-out-evidence-v1")
+        ):
+            return False
+        self._refreshed_progress.add(fingerprint)
+        return True
+
     def _reflect_cycle(self, run: RunInput, cycle: "_Cycle") -> dict:
         if cycle.error:
             self._no_progress += 1
@@ -714,11 +747,16 @@ class GoalWorkflow:
                 self._seen_progress.add(fingerprint)
                 self._no_progress = 0
                 self._state.recovery_attempts = 0
-            else:
+            elif not self._refreshes_evidence(
+                cycle.decision.action.tool, cycle.result.success, fingerprint
+            ):
                 self._no_progress += 1
+            self._last_progress = fingerprint
+            self._last_batch = set()
         elif cycle.results:
-            # A batch progresses when any action returned new evidence.
-            new = {
+            # A batch progresses when any action returned new evidence. When
+            # none did, re-reading results that left the window is a refresh.
+            fingerprints = {
                 hashlib.sha256(
                     json.dumps(
                         {
@@ -728,16 +766,24 @@ class GoalWorkflow:
                         },
                         sort_keys=True,
                     ).encode()
-                ).hexdigest()
+                ).hexdigest(): action.tool
                 for action, result in cycle.results
                 if result.success
-            } - self._seen_progress
+            }
+            new = set(fingerprints) - self._seen_progress
             if new:
                 self._seen_progress.update(new)
                 self._no_progress = 0
                 self._state.recovery_attempts = 0
-            else:
+            elif not any(
+                [
+                    self._refreshes_evidence(tool, True, fingerprint)
+                    for fingerprint, tool in sorted(fingerprints.items())
+                ]
+            ):
                 self._no_progress += 1
+            self._last_progress = ""
+            self._last_batch = set(fingerprints)
         elif cycle.verification is not None and not cycle.verification.passed:
             self._no_progress += 1
         # Waiting on a dependency is not progress and cannot erase a recovery
@@ -1218,6 +1264,10 @@ class GoalWorkflow:
         except asyncio.CancelledError:
             # Native Temporal cancellation is also reflected in the projection.
             return await self._complete("cancelled", "Execution cancelled.")
+
+
+# Read-only observations whose repetition may refresh rolled-out evidence.
+_OBSERVATION_TOOLS = frozenset({"read_file", "list_files", "fetch_url"})
 
 
 class _StopExecution(Exception):

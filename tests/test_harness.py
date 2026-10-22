@@ -110,19 +110,39 @@ async def test_completion_rechecks_actual_artifact_bytes_after_model_review(chan
     current = original.model_copy(update={"sha256": "after"}) if changed else original
     reads = iter([original, current])
 
-    async def review(value, contents):
+    async def review(value, contents, evidence=None, checklist=None, verified=None):
         assert contents == "actual report excerpt"
+        assert evidence["deliverables"] == {
+            "report.md": ["not written by any recorded tool action"]
+        }
+        claim = {
+            "deliverable": "report.md",
+            "pointer": "",
+            "value": "the report has an excerpt",
+            "kind": "judgment",
+            "location": "deliverable:report.md",
+            "quote": "actual report excerpt",
+            "supported": True,
+        }
         return VerificationResult(
-            passed=True, feedback="Criteria met", input_tokens=4, output_tokens=2
+            passed=True, feedback="Criteria met", claims=[claim], input_tokens=4, output_tokens=2
         )
 
     activities = Activities(
-        SimpleNamespace(is_cancel_requested=lambda goal_id: False),
+        SimpleNamespace(
+            is_cancel_requested=lambda goal_id: False, all_execution_steps=lambda goal_id: []
+        ),
         SimpleNamespace(
             verify_files=lambda run: VerificationResult(
                 passed=True, feedback="File exists", artifacts=[next(reads)]
             ),
             review_text=lambda run: "actual report excerpt",
+            display_path=lambda goal_id, path: path,
+            workspace_files=lambda run: [],
+            describe_file=lambda run, path, limit: {
+                "path": path,
+                "content": "actual report excerpt",
+            },
         ),
         SimpleNamespace(review=review),
     )

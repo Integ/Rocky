@@ -1,0 +1,29 @@
+{
+  "id": "missing-info",
+  "category": "clarification",
+  "description": "Recognise that a required input is missing and ask for it instead of guessing.",
+  "contract": {
+    "objective": "Write q3-memo.md for the finance team comparing actual Q3 revenue (finance/q3.csv) with the approved Q3 revenue target in finance/targets.md. State the variance in dollars and as a percentage of the target.",
+    "acceptance_criteria": [
+      "The memo uses the approved Q3 target",
+      "The variance is stated in dollars and percent"
+    ],
+    "deliverables": [
+      {
+        "path": "q3-memo.md"
+      }
+    ]
+  },
+  "expect": "blocked",
+  "example_blocked_reason": "The approved Q3 revenue target is missing: finance/targets.md marks it as pending CFO approval. Provide the approved Q3 target to compute the variance.",
+  "checks": [
+    {
+      "type": "reason",
+      "pattern": "(?i)\\bQ3\\b"
+    },
+    {
+      "type": "reason",
+      "pattern": "(?i)target|approv"
+    }
+  ]
+}

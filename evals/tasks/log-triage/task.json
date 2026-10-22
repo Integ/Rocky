@@ -1,0 +1,83 @@
+{
+  "id": "log-triage",
+  "category": "analysis",
+  "description": "Count error codes in a 29 KB log that exceeds a single read.",
+  "contract": {
+    "objective": "app.log in the task workspace is a service log. Every error line contains a code in square brackets such as [E123]. Write triage.json with: \"error_counts\" (object mapping each error code to the number of ERROR lines with that code), \"total_errors\", \"most_frequent\" (the code with the most occurrences) and \"first_seen\" (object mapping each code to the timestamp of its first occurrence, exactly as written in the log). Count every line of the file.",
+    "acceptance_criteria": [
+      "triage.json covers every error code that appears in app.log",
+      "Counts and timestamps match the complete log, not a sample"
+    ],
+    "deliverables": [
+      {
+        "path": "triage.json",
+        "contains": [
+          "error_counts",
+          "first_seen"
+        ]
+      }
+    ]
+  },
+  "checks": [
+    {
+      "type": "json",
+      "path": "triage.json",
+      "pointer": "/error_counts/E101",
+      "equals": 23
+    },
+    {
+      "type": "json",
+      "path": "triage.json",
+      "pointer": "/error_counts/E202",
+      "equals": 13
+    },
+    {
+      "type": "json",
+      "path": "triage.json",
+      "pointer": "/error_counts/E303",
+      "equals": 21
+    },
+    {
+      "type": "json",
+      "path": "triage.json",
+      "pointer": "/error_counts/E404",
+      "equals": 8
+    },
+    {
+      "type": "json",
+      "path": "triage.json",
+      "pointer": "/total_errors",
+      "equals": 65
+    },
+    {
+      "type": "json",
+      "path": "triage.json",
+      "pointer": "/most_frequent",
+      "equals": "E101"
+    },
+    {
+      "type": "json",
+      "path": "triage.json",
+      "pointer": "/first_seen/E101",
+      "equals": "2026-10-01T00:02:10Z"
+    },
+    {
+      "type": "json",
+      "path": "triage.json",
+      "pointer": "/first_seen/E202",
+      "equals": "2026-10-01T00:13:42Z"
+    },
+    {
+      "type": "json",
+      "path": "triage.json",
+      "pointer": "/first_seen/E404",
+      "equals": "2026-10-01T00:37:26Z"
+    },
+    {
+      "type": "json",
+      "path": "triage.json",
+      "pointer": "/first_seen/E303",
+      "equals": "2026-10-01T00:39:23Z"
+    }
+  ]
+}

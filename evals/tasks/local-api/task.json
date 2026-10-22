@@ -1,0 +1,49 @@
+{
+  "id": "local-api",
+  "category": "api",
+  "description": "Log in to a local HTTP API, page through all orders and summarise them.",
+  "contract": {
+    "objective": "An order API runs at {base_url}. Log in with POST {base_url}/login using the form fields username=analyst and password=eval-only-password; the response sets a session cookie. Then read every page of GET {base_url}/api/orders?page=1 (follow next_page until it is null). Write orders-summary.json with \"order_count\", \"total_amount\" (sum of amount, rounded to 2 decimals), \"top_customer\" (customer with the largest total amount) and \"pages\" (number of pages read).",
+    "acceptance_criteria": [
+      "The summary covers every order on every page",
+      "Figures are computed from the API responses"
+    ],
+    "deliverables": [
+      {
+        "path": "orders-summary.json",
+        "contains": [
+          "order_count",
+          "total_amount"
+        ]
+      }
+    ]
+  },
+  "server": "orders_api",
+  "checks": [
+    {
+      "type": "json",
+      "path": "orders-summary.json",
+      "pointer": "/order_count",
+      "equals": 100
+    },
+    {
+      "type": "json",
+      "path": "orders-summary.json",
+      "pointer": "/total_amount",
+      "equals": 44953.06,
+      "tolerance": 0.011
+    },
+    {
+      "type": "json",
+      "path": "orders-summary.json",
+      "pointer": "/top_customer",
+      "equals": "Acme Corp"
+    },
+    {
+      "type": "json",
+      "path": "orders-summary.json",
+      "pointer": "/pages",
+      "equals": 4
+    }
+  ]
+}

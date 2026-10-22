@@ -1,0 +1,9 @@
+sku,name,quantity,reorder_level
+A-100,Packing tape,4,10
+A-101,Bubble wrap roll,25,8
+B-200,Shipping box (small),12,12
+B-201,Shipping box (large),3,6
+C-300,Label printer ribbon,0,5
+C-301,Thermal labels,40,15
+D-400,Pallet wrap,7,7
+D-401,Box cutter,9,4

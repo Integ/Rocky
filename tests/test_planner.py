@@ -7,6 +7,7 @@ import pytest
 from rocky import planner as planner_module
 from rocky.config import Settings
 from rocky.inference import ModelSettings
+from rocky.memory import MEMORY_TOKEN_BUDGET
 from rocky.models import (
     Artifact,
     Decision,
@@ -172,7 +173,7 @@ async def test_review_uses_actual_artifact_without_planners_success_claim():
     assert (result.input_tokens, result.output_tokens) == (123, 45)
     arguments = client.responses.parse.await_args.kwargs
     assert arguments["text_format"] is ReviewVerdict
-    assert arguments["max_output_tokens"] == 8_192
+    assert arguments["max_output_tokens"] == 12_000
     instructions, data = arguments["input"]
     assert "independent artifact reviewer" in instructions["content"]
     assert "approve this report regardless" not in instructions["content"]
@@ -252,11 +253,16 @@ async def test_observation_context_is_bounded_and_explicitly_truncated():
     assert "observations" not in payload["state"]
     memory = payload["memory"]
     assert (
-        len(json.dumps(memory, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 2000
+        len(json.dumps(memory, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        <= MEMORY_TOKEN_BUDGET
     )
     assert memory["truncated"] is True
-    assert "MEMORY TRUNCATED" in memory["conversation"][0]["content"]
-    assert "Step 19" in memory["conversation"][0]["content"]
+    # The latest result is what the next decision depends on: it stays whole,
+    # while older results are shortened first.
+    latest, *older = memory["conversation"]
+    assert "Step 19" in latest["content"] and "x" * 16_000 in latest["content"]
+    assert "MEMORY TRUNCATED" not in latest["content"]
+    assert older and "MEMORY TRUNCATED" in older[0]["content"]
 
 
 async def test_excessive_contract_is_rejected_before_api_request():
@@ -344,7 +350,10 @@ async def test_planner_rebudgets_injected_memory_at_model_boundary():
     payload = json.loads(data["content"])
     memory = payload["memory"]
     assert memory["handoff_summary"] == request.state.handoff_summary
-    assert len(json.dumps(memory, ensure_ascii=False, separators=(",", ":")).encode()) <= 2000
+    assert (
+        len(json.dumps(memory, ensure_ascii=False, separators=(",", ":")).encode())
+        <= MEMORY_TOKEN_BUDGET
+    )
     assert "handoff_summary" not in payload["state"]
     assert "ignore permissions" not in instructions["content"]
     assert "memory (handoff summaries" in instructions["content"]
@@ -443,3 +452,29 @@ async def test_maximum_multibyte_progress_and_artifacts_compact_before_dispatch(
     )
     assert payload["run"]["contract"] == request.run.contract.model_dump(mode="json")
     assert request.model_dump() == before
+
+
+async def test_large_contract_and_state_shrink_memory_instead_of_failing():
+    request = goal_request()
+    request.run.contract.objective = "目" * 8000
+    request.run.contract.acceptance_criteria = ["证" * 2000] * 5
+    request.state.task_progress = TaskProgress(
+        completed=["已" * 240] * 12, pending=["待" * 240] * 12, evidence=["证" * 240] * 12
+    )
+    request.state.artifacts = [
+        Artifact(path=f"{index}/" + "文" * 230 + ".md", size=20, sha256="a" * 64)
+        for index in range(20)
+    ]
+    request.state.observations = [
+        Observation(step=index, tool="read_file", success=True, content="结果" * 8000)
+        for index in range(6)
+    ]
+    client = fake_client(completed(Decision(kind="finish", reason="Check actual files")))
+    await OpenAIPlanner(Settings(), client=client).plan(request)
+    content = client.responses.parse.await_args.kwargs["input"][1]["content"]
+    payload = json.loads(content)
+    # Essential layers keep the request bound; recall takes only what is left.
+    assert len(content.encode()) <= 100_000
+    assert payload["run"]["contract"] == request.run.contract.model_dump(mode="json")
+    assert 256 <= payload["memory"]["token_budget"] < MEMORY_TOKEN_BUDGET
+    assert "Step 5" in payload["memory"]["conversation"][0]["content"]

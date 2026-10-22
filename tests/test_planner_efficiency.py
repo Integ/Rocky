@@ -239,7 +239,7 @@ class FailingPlanner:
     async def plan(self, request):
         raise self.error
 
-    async def review(self, request, text):
+    async def review(self, request, text, **evidence):
         raise self.error
 
 
@@ -249,7 +249,12 @@ def activities(error):
         verify_files=lambda run: VerificationResult(passed=True, feedback="ok"),
         review_text=lambda run: "artifact",
     )
-    return Activities(store, tools, FailingPlanner(error), memory=MemoryManager())
+    activities = Activities(store, tools, FailingPlanner(error), memory=MemoryManager())
+    # Review evidence comes from the store and workspace; none is needed here.
+    activities.review_evidence = lambda run: {}
+    activities.deliverable_texts = lambda run: {}
+    activities.changed_texts = lambda run, evidence: {}
+    return activities
 
 
 async def test_only_failures_without_model_output_are_retried_by_temporal():

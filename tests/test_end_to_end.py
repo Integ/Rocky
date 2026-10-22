@@ -17,6 +17,7 @@ from rocky.api import create_app
 from rocky.config import Settings
 from rocky.models import (
     Action,
+    ClaimCheck,
     Decision,
     GoalContract,
     ReviewVerdict,
@@ -50,7 +51,21 @@ class ScriptedResponses:
             assert kwargs["text_format"] is ReviewVerdict
             self.review_requests.append(kwargs)
             assert "Conclusion: execution is checked." in kwargs["input"][1]["content"]
-            parsed = ReviewVerdict(passed=True, feedback="The actual report meets the criteria")
+            parsed = ReviewVerdict(
+                claims=[
+                    ClaimCheck(
+                        deliverable="report.md",
+                        pointer="",
+                        value="the report states its conclusion",
+                        kind="judgment",
+                        location="deliverable:report.md",
+                        quote="Conclusion: execution is checked.",
+                        supported=True,
+                    )
+                ],
+                passed=True,
+                feedback="The actual report meets the criteria",
+            )
         return SimpleNamespace(
             status="completed",
             output=[],

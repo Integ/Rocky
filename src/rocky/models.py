@@ -249,6 +249,10 @@ class ToolResult(Model):
     retry_hint: str = ""
     approval_required: str = ""
     approval_command_prefix: list[str] = Field(default_factory=list)
+    # Files the action created or modified: goal-relative inside the workspace,
+    # otherwise absolute. Commands report changes under their working directory.
+    changed_paths: list[str] = Field(default_factory=list, max_length=200)
+    changes_truncated: bool = False
 
 
 class VerifyInput(Model):
@@ -260,6 +264,8 @@ class VerificationResult(Model):
     passed: bool
     feedback: str
     artifacts: list[Artifact] = Field(default_factory=list)
+    # Reviewer claims with the application's audit result for each.
+    claims: list[dict[str, Any]] = Field(default_factory=list, max_length=90)
     input_tokens: int = 0
     output_tokens: int = 0
 
@@ -280,7 +286,23 @@ class PhaseResult(Model):
     decision: Decision | None = None
 
 
+class ClaimCheck(Model):
+    """One figure or fact from a deliverable and the evidence the reviewer cites for it."""
+
+    deliverable: str = Field(max_length=240)
+    # JSON Pointer of a value from required_claims; empty for other claims.
+    pointer: str = Field(max_length=300)
+    value: str = Field(max_length=300)
+    kind: Literal["quoted", "computed", "judgment"]
+    # source:<path>, file:<path>, step:<number> or deliverable:<path>.
+    location: str = Field(max_length=300)
+    quote: str = Field(max_length=600)
+    supported: bool
+
+
 class ReviewVerdict(Model):
+    # Claims come first so the verdict follows the per-claim check.
+    claims: list[ClaimCheck] = Field(default_factory=list, max_length=90)
     passed: bool
     feedback: str = Field(max_length=4000)
 
@@ -306,6 +328,9 @@ class RunCheckpoint(Model):
     feedback: str = ""
     no_progress: int = 0
     seen_progress: list[str] = Field(default_factory=list)
+    refreshed_progress: list[str] = Field(default_factory=list)
+    last_progress: str = ""
+    last_batch_progress: list[str] = Field(default_factory=list)
     wake_generation: int = 0
     consumed_wake_generation: int = 0
     wake_feedback: str = ""

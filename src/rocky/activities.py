@@ -6,6 +6,12 @@ from datetime import timedelta
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from rocky.evidence import (
+    audit_review,
+    collect_review_evidence,
+    review_checklist,
+    verify_checklist,
+)
 from rocky.harness import HarnessHooks
 from rocky.memory import MemoryManager, StoreMemoryProvider
 from rocky.models import (
@@ -13,6 +19,7 @@ from rocky.models import (
     PhaseResult,
     PlanInput,
     PlanResult,
+    RunInput,
     RunState,
     ToolInput,
     ToolResult,
@@ -88,13 +95,48 @@ class Activities:
         if not files.passed:
             return files
         contents = await asyncio.to_thread(self.tools.review_text, request.run)
+        # The reviewer checks deliverables against what actually happened:
+        # sources read, other files changed and the recorded tool actions.
+        evidence = await asyncio.to_thread(self.review_evidence, request.run)
+        deliverables = await asyncio.to_thread(self.deliverable_texts, request.run)
+        changed = await asyncio.to_thread(self.changed_texts, request.run, evidence)
+        checklist = review_checklist(deliverables)
+        # Values the application verifies itself need no citation from review.
+        verified = verify_checklist(checklist, evidence, changed)
         await self.check_cancelled(request.run.goal_id)
         try:
-            verdict = await self.planner.review(request, contents)
+            verdict = await self.planner.review(
+                request,
+                contents,
+                evidence=evidence,
+                checklist=[
+                    item
+                    for item in checklist
+                    if (item["deliverable"], item["pointer"]) not in verified
+                ],
+                verified=[
+                    {**item, "support": verified[(item["deliverable"], item["pointer"])]}
+                    for item in checklist
+                    if (item["deliverable"], item["pointer"]) in verified
+                ],
+            )
         except PlannerError as error:
             # A completed but unusable review consumed tokens; never repeat it.
             raise _model_failure(error) from None
         verdict.artifacts = files.artifacts
+        # The application, not the reviewer, decides whether claims are supported.
+        verdict.claims, problems = audit_review(
+            verdict.claims, evidence, deliverables, checklist, verified=verified, files=changed
+        )
+        if problems:
+            if verdict.passed:
+                verdict.feedback = (
+                    "Review passed, but its evidence check failed. " + verdict.feedback
+                )
+            verdict.passed = False
+            verdict.feedback = (
+                "Unsupported claims:\n- " + "\n- ".join(problems[:12]) + "\n" + verdict.feedback
+            )[:4000]
         if verdict.passed:
             # Background jobs or another process may change an artifact while
             # the model reviews it. Completion must refer to the checked bytes.
@@ -109,6 +151,23 @@ class Activities:
                     output_tokens=verdict.output_tokens,
                 )
         return verdict
+
+    def deliverable_texts(self, run: RunInput) -> dict[str, str]:
+        texts = {}
+        for deliverable in run.contract.deliverables:
+            described = self.tools.describe_file(run, deliverable.path, 1_000_000)
+            texts[described["path"]] = described.get("content", "")
+        return texts
+
+    def changed_texts(self, run: RunInput, evidence: dict) -> dict[str, str]:
+        return {
+            item["path"]: self.tools.describe_file(run, item["path"], 1_000_000).get("content", "")
+            for item in evidence["changed_files"]
+        }
+
+    def review_evidence(self, run: RunInput) -> dict:
+        steps = self.store.all_execution_steps(run.goal_id)
+        return collect_review_evidence(run, steps, self.tools)
 
     @activity.defn(name="rocky.persist")
     async def persist(self, state: RunState) -> None:

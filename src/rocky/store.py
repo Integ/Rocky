@@ -740,6 +740,14 @@ class Store:
                 )
             ]
 
+    def all_execution_steps(self, goal_id: str) -> list[dict]:
+        steps: list[dict] = []
+        while batch := self.execution_steps(
+            goal_id, after=steps[-1]["sequence_id"] if steps else 0
+        ):
+            steps.extend(batch)
+        return steps
+
     def execution_events(self, goal_id: str, after: int = 0, limit: int = 100) -> list[dict]:
         """Read immutable step transitions in persisted order for audit/replay."""
         with self.sessions() as session:
