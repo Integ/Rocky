@@ -1,0 +1,16 @@
+{
+  "answers": {
+    "q1": "600 requests per minute",
+    "q2": "HTTP 429 Too Many Requests, with a Retry-After header",
+    "q3": "ap-south-2 (Hyderabad), generally available since 2026-08-12",
+    "q4": "30 days (net 30)",
+    "q5": "Enterprise"
+  },
+  "sources": {
+    "q1": "docs/rate-limits.md",
+    "q2": "docs/rate-limits.md",
+    "q3": "docs/regions.md",
+    "q4": "docs/billing.md",
+    "q5": "docs/sso.md"
+  }
+}

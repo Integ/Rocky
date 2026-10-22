@@ -50,12 +50,24 @@ class ApprovalPlanner:
             output_tokens=5,
         )
 
-    async def review(self, request, text):
+    async def review(self, request, text, evidence=None, checklist=None, verified=None):
         self.reviews.append(text)
         assert "verified report" in text
+        path = request.run.contract.deliverables[0].path
         return VerificationResult(
             passed=True,
             feedback="The actual report meets its criteria",
+            claims=[
+                {
+                    "deliverable": path,
+                    "pointer": "",
+                    "value": "the report states it was verified",
+                    "kind": "judgment",
+                    "location": f"deliverable:{path}",
+                    "quote": "verified report",
+                    "supported": True,
+                }
+            ],
             input_tokens=8,
             output_tokens=4,
         )

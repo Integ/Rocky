@@ -6,6 +6,8 @@ runtime. A provider's tokenizer can be injected when a tighter count is needed.
 The budget covers the *serialized* memory object, including labels and metadata.
 Handoff, recent raw records and retrieved knowledge have independent reservations;
 a large summary cannot evict the most recent failure or all recalled knowledge.
+The newest tool result gets most of the recent-record share: the next decision
+depends on it, while older results should already be reflected in the handoff.
 """
 
 import json
@@ -15,11 +17,16 @@ from typing import Literal, Protocol
 
 from rocky.models import PlanInput
 
-MEMORY_TOKEN_BUDGET = 2_000
+# Large enough that a typical file read or command output stays visible in the
+# next planning call. The planner lowers it when essential layers need the room.
+MEMORY_TOKEN_BUDGET = 24_000
+MAX_MEMORY_TOKEN_BUDGET = 64_000
 # Shares apply to the available serialized budget, after the envelope overhead.
 # Inactive layers release their share; unused space flows to the next layer.
 _LAYER_SHARES = {"handoff_summary": 4, "conversation": 4, "knowledge": 2}
 _RECENT_RECORDS = 3
+# Fraction of the remaining conversation budget the newest tool result may use.
+_LATEST_RESULT_SHARE = (3, 4)
 _TRUNCATED = "\n[MEMORY TRUNCATED; omitted text is not evidence]"
 MemoryKind = Literal["conversation", "knowledge"]
 TokenCounter = Callable[[str], int]
@@ -143,11 +150,16 @@ class StoreMemoryProvider:
                 if key
                 not in {*metadata, "content", "progress_key", "artifacts", "approval_required"}
             )
-            normalized = serialize_memory({**metadata, "content": payload["content"]})
-            if isinstance(payload["content"], str) and len(payload["content"]) > 240:
+            body = payload["content"]
+            if not isinstance(body, str):
+                return serialize_memory({**metadata, "content": body})
+            # Raw text after the metadata line: the envelope escapes it once,
+            # instead of twice for a JSON string nested in a JSON string.
+            normalized = serialize_memory(metadata) + "\nContent:\n" + body
+            if len(body) > 240:
                 # Reserve bytes for both raw evidence and repair advice before
                 # potentially huge metadata. Outer clipping marks omissions.
-                raw = payload["content"].encode("utf-8")[:40].decode("utf-8", errors="ignore")
+                raw = body.encode("utf-8")[:40].decode("utf-8", errors="ignore")
                 hint = (
                     str(payload.get("retry_hint", ""))
                     .encode("utf-8")[:40]
@@ -167,11 +179,17 @@ class MemoryManager:
         token_counter: TokenCounter = conservative_token_count,
         budget: int = MEMORY_TOKEN_BUDGET,
     ) -> None:
-        if not 256 <= budget <= MEMORY_TOKEN_BUDGET:
-            raise ValueError("Memory budget must be between 256 and 2000 tokens")
+        if not 256 <= budget <= MAX_MEMORY_TOKEN_BUDGET:
+            raise ValueError(
+                f"Memory budget must be between 256 and {MAX_MEMORY_TOKEN_BUDGET} tokens"
+            )
         self.providers = tuple(providers) if providers is not None else (StateMemoryProvider(),)
         self.token_counter = token_counter
         self.budget = budget
+
+    def with_budget(self, budget: int) -> "MemoryManager":
+        """The same providers and counter under a different serialized budget."""
+        return MemoryManager(self.providers, token_counter=self.token_counter, budget=budget)
 
     def count(self, memory: dict) -> int:
         count = self.token_counter(serialize_memory(memory))
@@ -247,16 +265,30 @@ class MemoryManager:
                     )
             else:
                 rows = grouped[name]
+                latest = (
+                    next((i for i, record in enumerate(rows) if record.role == "tool"), None)
+                    if name == "conversation"
+                    else None
+                )
                 for index, record in enumerate(rows):
                     # Reserve room for several recent records, rather than
                     # spending the entire rolling window on one huge tool body.
+                    # The newest result may take most of it, but never all.
                     slots = min(_RECENT_RECORDS - index, len(rows) - index)
                     item_limit = limit
-                    if slots > 1:
+                    if index == latest and len(rows) - index > 1:
+                        # Older records keep up to the remaining share, but
+                        # no more than they would actually use.
+                        numerator, denominator = _LATEST_RESULT_SHARE
+                        share = (limit - self.count(memory)) * (denominator - numerator)
+                        older = sum(
+                            self.token_counter(serialize_memory(_item(row, name))) + 1
+                            for row in rows[index + 1 :]
+                        )
+                        item_limit = limit - min(share // denominator, older)
+                    elif slots > 1:
                         item_limit = self.count(memory) + (limit - self.count(memory)) // slots
-                    item = {"id": record.key[:128], "content": record.content}
-                    if name == "conversation":
-                        item["role"] = record.role[:24]
+                    item = _item(record, name)
                     bucket = memory[name]
                     bucket.append(item)
                     if self.count(memory) <= item_limit:
@@ -298,6 +330,13 @@ class MemoryManager:
                 high = midpoint - 1
         assign(best)
         return best
+
+
+def _item(record: MemoryRecord, layer: str) -> dict:
+    item = {"id": record.key[:128], "content": record.content}
+    if layer == "conversation":
+        item["role"] = record.role[:24]
+    return item
 
 
 def bounded_memory(request: PlanInput, *, manager: MemoryManager | None = None) -> dict:

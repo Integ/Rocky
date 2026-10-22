@@ -1,0 +1,47 @@
+{
+  "id": "add-feature",
+  "category": "code",
+  "description": "Add a tested function to an existing module and use it to produce a report.",
+  "contract": {
+    "objective": "Add a function restock_report(items, *, multiplier=2) to inventory.py. It returns a list of (sku, order_quantity) tuples for items whose quantity is at or below their reorder_level, where order_quantity = reorder_level * multiplier - quantity, sorted by order_quantity descending and then by sku ascending. multiplier must be keyword-only. Add unit tests for it to test_inventory.py and keep the existing tests passing. Finally write restock.txt with the report for items.csv, one line per item formatted as sku,order_quantity.",
+    "acceptance_criteria": [
+      "restock_report behaves as specified",
+      "test_inventory.py tests restock_report and all tests pass",
+      "restock.txt lists the report for items.csv"
+    ],
+    "deliverables": [
+      {
+        "path": "inventory.py",
+        "contains": [
+          "def restock_report"
+        ]
+      },
+      {
+        "path": "restock.txt"
+      }
+    ]
+  },
+  "checks": [
+    {
+      "type": "command",
+      "argv": [
+        "{python}",
+        "-m",
+        "unittest",
+        "-q",
+        "test_inventory",
+        "test_hidden_inventory"
+      ]
+    },
+    {
+      "type": "regex",
+      "path": "test_inventory.py",
+      "pattern": "restock_report\\("
+    },
+    {
+      "type": "regex",
+      "path": "restock.txt",
+      "pattern": "\\AA-100,16\\nB-200,12\\nC-300,10\\nB-201,9\\nD-400,7\\n?\\Z"
+    }
+  ]
+}

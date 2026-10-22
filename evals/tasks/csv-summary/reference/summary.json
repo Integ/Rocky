@@ -1,0 +1,11 @@
+{
+  "total_revenue": 68934.4,
+  "revenue_by_region": {
+    "North": 22773.62,
+    "South": 15876.24,
+    "East": 21190.14,
+    "West": 9094.4
+  },
+  "top_product_by_units": "Widget",
+  "row_count": 180
+}

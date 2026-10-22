@@ -4,6 +4,8 @@ from copy import deepcopy
 import pytest
 
 from rocky.memory import (
+    MAX_MEMORY_TOKEN_BUDGET,
+    MEMORY_TOKEN_BUDGET,
     MemoryManager,
     MemoryRecord,
     StoreMemoryProvider,
@@ -69,10 +71,11 @@ def test_summary_priority_preserves_reserved_history_and_knowledge(text):
             MemoryRecord("knowledge", "knowledge must yield to summary"),
         ]
     )
-    manager = MemoryManager([provider])
+    # A tight budget: summaries are capped at 8000 characters, below the default.
+    manager = MemoryManager([provider], budget=4000)
     memory = manager.build(request(text))
-    assert manager.count(memory) <= 2000
-    assert conservative_token_count(serialize_memory(memory)) <= 2000
+    assert manager.count(memory) <= 4000
+    assert conservative_token_count(serialize_memory(memory)) <= 4000
     assert memory["handoff_summary"].startswith(text[:20])
     assert "MEMORY TRUNCATED" in memory["handoff_summary"]
     assert memory["conversation"][0]["content"] == "history must yield to summary"
@@ -83,10 +86,10 @@ def test_summary_priority_preserves_reserved_history_and_knowledge(text):
 def test_recent_history_and_high_priority_knowledge_win():
     provider = Provider(
         [
-            MemoryRecord("conversation", "stale" * 1000, key="old", created_at="2025-01-01"),
+            MemoryRecord("conversation", "stale" * 5000, key="old", created_at="2025-01-01"),
             MemoryRecord("conversation", "recent", key="new", created_at="2026-01-01"),
             MemoryRecord("knowledge", "critical", key="critical", priority=10),
-            MemoryRecord("knowledge", "low priority" * 1000, key="low", priority=-1),
+            MemoryRecord("knowledge", "low priority" * 5000, key="low", priority=-1),
         ]
     )
     memory = MemoryManager([provider]).build(request("handoff"))
@@ -135,7 +138,7 @@ def test_injected_memory_is_rebudgeted_and_handoff_cannot_be_displaced():
     before = deepcopy(value.memory)
     memory = bounded_memory(value)
     assert memory["handoff_summary"] == "Authoritative state handoff"
-    assert conservative_token_count(serialize_memory(memory)) <= 2000
+    assert conservative_token_count(serialize_memory(memory)) <= MEMORY_TOKEN_BUDGET
     assert value.memory == before
 
 
@@ -153,9 +156,9 @@ def test_store_adapter_and_duplicate_records():
     assert len(memory["conversation"]) == len(memory["knowledge"]) == 1
 
 
-@pytest.mark.parametrize("budget", [0, 128, 2001])
+@pytest.mark.parametrize("budget", [0, 128, MAX_MEMORY_TOKEN_BUDGET + 1])
 def test_invalid_budget_rejected(budget):
-    with pytest.raises(ValueError, match="between 256 and 2000"):
+    with pytest.raises(ValueError, match=f"between 256 and {MAX_MEMORY_TOKEN_BUDGET}"):
         MemoryManager(budget=budget)
 
 
@@ -217,7 +220,7 @@ def test_large_summary_and_history_keep_multiple_recent_results_and_knowledge():
     records.append(MemoryRecord("knowledge", "Verified repository uses uv", key="runtime"))
     manager = MemoryManager()
     memory = manager.build(request("Earlier result: " + "old evidence " * 500), records=records)
-    assert manager.count(memory) <= 2000
+    assert manager.count(memory) <= MEMORY_TOKEN_BUDGET
     assert memory["handoff_summary"].startswith("Earlier result:")
     assert [item["id"] for item in memory["conversation"][:3]] == ["11", "10", "9"]
     assert memory["knowledge"][0]["content"] == "Verified repository uses uv"
@@ -329,3 +332,101 @@ def test_large_tool_metadata_still_exposes_recent_raw_evidence():
         assert "Next: repair" in item["content"]
     assert "redundant-hash" not in serialize_memory(memory)
     assert memory["knowledge"][0]["content"] == "Use the verified source"
+
+
+def _store_rows(results):
+    """Alternating decision/tool rows, oldest first, as the SQL store records them."""
+    rows = []
+    for index, body in enumerate(results):
+        rows.append(
+            {
+                "id": f"phase:task:{index}:think",
+                "kind": "conversation",
+                "role": "assistant",
+                "content": json.dumps(
+                    {
+                        "kind": "act",
+                        "reason": "Read the next module",
+                        "action": {"tool": "read_file", "path": f"module_{index}.py"},
+                    }
+                ),
+                "created_at": f"{2 * index:04d}",
+            }
+        )
+        rows.append(
+            {
+                "id": f"phase:task:{index}:act",
+                "kind": "conversation",
+                "role": "tool",
+                "content": json.dumps(
+                    {"success": True, "content": body, "error_code": "", "retry_hint": ""},
+                    ensure_ascii=False,
+                ),
+                "created_at": f"{2 * index + 1:04d}",
+            }
+        )
+    return rows
+
+
+class RowStore:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def memory_records(self, goal_id):
+        return self.rows
+
+
+def test_latest_tool_result_stays_whole_while_older_results_shrink_first():
+    code = "\n".join(
+        f'def handler_{index}(request):\n    return {{"id": {index}, "status": "ok"}}\n'
+        for index in range(220)
+    )
+    results = [code.replace("handler", f"v{index}_handler") for index in range(6)]
+    manager = MemoryManager([StoreMemoryProvider(RowStore(_store_rows(results)))])
+    memory = manager.build(request("Modules 0-3 reviewed; handlers return status ok."))
+    assert manager.count(memory) <= MEMORY_TOKEN_BUDGET
+    latest, decision, *older = memory["conversation"]
+    assert latest["role"] == "tool" and decision["role"] == "assistant"
+    # Raw text, not a JSON string nested in another JSON string.
+    assert results[-1] in latest["content"]
+    assert "MEMORY TRUNCATED" not in latest["content"]
+    previous = next(item for item in older if item["role"] == "tool")
+    assert previous["id"] == "phase:task:4:act"
+    assert "MEMORY TRUNCATED" in previous["content"]
+    assert memory["handoff_summary"].startswith("Modules 0-3 reviewed")
+
+
+def test_multibyte_file_read_fits_when_older_records_need_little_room():
+    # A 19.5 KB Chinese file used to leave the planner about 600 bytes of it.
+    text = "\n".join(
+        f"第{index}行：这是一个需要被模型完整看到的文件内容，包含关键数据 value={index * 7}"
+        for index in range(200)
+    )
+    manager = MemoryManager([StoreMemoryProvider(RowStore(_store_rows([text])))])
+    memory = manager.build(request("开始汇总数据"))
+    latest = memory["conversation"][0]
+    assert text in latest["content"]
+    assert "value=1393" in latest["content"]
+    assert memory["truncated"] is False
+
+
+def test_tool_metadata_precedes_unescaped_raw_body():
+    body = 'print("ready")\n' * 40
+    row = {
+        "id": "phase:task:1:act",
+        "kind": "conversation",
+        "role": "tool",
+        "content": json.dumps(
+            {
+                "success": False,
+                "content": body,
+                "error_code": "command_failed",
+                "retry_hint": "Install the dependency",
+                "exit_code": 1,
+            }
+        ),
+    }
+    content = StoreMemoryProvider._working_content(row)
+    header, raw = content.split("\nContent:\n", 1)
+    assert raw == body
+    assert "command_failed" in header and '"exit_code":1' in header

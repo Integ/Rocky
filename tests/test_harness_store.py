@@ -13,7 +13,7 @@ from sqlalchemy import delete, select
 from rocky.activities import Activities
 from rocky.api import create_app
 from rocky.config import Settings
-from rocky.memory import conservative_token_count, serialize_memory
+from rocky.memory import MEMORY_TOKEN_BUDGET, conservative_token_count, serialize_memory
 from rocky.models import (
     PHASES,
     Decision,
@@ -359,7 +359,7 @@ async def test_real_activities_recall_durable_phase_history_after_state_window_i
         assert memory["handoff_summary"] == request.state.handoff_summary
         assert "Evidence from cycle 25" in serialize_memory(memory)
         assert memory["knowledge"][0]["content"] == "Use the verified source"
-        assert conservative_token_count(serialize_memory(memory)) <= 2000
+        assert conservative_token_count(serialize_memory(memory)) <= MEMORY_TOKEN_BUDGET
         assert request.memory == {}  # The caller's workflow snapshot is untouched.
     finally:
         store.close()

@@ -73,6 +73,36 @@ def _digest(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+# Dependency, VCS and cache trees are not task output and can be very large.
+_UNTRACKED_DIRECTORIES = frozenset(
+    {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv", ".tox"}
+    | {".mypy_cache", ".pytest_cache", ".ruff_cache"}
+)
+_SNAPSHOT_LIMIT = 5000
+
+
+def _snapshot(directory: Path) -> tuple[dict[str, tuple[int, int, int]], bool]:
+    """Stat regular files below directory, in a stable order; report completeness."""
+    entries: dict[str, tuple[int, int, int]] = {}
+    for current, folders, files in os.walk(directory):
+        folders[:] = sorted(name for name in folders if name not in _UNTRACKED_DIRECTORIES)
+        for name in sorted(files):
+            path = os.path.join(current, name)
+            try:
+                info = os.stat(path, follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                entries[path] = (info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+                if len(entries) >= _SNAPSHOT_LIMIT:
+                    return entries, False
+    return entries, True
+
+
+def _changed(before: dict, after: dict) -> list[str]:
+    return [path for path, signature in after.items() if before.get(path) != signature]
+
+
 def _operation_fingerprint(request: ToolInput) -> str:
     # Keep the original v0.1 ToolInput serialization byte-for-byte. Inference
     # settings do not change tool semantics; including them would invalidate
@@ -349,6 +379,7 @@ class WorkspaceTools:
                 content=f"Wrote {artifact.path} ({artifact.size} bytes)",
                 progress_key="write:" + artifact.path + ":" + artifact.sha256,
                 artifacts=[artifact],
+                changed_paths=[artifact.path],
             )
 
     def _path(self, request: ToolInput, path: str | None, *, default_root: bool = False) -> Path:
@@ -361,6 +392,22 @@ class WorkspaceTools:
             return value.resolve()
         except RuntimeError:
             raise ToolError("The path contains a symbolic link loop") from None
+
+    def display_path(self, goal_id: str, path: str | Path) -> str:
+        """Goal-relative inside the workspace, otherwise absolute, for change records."""
+        value = Path(path).expanduser()
+        if not self.full_access:
+            return "/".join(_parts(str(path)))
+        if not value.is_absolute():
+            value = self.root / goal_id / value
+        try:
+            value = value.resolve()
+        except (OSError, RuntimeError):
+            pass
+        try:
+            return value.relative_to(self.root / goal_id).as_posix()
+        except ValueError:
+            return str(value)
 
     def _artifact(self, request: ToolInput, path: Path) -> list[Artifact]:
         try:
@@ -405,6 +452,9 @@ class WorkspaceTools:
                 content=_clip(content),
                 progress_key="http:" + _digest(content.encode()),
                 artifacts=self._artifact(request, destination) if destination else [],
+                changed_paths=[self.display_path(request.run.goal_id, destination)]
+                if destination
+                else [],
                 error_code="" if 200 <= response["status_code"] < 400 else "http_status",
                 retry_hint=""
                 if 200 <= response["status_code"] < 400
@@ -417,6 +467,9 @@ class WorkspaceTools:
             if not directory.is_dir():
                 raise ToolError("The command working directory does not exist")
             shell = "/bin/zsh" if Path("/bin/zsh").exists() else "/bin/sh"
+            # Commands can write anywhere; record what changed under their
+            # working directory so review can attribute outputs to commands.
+            before, complete_before = _snapshot(directory)
             with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
                 process = subprocess.Popen(
                     action.content,
@@ -448,12 +501,18 @@ class WorkspaceTools:
                 description += (
                     "\nCommand timed out after 30 seconds; its process group was stopped."
                 )
+            after, complete_after = _snapshot(directory)
+            changed = [
+                self.display_path(request.run.goal_id, path) for path in _changed(before, after)
+            ]
             content = f"{description}\nstdout:\n{output}\nstderr:\n{errors}"
             if truncated:
                 content += "\n[truncated; redirect large output to a file]"
             return ToolResult(
                 success=not timed_out and process.returncode == 0,
                 content=_clip(content),
+                changed_paths=changed[:200],
+                changes_truncated=len(changed) > 200 or not (complete_before and complete_after),
                 progress_key="command:"
                 + _digest((str(directory) + action.content + content).encode()),
                 error_code="command_timeout"
@@ -516,6 +575,7 @@ class WorkspaceTools:
                 content=f"Wrote {path}",
                 progress_key="write:" + str(path) + ":" + _digest(action.content.encode()),
                 artifacts=self._artifact(request, path),
+                changed_paths=[self.display_path(request.run.goal_id, path)],
             )
         raise ToolError("Unknown tool")
 
@@ -578,6 +638,56 @@ class WorkspaceTools:
                 blocks.append(block)
                 size += len(block)
         return "".join(blocks)
+
+    def workspace_files(self, run: RunInput, limit: int = 200) -> list[str]:
+        """Visible regular files in the goal workspace, goal-relative and sorted."""
+        root = self.root / run.goal_id
+        files: list[str] = []
+        for current, folders, names in os.walk(root):
+            folders[:] = sorted(
+                name
+                for name in folders
+                if not name.startswith(".") and name not in _UNTRACKED_DIRECTORIES
+            )
+            for name in sorted(names):
+                path = Path(current, name)
+                if name.startswith(".") or not stat.S_ISREG(path.lstat().st_mode):
+                    continue
+                files.append(path.relative_to(root).as_posix())
+                if len(files) >= limit:
+                    return files
+        return files
+
+    def describe_file(self, run: RunInput, path: str, limit: int) -> dict:
+        """Size, line count and a text excerpt of a file, for independent review."""
+        display = self.display_path(run.goal_id, path)
+        try:
+            if self.full_access:
+                target = Path(display)
+                if not target.is_absolute():
+                    target = self.root / run.goal_id / target
+                with target.open("rb") as handle:
+                    if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                        return {"path": display, "missing": True}
+                    # Line counts stay exact for any plausible input; giant files
+                    # report their size and an excerpt without a full scan.
+                    content = handle.read(MAX_BYTES * 16 + 1)
+                    size = os.fstat(handle.fileno()).st_size
+            else:
+                parts = _parts(display)
+                with self._goal(run.goal_id, create=False) as (goal_fd, _):
+                    with _parent_directory(goal_fd, parts, create=False) as parent:
+                        content = _read_regular(parent, parts[-1])
+                size = len(content)
+        except (OSError, ToolError):
+            return {"path": display, "missing": True}
+        details: dict = {"path": display, "bytes": size}
+        if len(content) == size:
+            details["lines"] = content.count(b"\n") + (not content.endswith(b"\n") and size > 0)
+        if b"\0" in content[:8192]:
+            return {**details, "binary": True}
+        text = content[:limit].decode("utf-8", errors="replace")
+        return {**details, "content": text, "excerpt": size > limit}
 
     def verify_files(self, run: RunInput) -> VerificationResult:
         artifacts: list[Artifact] = []

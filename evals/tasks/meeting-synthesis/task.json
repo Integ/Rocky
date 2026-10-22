@@ -1,0 +1,79 @@
+{
+  "id": "meeting-synthesis",
+  "category": "synthesis",
+  "description": "Extract and reconcile decisions spread across six meeting transcripts (29 KB).",
+  "contract": {
+    "objective": "The notes directory in the task workspace contains six meeting transcripts. Each decision has an ID such as DEC-01. Write decisions.json as an object with a \"decisions\" array containing one entry per decision ID with \"id\", \"summary\" (one sentence), \"owner\" (the person responsible for the decision at the end of the period) and \"status\" (\"active\", or \"superseded\" when a later decision replaced it). Ignore discussion that only mentions an existing decision.",
+    "acceptance_criteria": [
+      "Every decision ID in the notes appears exactly once",
+      "Owners and statuses reflect later decisions that replace earlier ones"
+    ],
+    "deliverables": [
+      {
+        "path": "decisions.json",
+        "contains": [
+          "DEC-01",
+          "DEC-12"
+        ]
+      }
+    ]
+  },
+  "checks": [
+    {
+      "type": "json_records",
+      "path": "decisions.json",
+      "pointer": "/decisions",
+      "key": "id",
+      "expected": {
+        "DEC-01": {
+          "owner": "Priya",
+          "status": "active"
+        },
+        "DEC-02": {
+          "owner": "Marco",
+          "status": "superseded"
+        },
+        "DEC-03": {
+          "owner": "Aiko",
+          "status": "active"
+        },
+        "DEC-04": {
+          "owner": "Tomás",
+          "status": "active"
+        },
+        "DEC-05": {
+          "owner": "Lena",
+          "status": "active"
+        },
+        "DEC-06": {
+          "owner": "Samir",
+          "status": "superseded"
+        },
+        "DEC-07": {
+          "owner": "Grace",
+          "status": "active"
+        },
+        "DEC-08": {
+          "owner": "Kwame",
+          "status": "active"
+        },
+        "DEC-09": {
+          "owner": "Marco",
+          "status": "active"
+        },
+        "DEC-10": {
+          "owner": "Priya",
+          "status": "active"
+        },
+        "DEC-11": {
+          "owner": "Aiko",
+          "status": "active"
+        },
+        "DEC-12": {
+          "owner": "Lena",
+          "status": "active"
+        }
+      }
+    }
+  ]
+}

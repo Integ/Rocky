@@ -1,0 +1,39 @@
+{
+  "id": "fix-bug",
+  "category": "code",
+  "description": "Fix two bugs in a pricing module so its tests and hidden tests pass.",
+  "contract": {
+    "objective": "The tests in test_pricing.py fail. Fix pricing.py so that the tests pass without changing the tests. Keep the function names and signatures. apply_discount takes a percentage from 0 to 100 and must raise ValueError for a percentage outside that range. Orders of 10 or more units get the 5% bulk discount.",
+    "acceptance_criteria": [
+      "All tests in test_pricing.py pass",
+      "The documented behaviour holds for boundary values"
+    ],
+    "deliverables": [
+      {
+        "path": "pricing.py",
+        "contains": [
+          "def apply_discount",
+          "def bulk_total"
+        ]
+      }
+    ]
+  },
+  "checks": [
+    {
+      "type": "command",
+      "argv": [
+        "{python}",
+        "-m",
+        "unittest",
+        "-q",
+        "test_pricing",
+        "test_hidden_pricing"
+      ]
+    },
+    {
+      "type": "regex",
+      "path": "test_pricing.py",
+      "pattern": "assertEqual\\(bulk_total\\(10\\.0, 10\\), 95\\.0\\)"
+    }
+  ]
+}

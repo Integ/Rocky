@@ -81,7 +81,22 @@ async def test_compatible_provider_survives_default_switch_and_produces_reviewed
             assert "independent artifact reviewer" in payload["messages"][0]["content"]
             evidence = json.loads(payload["messages"][1]["content"])
             assert REPORT in evidence["artifacts_text"]
-            decision = {"passed": True, "feedback": "The supplied report meets every criterion"}
+            assert "required_claims" not in evidence  # report.md is not structured data.
+            decision = {
+                "claims": [
+                    {
+                        "deliverable": "report.md",
+                        "pointer": "",
+                        "value": "the report explains interruption recovery",
+                        "kind": "judgment",
+                        "location": "deliverable:report.md",
+                        "quote": "A durable goal survives interruption.",
+                        "supported": True,
+                    }
+                ],
+                "passed": True,
+                "feedback": "The supplied report meets every criterion",
+            }
         return httpx.Response(
             200,
             json={

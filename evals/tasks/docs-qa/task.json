@@ -1,0 +1,78 @@
+{
+  "id": "docs-qa",
+  "category": "research",
+  "description": "Answer five questions from product docs, ignoring a superseded changelog value.",
+  "contract": {
+    "objective": "Answer these questions using only the documents in the docs directory of the task workspace. q1: What is the request limit per minute on the Team plan? q2: What HTTP status code does the API return when a rate limit is exceeded? q3: Which generally available region launched most recently? q4: Within how many days must an invoice be paid? q5: Which plan is required for SCIM provisioning? Write answers.json as {\"answers\": {\"q1\": ..., \"q5\": ...}, \"sources\": {\"q1\": ..., \"q5\": ...}} where each source is the path of the document that supports the answer.",
+    "acceptance_criteria": [
+      "Each answer is supported by the cited document",
+      "Answers reflect current, not superseded, values"
+    ],
+    "deliverables": [
+      {
+        "path": "answers.json",
+        "contains": [
+          "answers",
+          "sources"
+        ]
+      }
+    ]
+  },
+  "checks": [
+    {
+      "type": "json",
+      "path": "answers.json",
+      "pointer": "/answers/q1",
+      "matches": "\\b600\\b"
+    },
+    {
+      "type": "json",
+      "path": "answers.json",
+      "pointer": "/answers/q1",
+      "matches": "\\b300\\b",
+      "negate": true
+    },
+    {
+      "type": "json",
+      "path": "answers.json",
+      "pointer": "/answers/q2",
+      "matches": "\\b429\\b"
+    },
+    {
+      "type": "json",
+      "path": "answers.json",
+      "pointer": "/answers/q3",
+      "matches": "(?i)ap-south-2"
+    },
+    {
+      "type": "json",
+      "path": "answers.json",
+      "pointer": "/answers/q4",
+      "matches": "\\b30\\b"
+    },
+    {
+      "type": "json",
+      "path": "answers.json",
+      "pointer": "/answers/q5",
+      "matches": "(?i)enterprise"
+    },
+    {
+      "type": "json",
+      "path": "answers.json",
+      "pointer": "/sources/q1",
+      "matches": "rate-limits\\.md"
+    },
+    {
+      "type": "json",
+      "path": "answers.json",
+      "pointer": "/sources/q3",
+      "matches": "regions\\.md|changelog\\.md"
+    },
+    {
+      "type": "json",
+      "path": "answers.json",
+      "pointer": "/sources/q5",
+      "matches": "sso\\.md"
+    }
+  ]
+}

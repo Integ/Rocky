@@ -1,0 +1,66 @@
+{
+  "id": "long-guide",
+  "category": "writing",
+  "description": "Write a 9 KB structured onboarding guide that follows an outline.",
+  "contract": {
+    "objective": "Write guide.md, an onboarding guide for the Atlas command-line tool, following outline.md in the task workspace. Use the eight section headings from the outline as second-level headings in the same order, cover every fact the outline lists, and include worked command examples. The guide should be thorough: at least 9000 bytes.",
+    "acceptance_criteria": [
+      "guide.md follows the outline's eight sections in order",
+      "Every fact in the outline appears in the guide",
+      "guide.md is at least 9000 bytes"
+    ],
+    "deliverables": [
+      {
+        "path": "guide.md",
+        "min_bytes": 9000
+      }
+    ]
+  },
+  "checks": [
+    {
+      "type": "min_bytes",
+      "path": "guide.md",
+      "bytes": 9000
+    },
+    {
+      "type": "regex",
+      "path": "guide.md",
+      "pattern": "(?ms)^## +Overview\\b.*^## +Installation\\b.*^## +Configuration\\b.*^## +Authentication\\b.*^## +Deploying a service\\b.*^## +Rollbacks\\b.*^## +Monitoring and alerts\\b.*^## +Troubleshooting\\b"
+    },
+    {
+      "type": "regex",
+      "path": "guide.md",
+      "pattern": "~/\\.atlas/config\\.toml"
+    },
+    {
+      "type": "regex",
+      "path": "guide.md",
+      "pattern": "\\b8443\\b"
+    },
+    {
+      "type": "regex",
+      "path": "guide.md",
+      "pattern": "(?i)12 hours"
+    },
+    {
+      "type": "regex",
+      "path": "guide.md",
+      "pattern": "(?i)90 days"
+    },
+    {
+      "type": "regex",
+      "path": "guide.md",
+      "pattern": "atlas rollback \\S+ --to"
+    },
+    {
+      "type": "regex",
+      "path": "guide.md",
+      "pattern": "2 ?%"
+    },
+    {
+      "type": "regex",
+      "path": "guide.md",
+      "pattern": "(?i)change ticket"
+    }
+  ]
+}

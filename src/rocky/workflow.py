@@ -52,6 +52,8 @@ class GoalWorkflow:
         self._deadline = None
         self._no_progress = 0
         self._seen_progress: set[str] = set()
+        self._refreshed_progress: set[str] = set()
+        self._last_progress = ""
         self._seen_wake_commands: set[str] = set()
         self._unlimited = False
         self._execution_boundary = 0
@@ -72,6 +74,8 @@ class GoalWorkflow:
             self._state = checkpoint.state.model_copy(deep=True)
             self._no_progress = checkpoint.no_progress
             self._seen_progress = set(checkpoint.seen_progress)
+            self._refreshed_progress = set(checkpoint.refreshed_progress)
+            self._last_progress = checkpoint.last_progress
             self._wake_generation = checkpoint.wake_generation
             self._consumed_wake_generation = checkpoint.consumed_wake_generation
             self._wake_feedback = checkpoint.wake_feedback
@@ -109,6 +113,8 @@ class GoalWorkflow:
             feedback=feedback[:4000],
             no_progress=self._no_progress,
             seen_progress=sorted(self._seen_progress)[-256:],
+            refreshed_progress=sorted(self._refreshed_progress)[-256:],
+            last_progress=self._last_progress,
             wake_generation=self._wake_generation,
             consumed_wake_generation=self._consumed_wake_generation,
             wake_feedback=self._wake_feedback,
@@ -568,6 +574,28 @@ class GoalWorkflow:
         cycle.feedback = "" if result.success else content[:4000]
         return {"result": result.model_dump(mode="json")}
 
+    def _refreshes_evidence(self, cycle: "_Cycle", fingerprint: str) -> bool:
+        """Re-reading evidence that left the planner's recent window is not a stall.
+
+        Planning memory holds a bounded window of results, so a long task may
+        need an unchanged file again. Each observation may be refreshed once,
+        never right after the planner saw it. A refresh is still not new
+        evidence: it neither counts as a stall nor resets the counter.
+        """
+        assert cycle.result is not None and cycle.decision is not None
+        if (
+            not self._adaptive
+            or not cycle.result.success
+            or cycle.decision.action.tool not in _OBSERVATION_TOOLS
+            or fingerprint == self._last_progress
+            or fingerprint in self._refreshed_progress
+            # Earlier histories counted every repeat; replay must keep doing so.
+            or not workflow.patched("refresh-rolled-out-evidence-v1")
+        ):
+            return False
+        self._refreshed_progress.add(fingerprint)
+        return True
+
     def _reflect_cycle(self, run: RunInput, cycle: "_Cycle") -> dict:
         if cycle.error:
             self._no_progress += 1
@@ -594,8 +622,9 @@ class GoalWorkflow:
                 self._seen_progress.add(fingerprint)
                 self._no_progress = 0
                 self._state.recovery_attempts = 0
-            else:
+            elif not self._refreshes_evidence(cycle, fingerprint):
                 self._no_progress += 1
+            self._last_progress = fingerprint
         elif cycle.verification is not None and not cycle.verification.passed:
             self._no_progress += 1
         # Waiting on a dependency is not progress and cannot erase a recovery
@@ -1068,6 +1097,10 @@ class GoalWorkflow:
         except asyncio.CancelledError:
             # Native Temporal cancellation is also reflected in the projection.
             return await self._complete("cancelled", "Execution cancelled.")
+
+
+# Read-only observations whose repetition may refresh rolled-out evidence.
+_OBSERVATION_TOOLS = frozenset({"read_file", "list_files", "fetch_url"})
 
 
 class _StopExecution(Exception):
