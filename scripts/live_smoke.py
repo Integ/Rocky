@@ -54,6 +54,7 @@ async def run() -> dict:
                         activities.execute,
                         activities.verify,
                         activities.persist,
+                        activities.phase,
                     ],
                 ):
                     await Dispatcher(env.client, store, settings).tick()

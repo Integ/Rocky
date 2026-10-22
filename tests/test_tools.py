@@ -15,7 +15,7 @@ from rocky.tools import WorkspaceTools
 
 @pytest.fixture
 def tools(tmp_path):
-    return WorkspaceTools(Settings(workspace_root=tmp_path / "workspaces"))
+    return WorkspaceTools(Settings(workspace_root=tmp_path / "workspaces", tool_access="scoped"))
 
 
 def run(**updates):
@@ -158,7 +158,9 @@ def test_legacy_receipt_accepts_model_settings_without_repeating_the_operation(t
         / (hashlib.sha256(operation_id.encode()).hexdigest() + ".json")
     )
     receipt = json.loads(receipt_path.read_text())
-    legacy_fingerprint = hashlib.sha256(legacy_input.model_dump_json().encode()).hexdigest()
+    legacy_fingerprint = hashlib.sha256(
+        legacy_input.model_dump_json(exclude={"run": {"contract": {"limits"}}}).encode()
+    ).hexdigest()
     assert receipt["fingerprint"] == legacy_fingerprint
     # Materialize the old receipt explicitly, then change the visible file with
     # another operation. A retry must return the old receipt, not repeat a write.
@@ -261,7 +263,11 @@ def test_listing_omits_control_files_and_links(tools, tmp_path):
 
 
 def test_network_tool_requires_both_permission_and_domain(tools):
-    result = execute(tools, Action(tool="fetch_url", url="https://example.com"))
+    result = execute(
+        tools,
+        Action(tool="fetch_url", url="https://example.com"),
+        goal=run(allowed_tools=["read_file"]),
+    )
     assert not result.success
     result = execute(
         tools,

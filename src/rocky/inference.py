@@ -8,11 +8,11 @@ old Temporal histories must remain decodable after an upgrade.
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, StringConstraints, model_serializer, model_validator
 
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 ModelID = Annotated[
-    str, StringConstraints(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._:-]*$")
+    str, StringConstraints(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$")
 ]
 
 _THINKING = ("low", "medium", "high", "xhigh", "max")
@@ -46,10 +46,27 @@ class ModelSettings(BaseModel):
 
     model: ModelID
     reasoning_effort: ReasoningEffort | None = None
+    provider: Literal["openai", "openai-compatible", "anthropic", "ollama"] | None = None
+    base_url: str | None = None
+    credential_id: str | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_settings(self, handler):
+        data = handler(self)
+        # Preserve the wire format of existing histories and API clients.
+        return {
+            key: value
+            for key, value in data.items()
+            if value is not None or key in {"model", "reasoning_effort"}
+        }
 
     @model_validator(mode="after")
     def supported_reasoning(self) -> "ModelSettings":
         if self.reasoning_effort is not None:
+            if self.provider not in (None, "openai"):
+                raise ValueError(
+                    "Reasoning controls are only available for the built-in OpenAI catalog"
+                )
             supported = next((efforts for model, _, efforts in _CATALOG if model == self.model), ())
             if self.reasoning_effort not in supported:
                 raise ValueError("This model does not support the selected reasoning effort")

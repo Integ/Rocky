@@ -106,7 +106,13 @@ def actual_worker(env, settings, activities):
         env.client,
         task_queue=settings.task_queue,
         workflows=[GoalWorkflow],
-        activities=[activities.plan, activities.execute, activities.verify, activities.persist],
+        activities=[
+            activities.plan,
+            activities.execute,
+            activities.verify,
+            activities.persist,
+            activities.phase,
+        ],
     )
 
 
@@ -196,7 +202,10 @@ async def test_lost_dispatch_ack_does_not_rerun_completed_goal(
             result = await handle.result()
             assert result.status == "succeeded"
             first_execution = await handle.describe()
-            assert len(store.pending_goals()) == 1
+            # Completion removes a task from dispatch eligibility even when
+            # the start acknowledgement was lost. This also prevents a rerun
+            # after Temporal eventually forgets the completed workflow ID.
+            assert store.pending_goals() == []
             calls_before = len(responses.requests)
             events_before = len(store.events(goal_id))
             report = tools.root / goal_id / "report.md"
@@ -216,7 +225,7 @@ async def test_actual_file_verification_rejects_unsupported_finish_claim(tempora
     settings, store, tools, responses, activities = components
     responses.decisions = [
         Decision(kind="finish", reason="A planner claim without a real file"),
-        Decision(kind="finish", reason="The same unsupported claim"),
+        *[Decision(kind="finish", reason="The same unsupported claim")] * 3,
     ]
     with TestClient(create_app(settings, store)) as api:
         goal_id = api.post("/goals", headers=AUTH, json=contract()).json()["goal_id"]
@@ -228,7 +237,7 @@ async def test_actual_file_verification_rejects_unsupported_finish_claim(tempora
                     await asyncio.sleep(0.01)
 
             await asyncio.wait_for(wait_for_blocked(), timeout=15)
-            assert len(responses.requests) == 2
+            assert len(responses.requests) == 4
             assert responses.review_requests == []
             assert not (tools.root / goal_id / "report.md").exists()
             assert store.get_goal(goal_id).state.status == "blocked"
@@ -239,3 +248,44 @@ async def test_actual_file_verification_rejects_unsupported_finish_claim(tempora
             ).result()
         assert result.status == "cancelled"
         assert all(event["state"]["status"] != "succeeded" for event in store.events(goal_id))
+
+
+async def test_engine_termination_reconciles_running_projection_and_preserves_artifact(
+    temporal_env, components
+):
+    settings, store, tools, responses, activities = components
+    responses.decisions = [
+        decisions()[0],
+        Decision(kind="wait", reason="Await an external update", wait_seconds=3600),
+    ]
+    with TestClient(create_app(settings, store)) as api:
+        goal_id = api.post("/goals", headers=AUTH, json=contract()).json()["goal_id"]
+        dispatcher = Dispatcher(temporal_env.client, store, settings)
+        async with actual_worker(temporal_env, settings, activities):
+            await dispatcher.tick()
+            handle = temporal_env.client.get_workflow_handle(goal_id, result_type=RunState)
+
+            async def wait_for_artifact_and_wait():
+                while store.get_goal(goal_id).state.status != "waiting":
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_for_artifact_and_wait(), timeout=15)
+            before = store.get_goal(goal_id).state
+            assert before.artifacts[0].path == "report.md"
+            await handle.terminate("Workflow history size exceeds limit.")
+            await dispatcher.reconcile()
+            after = store.get_goal(goal_id).state
+        assert after.status == "failed"
+        assert after.revision > before.revision
+        assert after.reason
+        assert after.artifacts == before.artifacts
+        assert after.steps == before.steps
+        assert (tools.root / goal_id / "report.md").read_text() == REPORT
+        refreshed = api.get(f"/goals/{goal_id}", headers=AUTH)
+        assert refreshed.status_code == 200
+        assert refreshed.json()["state"]["status"] == "failed"
+        download = api.get(
+            f"/goals/{goal_id}/artifacts/download", headers=AUTH, params={"path": "report.md"}
+        )
+        assert download.status_code == 200
+        assert download.text == REPORT

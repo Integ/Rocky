@@ -2,40 +2,29 @@
 
 import asyncio
 import ipaddress
+import os
 import re
 import secrets
 from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
+from urllib.parse import quote
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from fastapi.staticfiles import StaticFiles
 from pydantic import Field
 from sqlalchemy.exc import IntegrityError
 
 from rocky.config import Settings
+from rocky.credentials import CredentialError, CredentialStore
 from rocky.inference import ModelSettings, model_catalog
 from rocky.models import GoalContract, GoalView, Model
-from rocky.store import Store
+from rocky.providers import PRESETS, ProviderUpdate, credential_id, provider_model_catalog
+from rocky.store import MemoryConflictError, Store, equivalent_contracts
+from rocky.tools import ToolError, WorkspaceTools
 
-_WEB_ROOT = Path(__file__).parent / "web"
-_CONSOLE_CSP = "; ".join(
-    (
-        "default-src 'self'",
-        "script-src 'self'",
-        "style-src 'self'",
-        "img-src 'self' data:",
-        "connect-src 'self'",
-        "object-src 'none'",
-        "base-uri 'self'",
-        "frame-ancestors 'none'",
-        "form-action 'self'",
-    )
-)
-_TOOL_NAMES = ("read_file", "write_file", "list_files", "fetch_url")
 _IPV6_AUTHORITY = re.compile(r"\[([0-9a-fA-F:.]+)\](?::([0-9]{1,5}))?\Z")
 
 
@@ -136,17 +125,6 @@ def _local_request(request: Request) -> bool:
         return False
     if sites:
         site = sites[0].strip().lower()
-        if site == b"cross-site":
-            # A deliberate click on a localhost console link may originate in
-            # an external page. Permit only that top-level static entry; never
-            # apply this navigation exception to API data or operations.
-            return (
-                request.method == "GET"
-                and request.scope.get("path") in {"/", "/console-assets/index.html"}
-                and values(b"sec-fetch-mode") == [b"navigate"]
-                and values(b"sec-fetch-dest") == [b"document"]
-                and values(b"sec-fetch-user") == [b"?1"]
-            )
         if site not in {b"same-origin", b"same-site", b"none"}:
             return False
     return True
@@ -156,9 +134,33 @@ class WakeRequest(Model):
     message: str = Field(min_length=1, max_length=4000)
 
 
-def create_app(settings: Settings | None = None, store: Store | None = None) -> FastAPI:
+class KnowledgeRequest(Model):
+    content: str = Field(min_length=1, max_length=16000)
+    key: str | None = Field(default=None, min_length=1, max_length=128)
+    priority: int = Field(default=0, ge=-100, le=100)
+
+
+class MemoryRequest(Model):
+    kind: Literal["preference", "decision", "correction", "pitfall"]
+    content: str = Field(min_length=1, max_length=8000)
+    keywords: str = Field(default="", max_length=2000)
+    source: str = Field(default="", max_length=2000)
+    priority: int = Field(default=0, ge=-100, le=100)
+    expected_revision: int | None = Field(default=None, ge=0)
+
+
+class ApprovalRequest(Model):
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+def create_app(
+    settings: Settings | None = None,
+    store: Store | None = None,
+    credential_store: CredentialStore | None = None,
+) -> FastAPI:
     settings = settings or Settings()
     database = store or Store(settings.database_url)
+    credentials = credential_store or CredentialStore(settings.credential_path)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -171,10 +173,27 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         title="Rocky",
         version="0.1.0",
         lifespan=lifespan,
-        description="Durable, bounded execution of long-running goals.",
+        description="Durable execution of long-running goals.",
+        docs_url=None,
+        redoc_url=None,
     )
     app.state.store = database
     bearer = HTTPBearer(auto_error=False)
+
+    @app.exception_handler(RequestValidationError)
+    async def safe_validation_error(request: Request, error: RequestValidationError):
+        if request.url.path == "/provider-settings":
+            # Pydantic's normal errors include the invalid input. A key must
+            # never be reflected into responses, error monitoring or logs.
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": "Invalid provider settings; check the API URL, model and key format"
+                },
+            )
+        from fastapi.exception_handlers import request_validation_exception_handler
+
+        return await request_validation_exception_handler(request, error)
 
     @app.middleware("http")
     async def response_security(request: Request, call_next):
@@ -184,21 +203,13 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             if local_denied
             else await call_next(request)
         )
-        path = request.scope.get("path", "")
-        if (
-            local_denied
-            or path in ("/", "/console-info", "/console-assets")
-            or path.startswith("/console-assets/")
-        ):
-            response.headers["Content-Security-Policy"] = _CONSOLE_CSP
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+        )
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         content_type = response.headers.get("content-type", "")
-        if (
-            path == "/"
-            or content_type.startswith("application/json")
-            or (path.startswith("/console-assets/") and content_type.startswith("text/html"))
-        ):
+        if content_type.startswith("application/json"):
             response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -213,31 +224,6 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     auth = [] if settings.auth_mode == "local" else [Depends(authorize)]
 
-    @app.get("/", include_in_schema=False)
-    def console():
-        # Serve a static shell under the configured access boundary. Task data
-        # stays in the JSON API, and credentials are never embedded in HTML.
-        return FileResponse(_WEB_ROOT / "index.html", media_type="text/html")
-
-    app.mount(
-        "/console-assets",
-        StaticFiles(directory=_WEB_ROOT, check_dir=False),
-        name="console-assets",
-    )
-
-    @app.get("/console-info", dependencies=auth)
-    def console_info():
-        current = get_default_model_settings()
-        return {
-            "model": current.model,
-            "reasoning_effort": current.reasoning_effort,
-            "models": model_catalog(settings.model),
-            "version": app.version,
-            "tools": list(_TOOL_NAMES),
-            "polling_seconds": 3,
-            "auth_mode": settings.auth_mode,
-        }
-
     def get_default_model_settings() -> ModelSettings:
         return database.get_model_settings(
             ModelSettings(model=settings.model, reasoning_effort=settings.reasoning_effort)
@@ -249,9 +235,56 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.put("/model-settings", response_model=ModelSettings, dependencies=auth)
     def put_model_settings(value: ModelSettings):
+        if (
+            value.provider is not None
+            or value.base_url is not None
+            or value.credential_id is not None
+        ):
+            raise HTTPException(422, "Use provider settings to configure a third-party model")
         if value.model not in {item["id"] for item in model_catalog(settings.model)}:
             raise HTTPException(422, "Select a model from the configured model catalog")
         return database.set_model_settings(value)
+
+    def provider_view(current: ModelSettings):
+        provider = current.provider or "openai"
+        base_url = current.base_url or "https://api.openai.com/v1"
+        account = current.credential_id or credential_id(provider, base_url)
+        storage_error = None
+        try:
+            has_key = bool(credentials.get(account)) if current.credential_id else False
+        except CredentialError as exc:
+            has_key = False
+            storage_error = str(exc)
+        if not has_key and provider == "openai" and base_url == "https://api.openai.com/v1":
+            has_key = bool(os.environ.get("OPENAI_API_KEY"))
+        return {
+            "provider": provider,
+            "base_url": base_url,
+            "model": current.model,
+            "reasoning_effort": current.reasoning_effort,
+            "has_api_key": has_key,
+            "credential_storage": credentials.storage,
+            "credential_error": storage_error,
+            "providers": PRESETS,
+            "models": provider_model_catalog(provider, base_url, current.model),
+        }
+
+    @app.get("/provider-settings", dependencies=auth)
+    def get_provider_settings():
+        return provider_view(get_default_model_settings())
+
+    @app.put("/provider-settings", dependencies=auth)
+    def put_provider_settings(value: ProviderUpdate):
+        snapshot = value.snapshot()
+        try:
+            key = value.api_key.get_secret_value() if value.api_key else ""
+            if key:
+                credentials.set(snapshot.credential_id, key)
+            elif value.clear_api_key:
+                credentials.set(snapshot.credential_id, None)
+        except CredentialError as exc:
+            raise HTTPException(503, str(exc)) from None
+        return provider_view(database.set_model_settings(snapshot))
 
     def require_goal(goal_id: str) -> GoalView:
         result = database.get_goal(goal_id)
@@ -281,29 +314,162 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         except IntegrityError:
             # Concurrent retries may race on the unique goal_id insert.
             existing = database.get_goal(goal_id)
-            if existing and existing.contract == contract:
+            if existing and equivalent_contracts(existing.contract, contract):
                 return existing
             raise HTTPException(409, "Conflicting concurrent goal submission") from None
 
     @app.get("/goals", response_model=list[GoalView], dependencies=auth)
-    def list_goals(limit: Annotated[int, Query(ge=1, le=100)] = 50):
-        return database.list_goals(limit)
+    def list_goals(
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        archived: bool = False,
+    ):
+        return database.list_goals(limit, archived=archived)
+
+    @app.get("/memories", dependencies=auth)
+    def get_memories(
+        query: Annotated[str, Query(max_length=8000)] = "",
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        include_inactive: bool = False,
+    ):
+        return database.memories(query, limit, include_inactive=include_inactive)
+
+    @app.put("/memories/{key}", dependencies=auth)
+    def put_memory(key: str, request: MemoryRequest):
+        try:
+            return database.put_memory(key, **request.model_dump())
+        except MemoryConflictError as exc:
+            raise HTTPException(409, str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @app.delete("/memories/{key}", dependencies=auth)
+    def retract_memory(key: str, expected_revision: Annotated[int, Query(ge=1)]):
+        try:
+            return database.archive_memory(key, expected_revision)
+        except KeyError:
+            raise HTTPException(404, "Memory not found") from None
+        except MemoryConflictError as exc:
+            raise HTTPException(409, str(exc)) from None
 
     @app.get("/goals/{goal_id}", response_model=GoalView, dependencies=auth)
     def get_goal(goal_id: str):
         return require_goal(goal_id)
+
+    def archive_goal(goal_id: str, archived: bool):
+        try:
+            return database.set_archived(goal_id, archived)
+        except KeyError:
+            raise HTTPException(404, "Goal not found") from None
+        except ValueError:
+            raise HTTPException(409, "Only completed goals can be archived or restored") from None
+
+    @app.post("/goals/{goal_id}/archive", response_model=GoalView, dependencies=auth)
+    def archive_completed_goal(goal_id: str):
+        return archive_goal(goal_id, True)
+
+    @app.post("/goals/{goal_id}/restore", response_model=GoalView, dependencies=auth)
+    def restore_completed_goal(goal_id: str):
+        return archive_goal(goal_id, False)
+
+    @app.delete("/goals/{goal_id}", dependencies=auth)
+    def delete_completed_goal(goal_id: str):
+        try:
+            database.delete_goal(goal_id)
+        except KeyError:
+            raise HTTPException(404, "Goal not found") from None
+        except ValueError:
+            raise HTTPException(409, "Only completed goals can be deleted") from None
+        return {"goal_id": goal_id, "deleted": True}
 
     @app.get("/goals/{goal_id}/events", dependencies=auth)
     def get_events(goal_id: str, after: Annotated[int, Query(ge=0)] = 0):
         require_goal(goal_id)
         return database.events(goal_id, after=after)
 
+    @app.get("/goals/{goal_id}/messages", dependencies=auth)
+    def get_messages(goal_id: str):
+        require_goal(goal_id)
+        return database.goal_messages(goal_id)
+
+    @app.get("/goals/{goal_id}/conversation", dependencies=auth)
+    def get_conversation(goal_id: str):
+        require_goal(goal_id)
+        return database.conversation(goal_id)
+
+    @app.get("/goals/{goal_id}/steps", dependencies=auth)
+    def get_execution_steps(
+        goal_id: str,
+        after: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+    ):
+        require_goal(goal_id)
+        return database.execution_steps(goal_id, after=after, limit=limit)
+
+    @app.get("/goals/{goal_id}/knowledge", dependencies=auth)
+    def get_knowledge(goal_id: str):
+        require_goal(goal_id)
+        return database.knowledge(goal_id)
+
+    @app.get("/goals/{goal_id}/execution-events", dependencies=auth)
+    def get_execution_events(
+        goal_id: str,
+        after: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+    ):
+        require_goal(goal_id)
+        return database.execution_events(goal_id, after=after, limit=limit)
+
+    @app.put("/goals/{goal_id}/knowledge", dependencies=auth)
+    def put_knowledge(goal_id: str, request: KnowledgeRequest):
+        require_goal(goal_id)
+        try:
+            return database.put_knowledge(
+                goal_id, request.content, key=request.key, priority=request.priority
+            )
+        except KeyError:
+            raise HTTPException(404, "Goal not found") from None
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @app.get("/goals/{goal_id}/artifacts/content", dependencies=auth)
+    def artifact_content(goal_id: str, path: Annotated[str, Query(min_length=1, max_length=240)]):
+        goal = require_goal(goal_id)
+        if path not in {item.path for item in goal.contract.deliverables}:
+            raise HTTPException(404, "Artifact is not a declared deliverable")
+        try:
+            content = WorkspaceTools(settings).read_artifact(goal_id, path)
+        except (OSError, ToolError, UnicodeError):
+            raise HTTPException(404, "Artifact is missing, unsafe or not readable text") from None
+        limit = 100_000
+        return {"path": path, "content": content[:limit], "truncated": len(content) > limit}
+
+    @app.get("/goals/{goal_id}/artifacts/download", dependencies=auth)
+    def artifact_download(goal_id: str, path: Annotated[str, Query(min_length=1, max_length=240)]):
+        goal = require_goal(goal_id)
+        if path not in {item.path for item in goal.contract.deliverables}:
+            raise HTTPException(404, "Artifact is not a declared deliverable")
+        try:
+            content = WorkspaceTools(settings).read_artifact_bytes(goal_id, path)
+        except (OSError, ToolError):
+            raise HTTPException(404, "Artifact is missing, unsafe or inaccessible") from None
+        filename = quote(path.rsplit("/", 1)[-1], safe="")
+        return Response(
+            content,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
+                "Cache-Control": "no-store",
+            },
+        )
+
     def command(goal_id: str, kind: str, payload: str = ""):
         require_goal(goal_id)
         try:
             command_id = database.enqueue_command(goal_id, kind, payload)
+        except KeyError:
+            raise HTTPException(404, "Goal not found") from None
         except ValueError as exc:
-            raise HTTPException(409, "Goal has already ended") from exc
+            raise HTTPException(409, str(exc)) from None
         return {"goal_id": goal_id, "command_id": command_id, "status": "queued"}
 
     @app.post("/goals/{goal_id}/cancel", status_code=202, dependencies=auth)
@@ -313,5 +479,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     @app.post("/goals/{goal_id}/wake", status_code=202, dependencies=auth)
     def wake_goal(goal_id: str, request: WakeRequest):
         return command(goal_id, "wake", request.message)
+
+    @app.post("/goals/{goal_id}/approve", status_code=202, dependencies=auth)
+    def approve_goal(goal_id: str, request: ApprovalRequest):
+        return command(goal_id, "approve", request.fingerprint)
 
     return app

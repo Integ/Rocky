@@ -112,13 +112,14 @@ def test_invalid_models_combinations_and_extra_fields_never_change_saved_default
         {"model": "gpt-6-luna", "reasoning_effort": "none"},
     ],
 )
-def test_valid_model_settings_are_returned_and_reflected_in_console_info(api, value):
+def test_valid_model_settings_are_returned_and_reflected_in_provider_settings(api, value):
     client, _ = api
     response = client.put("/model-settings", json=value, headers=_AUTH)
     assert response.status_code == 200
     assert response.json() == value
     assert response.headers["cache-control"] == "no-store"
-    info = client.get("/console-info", headers=_AUTH).json()
+    assert client.get("/model-settings", headers=_AUTH).json() == value
+    info = client.get("/provider-settings", headers=_AUTH).json()
     assert info["model"] == value["model"]
     assert info["reasoning_effort"] == value["reasoning_effort"]
     catalog_entry = next(item for item in info["models"] if item["id"] == value["model"])
@@ -138,7 +139,10 @@ def test_saved_defaults_survive_app_and_store_restart_without_using_new_env_fall
     try:
         with TestClient(create_app(api_settings(model="gpt-4.1"), reopened)) as client:
             assert client.get("/model-settings", headers=_AUTH).json() == _REASONING
-            assert client.get("/console-info", headers=_AUTH).json()["model"] == _REASONING["model"]
+            assert (
+                client.get("/provider-settings", headers=_AUTH).json()["model"]
+                == _REASONING["model"]
+            )
     finally:
         reopened.close()
 

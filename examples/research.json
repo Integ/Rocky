@@ -5,11 +5,22 @@
     "Explains that external side effects require idempotency or reconciliation",
     "Includes the source URL and identifies uncertainty"
   ],
-  "deliverables": [{"path": "research/report.md", "min_bytes": 300, "contains": ["https://docs.temporal.io/temporal.md"]}],
-  "allowed_tools": ["read_file", "write_file", "list_files", "fetch_url"],
-  "allowed_domains": ["docs.temporal.io"],
-  "max_steps": 16,
-  "max_model_calls": 24,
-  "max_output_tokens": 4096,
-  "deadline_seconds": 86400
+  "deliverables": [
+    {
+      "path": "research/report.md",
+      "min_bytes": 300,
+      "contains": [
+        "https://docs.temporal.io/temporal.md"
+      ]
+    }
+  ],
+  "allowed_tools": [
+    "read_file",
+    "write_file",
+    "list_files",
+    "fetch_url"
+  ],
+  "allowed_domains": [
+    "docs.temporal.io"
+  ]
 }

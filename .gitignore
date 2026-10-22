@@ -11,3 +11,7 @@ build/
 !.env.example
 data/
 .DS_Store
+
+desktop/.build/
+desktop/.cache/
+desktop/.runtime-cache/

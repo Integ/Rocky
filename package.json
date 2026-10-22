@@ -1,9 +1,0 @@
-{
-  "name": "rocky-mission-control",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "test:ui": "node --test tests/web/*.test.mjs",
-    "check:ui": "node --check src/rocky/web/app.js && node --check src/rocky/web/core.js && node --check src/rocky/web/visuals.js"
-  }
-}

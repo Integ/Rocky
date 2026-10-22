@@ -1,10 +1,19 @@
 {
   "objective": "Create readiness.txt containing exactly the sentence: Rocky is ready.",
-  "acceptance_criteria": ["readiness.txt contains only Rocky is ready. with optional trailing newline"],
-  "deliverables": [{"path": "readiness.txt", "contains": ["Rocky is ready."]}],
-  "allowed_tools": ["read_file", "write_file", "list_files"],
-  "max_steps": 6,
-  "max_model_calls": 8,
-  "max_output_tokens": 1024,
-  "deadline_seconds": 600
+  "acceptance_criteria": [
+    "readiness.txt contains only Rocky is ready. with optional trailing newline"
+  ],
+  "deliverables": [
+    {
+      "path": "readiness.txt",
+      "contains": [
+        "Rocky is ready."
+      ]
+    }
+  ],
+  "allowed_tools": [
+    "read_file",
+    "write_file",
+    "list_files"
+  ]
 }

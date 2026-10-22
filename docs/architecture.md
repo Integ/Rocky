@@ -1,7 +1,7 @@
 # Execution architecture
 
 Rocky v0.1 targets one owner and one host. The model proposes one step at a time;
-ordinary code owns state, execution scope, budgets and completion gates.
+ordinary code owns state, execution scope, usage and completion gates.
 
 ## Durable boundaries
 
@@ -9,13 +9,15 @@ ordinary code owns state, execution scope, budgets and completion gates.
 2. The worker dispatcher starts a Temporal Workflow with the goal ID and
    `REJECT_DUPLICATE`. If start succeeds but database acknowledgement fails,
    retry finds the same execution instead of starting a second goal.
-3. Model and verifier calls reserve budget in the Workflow before dispatch.
+3. Model and verifier calls record attempted usage in the Workflow before dispatch.
    SDK retries and model Activity retries are disabled. A failed/unknown-result
-   attempt conservatively consumes its reservation.
+   attempt remains included in the usage counters.
 4. Tools run as separate Activities. A per-goal file lock and a request-fingerprinted,
    atomic receipt make single-host retries idempotent. A file write completed
-   before its receipt can be safely replayed with the same content. This does not
-   establish exactly-once semantics for arbitrary future payment or messaging tools.
+   before its receipt can be safely replayed with the same content. HTTP requests
+   and shell commands write a durable dispatch marker first. If interrupted before
+   their final receipt, retries report an unknown outcome instead of repeating an
+   external side effect; the planner must inspect state before a new operation.
 5. Every snapshot has a monotonic revision. The projection uses an atomic
    conditional SQL update, so a delayed retry cannot replace a newer state.
 6. Cancel/wake commands have a durable outbox. Cancellation is idempotent; wake
@@ -26,20 +28,106 @@ holds API projections and submission/command outboxes. Files and tool receipts
 live on a separate persistent workspace volume. Back up all three together;
 deleting any one cannot be repaired by merely restarting the worker.
 
+## Model-driven execution harness
+
+The model chooses one useful action, wait, finish or blocked decision at a time.
+The harness enforces limits, persists each checkpoint and feeds actionable
+failures back to the next planning call. It does not impose a six-stage plan.
+Default rounds record `think` followed by the actual `act` or `complete` work;
+`perceive`, `decide`, `reflect` and `complete` remain optional extension points.
+No empty hook Activities are dispatched. Failed decisions are recorded and
+returned to the model rather than progressing through ceremonial phases.
+
+`HarnessHooks` handlers run in registration order in Activities. Synchronous
+handlers run off the event loop; asynchronous handlers are awaited. Only
+explicitly enabled checkpoints dispatch handlers: pass
+`RunInput(..., hook_phases=hooks.phases)` or an explicit phase list when starting
+the workflow. Registration alone does not enable dispatch. Only decision hooks
+may replace decisions. Feedback and handoff summaries can be extended by hooks.
+External effects must use the stable step ID for idempotency; hooks are not
+retried automatically. Cancellation interrupts further dispatch.
+
+The SQL store keeps task projections separate from execution records. Each
+started/completed/failed transition appends an immutable execution event with
+input, output, timestamps and elapsed milliseconds. The current step projection,
+messages and task state update in the same revision-fenced transaction; retrying
+a revision adds no duplicate events. `/steps` reads the mutable projection;
+`/execution-events` reads the append-only audit trail. Deletion purges both with
+the existing task/outbox records, and tombstones prevent resurrection.
+
+The contract and explicit `task_progress` (completed, pending, evidence) remain
+resident. The planner can update an accumulated `handoff_summary`; it retains
+older conclusions and failed approaches instead of replacing them with only
+the last few observations. `MemoryManager` reserves separate shares for summary,
+recent raw history and retrieved knowledge: 40/40/20 when all are present, within
+a 2000-token serialized envelope. Empty or unused shares flow to later layers.
+Several recent result excerpts survive even with a large summary. The default
+counter uses UTF-8 bytes as a conservative token upper bound; provider tokenizers
+can be injected. The model boundary independently checks the entire envelope.
+
+Task contract, resident state and feedback have separate conservative serialized
+budgets of 60000, 32000 and 4000 tokens, with a 100000-token whole-request bound.
+Optional feedback/artifact excerpts are visibly clipped; oversized essential
+contracts fail before model dispatch rather than silently losing acceptance
+criteria. Checkpoint payloads and raw observations are not duplicated outside
+their assigned context layer. Independent review receives actual bounded
+artifact text rather than the planner's success claim.
+
+SQL recall is bounded at query time. It retrieves recent conversation, retained
+owner clarifications, task knowledge and query-relevant curated owner memory.
+Long-term records contain preferences, decisions, lessons or corrections and
+source metadata; traces and model summaries are never automatically promoted.
+The owner explicitly writes them through `/memories/{key}`. Revisions use
+compare-and-swap updates (stale writes return 409); corrections replace the same
+key, retractions mark it inactive, and inactive records are excluded from recall.
+Memory remains untrusted evidence and cannot grant authority or establish success.
+
+The durable handoff approach is informed by Anthropic's
+[long-running agent harness](https://www.anthropic.com/research/effective-harnesses-for-long-running-agents)
+and extension hooks by LangChain's
+[custom harness middleware](https://www.langchain.com/blog/how-to-build-a-custom-agent-harness).
+Temporal version markers let old histories replay their original commands and
+adopt the adaptive loop at safe boundaries. Previously blocked tasks still need
+real owner input; deployment does not synthesize a wake or repeat external effects.
+
+History maintenance has its own boundary version markers, so pre-maintenance
+six-phase histories also replay unchanged. Active state keeps six observations
+of at most 2000 characters each while SQL retains complete tool results. A full
+round boundary continues as a new Temporal run after 8 rounds, 8 MB or 1500 events,
+or when Temporal recommends it. Task ID, cumulative counters/revisions, recovery
+state, pending wake generations and command deduplication survive in a bounded
+checkpoint. The checkpoint is restored before signal handlers run and is removed
+from subsequent Activity inputs. This keeps historical payloads from multiplying
+across the chain. No in-flight operation is rotated or assigned a new operation ID.
+
+A separate 30-second reconciliation loop compares dispatched nonterminal SQL
+tasks against their engine run. Closed failures, termination, cancellation and
+timeouts update the projection under an exact revision check, and a recheck of
+the run ID protects a recovered execution. Reads of engine failure diagnostics
+use close events only. The history-size termination message is recognized and
+sanitized; arbitrary failure text is never copied into task status. Reconciliation
+does not restart closed tasks. A completed action checkpoint can resume at
+reflection without repeating its external effect when explicitly recovered.
+
 ## Lifecycles
 
 `queued` → `running` ↔ `waiting` / `blocked` → terminal result.
 
 - `waiting` is a model-requested bounded timer, interrupted by owner input/cancel.
-- `blocked` waits for explicit owner input, cancellation or the original deadline.
-  It does not spend model budget while waiting. Wake resets the no-progress
-  counter, and preserves elapsed time, steps and model budget.
-- Terminal results: `succeeded`, `failed`, `cancelled`, `budget_exhausted`,
+- `blocked` waits for owner input or exact-operation approval; configured task
+  deadlines still apply. No models run while waiting. A real wake resets the
+  no-progress counter and preserves usage/history; wake does not grant approval.
+- Terminal results: `succeeded`, `failed`, `cancelled`, `budget_exhausted` and
   `deadline_exceeded`. Terminal goals reject new commands; submit a new contract.
 - All planning rounds count as steps, including wait/finish requests. Verification
-  reserves an additional model call, including when deterministic file checks fail.
-- No-progress detection compares output fingerprints; changed text is not proof
-  of useful progress. Step and model-call caps remain the final bounds.
+  records an additional model call, including when deterministic file checks fail.
+- No-progress detection compares action parameters and result fingerprints, so
+  distinct sources with identical content do not falsely count as repeats.
+  At the first stalled threshold reflection requests a changed strategy and
+  preserves a handoff summary. Only another stalled window without new evidence
+  enters blocked sleep. Fresh results and real wake input restore the recovery
+  allowance; a timer alone does not. Fingerprints detect repetition rather than
+  semantic correctness, which remains the independent verifier's responsibility.
 
 ## Completion and trust
 
@@ -49,57 +137,97 @@ structured model review checks actual artifact excerpts against the objective
 and criteria. It cannot prove factual truth or browse sources independently;
 research deliverables still require appropriate evidence and human review.
 
-External text never grants permissions. The tool gateway enforces exact tool and
-hostname allowlists. Fetch resolves public addresses once and connects to a pinned
-validated IP with TLS hostname validation. Redirects and compression are rejected.
-Filesystem access uses descriptor-relative operations, no-follow opens, atomic
-writes, and link checks. Model-visible files cannot reach control receipts.
+External text never grants permissions. The owner configures `ROCKY_TOOL_ACCESS`,
+which defaults to `full`. In full mode all six tools are available even when an
+existing goal records narrower legacy allowlists. File tools accept absolute,
+relative, hidden and symlink paths. Shell commands run as the current OS user.
+HTTP requests accept all methods and arbitrary HTTP(S) destinations, including
+private/local services and custom ports, and follow redirects. Named per-goal
+cookie jars persist privately outside the task's artifact directory. Full tools
+can reach all locations the OS user can access; this is an execution policy, not
+an OS sandbox. Output excerpts remain bounded to fit model context.
 
-## Mission Control boundary
+`ROCKY_APPROVAL_MODE=required` is the default. Every shell command and HTTP
+method except GET/HEAD/OPTIONS returns a concrete approval requirement before
+side-effect dispatch. The workflow persists the full action and waits without
+model calls. Owner approval binds the goal, operation ID and exact action
+fingerprint; it resumes that same operation. Changed parameters require a new
+approval. An approval outbox and command deduplication survive delivery retries.
+The macOS client displays the operation with approve/cancel controls; the API
+uses `POST /goals/{id}/approve` with the current fingerprint. Only the owner's
+explicit `ROCKY_APPROVAL_MODE=trusted` configuration bypasses the gate. The gate
+classifies tool/method, so it cannot recognize a mutating GET endpoint; ordinary
+file writes retain the selected filesystem policy.
 
-`GET /` and `/console-assets/` serve a static console shell containing no model
-key, owner token or server-side task data. The console automatically attempts an
-anonymous same-origin connection on load. DEMO examples are an explicit user
-choice and remain labeled as simulated data.
+Tool arguments are validated before dispatch, including unused fields and HTTP
+option types. Failures return safe `error_code` and `retry_hint` fields without
+credentials. Unknown interrupted mutations require actual-state inspection,
+never an automatic repeat. Full access is not a security sandbox.
 
-`ROCKY_AUTH_MODE=local` is the default. It requires a loopback bind, checks the
-actual socket peer, validates one trusted Host and a same-origin Origin when
-present, and rejects cross-site Fetch Metadata. The boundary applies to all
-routes, including the static shell. Local requests need no token. The static entry
-allows a narrow user-activated, top-level GET navigation exception for the static
-entry page only; this does not relax the API boundary. The API CLI
+Optional `scoped` mode retains the original tool/hostname allowlists, pinned public
+GET retrieval and descriptor-relative workspace file operations. Receipt storage
+and exported deliverables retain structural validation in either mode. Credentials
+are never copied into error messages or HTTP response-header summaries.
+
+## macOS client and local API boundary
+
+The SwiftUI macOS application is the only client. It bundles the Python backend,
+uv and Temporal, prepares a private runtime in Application Support, and owns the
+API, worker and Temporal processes it starts. It connects to a loopback API using
+a fresh Bearer token generated for each launch. The API serves JSON and task
+artifacts; it has no HTML entry point, static frontend or interactive API docs.
+`/openapi.json` remains available for development tooling.
+
+Standalone backend development defaults to `ROCKY_AUTH_MODE=local`. This requires
+a loopback bind, checks the actual socket peer, validates one trusted Host and a
+same-origin Origin when present, and rejects cross-site Fetch Metadata. The
+boundary applies to every route. Local requests need no token. The API CLI
 disables proxy-header rewriting; local CLI requests ignore environment proxies.
 This mode grants access to any local process. Reverse proxies or tunnels exposing
 the service externally must use token mode: a real loopback peer cannot prove
 that an upstream proxy is local-only.
 
-Explicit `ROCKY_AUTH_MODE=token` preserves Bearer checks on goal creation,
-list/detail/events, wake/cancel and model settings. Without a configured owner
-token these endpoints fail closed. The browser retains a manually supplied token
-only in page memory and never requests the worker's `OPENAI_API_KEY`.
-`/console-info` reports authentication mode, model defaults, application version,
-supported tools and a three-second polling interval; it is not worker health.
+Explicit `ROCKY_AUTH_MODE=token` applies Bearer checks to goal creation,
+list/detail/events, wake/cancel, artifact access and model/provider settings.
+Without a configured owner token these endpoints fail closed. The macOS app uses
+this mode and stores model credentials in the system Keychain; settings responses
+expose credential references rather than plaintext keys.
 
-Console responses use a self-only Content Security Policy, with data images
-allowed and embedded objects/framing prohibited. No external scripts, fonts or
-styles are required. Entry HTML and JSON responses are marked `no-store`;
-responses also set `nosniff` and `no-referrer` headers. Swagger documentation
-retains its separate asset behavior. Animation respects reduced-motion settings.
+JSON responses are marked `no-store`, and responses set `nosniff` and
+`no-referrer` headers. `/health` reports only API process liveness. The macOS
+runtime waits for both API health and worker readiness before accepting work.
 
-## Budgets and cancellation
+## Execution limits and cancellation
 
-Budgets cap planning rounds, attempted model calls, per-call generated tokens,
-context size, and wall-clock duration. They are not an exact currency spend cap;
-input tokens also incur costs. An in-flight model request may incur cost after
+`contract.limits` defaults to 100 planning steps, 150 model calls, 500000 total
+input/output tokens and a 3600-second task timeout. Each field accepts null to
+explicitly disable that limit. Legacy flat max_steps/max_model_calls/
+max_output_tokens/deadline_seconds fields remain decodable historical metadata;
+the adaptive loop reads limits only. Checkpoints preserve cumulative counters
+and the original deadline across continue-as-new and worker restart. Input and
+approval waits also observe that deadline.
+
+Observed token usage is checked before further calls/actions. An in-flight
+request may exceed the token threshold, and missing provider usage cannot be
+reconstructed: attempted model calls still count. Per-request timeouts, response
+sizes and context limits remain separate technical controls. Reaching a bound
+is an explicit terminal result rather than a retry loop.
+
+Ended tasks may be archived and restored through separate recent/archived lists.
+Deleting removes the API projection, events, commands and model snapshot while
+preserving user workspace files. A minimal identity tombstone prevents a late
+activity or an old idempotency key from resurrecting a deleted task.
+
+An in-flight model request may incur cost after
 cancel. A file write already in progress may complete; cancellation prevents
 subsequent actions and never claims to reverse existing effects.
 
 ## Current scope and next work
 
-Current tools: scoped UTF-8 files, bounded directory listing and allowlisted
-public text retrieval. There is no arbitrary shell, browser control, general web
-search, long-term cross-goal memory, self-modifying runtime, or multi-host execution.
-Add these as separate capabilities with evidence-based evaluators. Running
+Current tools: filesystem reads/writes/listing, HTTP retrieval, general HTTP
+requests with authenticated sessions and shell execution. Browser automation can
+be run through shell-installed tools. Curated cross-goal memory is supported;
+there is no built-in browser-control tool or multi-host execution. Running
 Workflow code changes need Temporal versioning/replay validation; preserve the
 locked dependencies for active executions.
 

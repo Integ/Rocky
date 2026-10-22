@@ -2,9 +2,12 @@
 
 import asyncio
 import logging
+import os
 from contextlib import suppress
+from datetime import timedelta
+from pathlib import Path
 
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowExecutionStatus, WorkflowHistoryEventFilterType
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -12,18 +15,142 @@ from temporalio.worker import Worker
 
 from rocky.activities import Activities
 from rocky.config import Settings
-from rocky.models import RunInput, WakeCommand
+from rocky.models import GoalView, RunInput, RunState, WakeCommand
 from rocky.planner import OpenAIPlanner
-from rocky.store import Store
+from rocky.store import TERMINAL_STATUSES, Store
 from rocky.tools import WorkspaceTools
 from rocky.workflow import GoalWorkflow
 
 log = logging.getLogger(__name__)
+_RECONCILIATION_INTERVAL_SECONDS = 30
+_RECONCILIATION_BATCH_SIZE = 100
+_RECONCILIATION_RPC_TIMEOUT = timedelta(seconds=5)
+
+_CLOSED_REASONS = {
+    WorkflowExecutionStatus.FAILED: (
+        "The execution service reported a workflow failure. Inspect worker health and "
+        "recover the task from its saved state before resuming."
+    ),
+    WorkflowExecutionStatus.CANCELED: "The execution service confirmed task cancellation.",
+    WorkflowExecutionStatus.TERMINATED: (
+        "The execution service terminated this task. Inspect the service and recover "
+        "the task from its saved state before resuming."
+    ),
+    WorkflowExecutionStatus.TIMED_OUT: (
+        "The execution service timed out this task. Inspect worker health and recover "
+        "the task from its saved state before resuming."
+    ),
+}
+_HISTORY_LIMIT_REASON = (
+    "The execution service stopped this task because its workflow history reached the size "
+    "limit. Its workspace and saved progress are preserved. Update the worker with history "
+    "rollover support, then recover this task from its saved state."
+)
 
 
 class Dispatcher:
     def __init__(self, client: Client, store: Store, settings: Settings):
         self.client, self.store, self.settings = client, store, settings
+        self._reconciliation_cursor = ""
+        self._reconciliation_lock = asyncio.Lock()
+
+    async def reconcile(self) -> None:
+        """Reconcile one bounded batch without restarting a closed execution."""
+        if self._reconciliation_lock.locked():
+            return
+        async with self._reconciliation_lock:
+            goals = await asyncio.to_thread(
+                self.store.reconciliation_goals,
+                self._reconciliation_cursor,
+                _RECONCILIATION_BATCH_SIZE,
+            )
+            if not goals and self._reconciliation_cursor:
+                self._reconciliation_cursor = ""
+                goals = await asyncio.to_thread(
+                    self.store.reconciliation_goals, "", _RECONCILIATION_BATCH_SIZE
+                )
+            self._reconciliation_cursor = (
+                goals[-1].goal_id if len(goals) == _RECONCILIATION_BATCH_SIZE else ""
+            )
+            concurrency = asyncio.Semaphore(4)
+
+            async def inspect(goal: GoalView) -> None:
+                async with concurrency:
+                    try:
+                        await self._reconcile_goal(goal)
+                    except Exception:
+                        # Transport errors and raw engine failure payloads can
+                        # contain request data. Leave the projection untouched.
+                        log.warning("Task reconciliation deferred; other tasks will continue")
+
+            await asyncio.gather(*(inspect(goal) for goal in goals))
+
+    async def _reconcile_goal(self, goal: GoalView) -> None:
+        current = self.client.get_workflow_handle(goal.goal_id)
+        description = await current.describe(rpc_timeout=_RECONCILIATION_RPC_TIMEOUT)
+        status = description.status
+        if status not in (*_CLOSED_REASONS, WorkflowExecutionStatus.COMPLETED):
+            return
+        # Pin all outcome reads to the described run. A continued or recovered
+        # execution of the same workflow ID must not inherit an old outcome.
+        closed = self.client.get_workflow_handle(
+            goal.goal_id, run_id=description.run_id, result_type=RunState
+        )
+        state = goal.state.model_copy(deep=True)
+        if status == WorkflowExecutionStatus.COMPLETED:
+            outcome = await closed.result(
+                follow_runs=False, rpc_timeout=_RECONCILIATION_RPC_TIMEOUT
+            )
+            try:
+                outcome = RunState.model_validate(outcome)
+            except (TypeError, ValueError):
+                outcome = None
+            if (
+                outcome is not None
+                and outcome.goal_id == goal.goal_id
+                and outcome.status in TERMINAL_STATUSES
+            ):
+                state = outcome.model_copy(deep=True)
+                state.reason = (
+                    "Task completion confirmed by the execution service."
+                    if state.status == "succeeded"
+                    else "The execution service confirmed the task's terminal outcome."
+                )
+            else:
+                state.status = "failed"
+                state.reason = (
+                    "The execution finished without a valid terminal task result. "
+                    "Inspect the worker and recover the task from its saved state."
+                )
+        else:
+            state.status = "cancelled" if status == WorkflowExecutionStatus.CANCELED else "failed"
+            state.reason = _CLOSED_REASONS[status]
+            if status == WorkflowExecutionStatus.TERMINATED:
+                history = await closed.fetch_history(
+                    event_filter_type=WorkflowHistoryEventFilterType.CLOSE_EVENT,
+                    rpc_timeout=_RECONCILIATION_RPC_TIMEOUT,
+                )
+                for event in history.events:
+                    reason = event.workflow_execution_terminated_event_attributes.reason
+                    # Only recognize a fixed diagnostic. Never persist engine
+                    # termination reasons, details or failure stacks verbatim.
+                    if "workflow history size exceeds limit" in reason.lower():
+                        state.reason = _HISTORY_LIMIT_REASON
+                        break
+        latest = await current.describe(rpc_timeout=_RECONCILIATION_RPC_TIMEOUT)
+        if latest.run_id != description.run_id or latest.status != status:
+            return
+        await asyncio.to_thread(
+            self.store.reconcile_terminal, goal.goal_id, goal.state.revision, state
+        )
+
+    async def _reconcile_loop(self) -> None:
+        while True:
+            try:
+                await self.reconcile()
+            except Exception:
+                log.warning("Task reconciliation deferred; will retry")
+            await asyncio.sleep(_RECONCILIATION_INTERVAL_SECONDS)
 
     async def tick(self) -> None:
         for goal in await asyncio.to_thread(self.store.pending_goals):
@@ -48,7 +175,7 @@ class Dispatcher:
         for item in await asyncio.to_thread(self.store.pending_commands):
             try:
                 goal = await asyncio.to_thread(self.store.get_goal, item["goal_id"])
-                if goal and goal.state.status in (
+                if goal is None or goal.state.status in (
                     "succeeded",
                     "failed",
                     "cancelled",
@@ -62,7 +189,7 @@ class Dispatcher:
                     await handle.signal("cancel")
                 else:
                     await handle.signal(
-                        "wake_command",
+                        "approval_command" if item["kind"] == "approve" else "wake_command",
                         WakeCommand(
                             command_id=item["command_id"],
                             message=item["payload"],
@@ -73,20 +200,27 @@ class Dispatcher:
                 log.warning("Command dispatch deferred; other commands will continue")
 
     async def run(self) -> None:
-        while True:
-            try:
-                await self.tick()
-            except Exception:
-                # Never log provider responses, credentials, or goal contents.
-                log.warning("Outbox dispatch deferred; will retry")
-            await asyncio.sleep(1)
+        reconciliation = asyncio.create_task(self._reconcile_loop())
+        try:
+            while True:
+                try:
+                    await self.tick()
+                except Exception:
+                    # Never log provider responses, credentials, or goal contents.
+                    log.warning("Outbox dispatch deferred; will retry")
+                await asyncio.sleep(1)
+        finally:
+            reconciliation.cancel()
+            with suppress(asyncio.CancelledError):
+                await reconciliation
 
 
 async def run_worker(settings: Settings | None = None) -> None:
     settings = settings or Settings()
     store = Store(settings.database_url)
     store.initialize()
-    planner = OpenAIPlanner(settings)
+    # Settings must remain accessible on first launch before a key is saved.
+    planner = OpenAIPlanner(settings, defer_client=True)
     client = await Client.connect(
         settings.temporal_address,
         namespace=settings.temporal_namespace,
@@ -94,16 +228,34 @@ async def run_worker(settings: Settings | None = None) -> None:
     )
     activities = Activities(store, WorkspaceTools(settings), planner)
     dispatcher = asyncio.create_task(Dispatcher(client, store, settings).run())
+    ready_path = (
+        Path(os.environ["ROCKY_WORKER_READY_FILE"])
+        if os.environ.get("ROCKY_WORKER_READY_FILE")
+        else None
+    )
     try:
         async with Worker(
             client,
             task_queue=settings.task_queue,
             workflows=[GoalWorkflow],
-            activities=[activities.plan, activities.execute, activities.verify, activities.persist],
+            activities=[
+                activities.plan,
+                activities.execute,
+                activities.verify,
+                activities.persist,
+                activities.phase,
+            ],
             max_concurrent_activities=settings.max_concurrent_activities,
         ):
+            if ready_path:
+                descriptor = os.open(
+                    ready_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+                )
+                os.close(descriptor)
             await asyncio.Event().wait()
     finally:
+        if ready_path:
+            ready_path.unlink(missing_ok=True)
         dispatcher.cancel()
         with suppress(asyncio.CancelledError):
             await dispatcher

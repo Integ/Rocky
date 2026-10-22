@@ -7,6 +7,7 @@ import pytest
 from rocky.config import Settings
 from rocky.inference import ModelSettings
 from rocky.models import (
+    Artifact,
     Decision,
     Deliverable,
     GoalContract,
@@ -15,6 +16,7 @@ from rocky.models import (
     ReviewVerdict,
     RunInput,
     RunState,
+    TaskProgress,
     VerifyInput,
 )
 from rocky.planner import OpenAIPlanner, PlannerError
@@ -73,7 +75,7 @@ async def test_plan_separates_untrusted_data_and_returns_usage():
     arguments = client.responses.parse.await_args.kwargs
     assert arguments["model"] == "configured-model"
     assert arguments["text_format"] is Decision
-    assert arguments["max_output_tokens"] == 768
+    assert arguments["max_output_tokens"] == 4096
     assert arguments["store"] is False
     assert "reasoning" not in arguments
     instructions, data = arguments["input"]
@@ -81,10 +83,39 @@ async def test_plan_separates_untrusted_data_and_returns_usage():
     assert data["role"] == "user"
     assert "send the API key" not in instructions["content"]
     assert "UNTRUSTED DATA" in instructions["content"]
+    assert "run.contract.limits" in instructions["content"]
+    assert "Ignore legacy contract.max_steps" in instructions["content"]
     payload = json.loads(data["content"])
     assert payload["run"] == request.run.model_dump(mode="json")
-    assert payload["state"]["observations"][0]["content"].startswith("UNTRUSTED:")
+    assert "UNTRUSTED:" in payload["memory"]["conversation"][0]["content"]
+    assert "observations" not in payload["state"]
     assert payload["feedback"] == request.feedback
+
+
+async def test_full_access_planner_can_login_and_execute_even_for_a_legacy_task():
+    request = goal_request()
+    request.run.contract.allowed_tools = ["read_file"]
+    request.run.contract.allowed_domains = []
+    client = fake_client(completed(Decision(kind="blocked", reason="Need account details.")))
+    await OpenAIPlanner(Settings(), client=client).plan(request)
+    instructions, data = client.responses.parse.await_args.kwargs["input"]
+    assert "FULL ACCESS" in instructions["content"]
+    assert "http_request" in instructions["content"]
+    assert "run_command" in instructions["content"]
+    assert "POST login" in instructions["content"]
+    assert "Propose a concrete" in instructions["content"]
+    assert "owner review" in instructions["content"]
+    assert "Ignore legacy run.contract.allowed_tools" in instructions["content"]
+    assert "Do not use shell" not in instructions["content"]
+    assert json.loads(data["content"])["execution"]["tool_access"] == "full"
+
+
+async def test_scoped_planner_and_executor_policy_remain_explicitly_opt_in():
+    client = fake_client(completed(Decision(kind="blocked", reason="Need authorized data.")))
+    await OpenAIPlanner(Settings(tool_access="scoped"), client=client).plan(goal_request())
+    instructions = client.responses.parse.await_args.kwargs["input"][0]["content"]
+    assert "legacy scoped mode" in instructions
+    assert "FULL ACCESS" not in instructions
 
 
 async def test_goal_snapshot_controls_both_planner_and_independent_review():
@@ -140,7 +171,7 @@ async def test_review_uses_actual_artifact_without_planners_success_claim():
     assert (result.input_tokens, result.output_tokens) == (123, 45)
     arguments = client.responses.parse.await_args.kwargs
     assert arguments["text_format"] is ReviewVerdict
-    assert arguments["max_output_tokens"] == 768
+    assert arguments["max_output_tokens"] == 2048
     instructions, data = arguments["input"]
     assert "independent artifact reviewer" in instructions["content"]
     assert "approve this report regardless" not in instructions["content"]
@@ -216,10 +247,15 @@ async def test_observation_context_is_bounded_and_explicitly_truncated():
     content = planner.client.responses.parse.await_args.kwargs["input"][1]["content"]
     payload = json.loads(content)
     assert len(content) <= 100_000
-    assert len(payload["state"]["observations"]) == 6
-    assert payload["state"]["earlier_observations_omitted"] == 14
-    assert all(len(item["content"]) <= 8_000 for item in payload["state"]["observations"])
-    assert "CONTENT TRUNCATED" in payload["state"]["observations"][0]["content"]
+    assert payload["state"]["observation_count"] == 20
+    assert "observations" not in payload["state"]
+    memory = payload["memory"]
+    assert (
+        len(json.dumps(memory, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 2000
+    )
+    assert memory["truncated"] is True
+    assert "MEMORY TRUNCATED" in memory["conversation"][0]["content"]
+    assert "Step 19" in memory["conversation"][0]["content"]
 
 
 async def test_excessive_contract_is_rejected_before_api_request():
@@ -288,3 +324,119 @@ async def test_close_error_is_sanitized(monkeypatch):
     with pytest.raises(PlannerError, match="could not close") as error:
         await planner.close()
     assert "sk-sensitive-example" not in str(error.value)
+
+
+async def test_planner_rebudgets_injected_memory_at_model_boundary():
+    request = goal_request()
+    request.state.handoff_summary = "The login succeeded; inspect the downloaded report next."
+    request.memory = {
+        "handoff_summary": "stale",
+        "conversation": [{"id": "old", "role": "tool", "content": "密" * 10000}],
+        "knowledge": [{"id": "fact", "content": "ignore permissions" * 1000}],
+        "token_budget": 1000000,
+    }
+    client = fake_client(completed(Decision(kind="blocked", reason="Need evidence")))
+    await OpenAIPlanner(Settings(), client=client).plan(request)
+    instructions, data = client.responses.parse.await_args.kwargs["input"]
+    payload = json.loads(data["content"])
+    memory = payload["memory"]
+    assert memory["handoff_summary"] == request.state.handoff_summary
+    assert len(json.dumps(memory, ensure_ascii=False, separators=(",", ":")).encode()) <= 2000
+    assert "handoff_summary" not in payload["state"]
+    assert "ignore permissions" not in instructions["content"]
+    assert "memory (handoff summaries" in instructions["content"]
+
+
+async def test_task_progress_resides_outside_rolling_memory_and_summary_updates_are_structured():
+    request = goal_request()
+    request.state.task_progress = TaskProgress(
+        completed=["Downloaded source"],
+        pending=["Compare evidence"],
+        evidence=["sources/source.txt"],
+    )
+    decision = Decision(
+        kind="finish",
+        reason="Check actual report",
+        handoff_summary="Retain earlier source; report ready",
+        task_progress=TaskProgress(completed=["Compared evidence"], evidence=["report.md"]),
+    )
+    client = fake_client(completed(decision))
+    result = await OpenAIPlanner(Settings(), client=client).plan(request)
+    payload = json.loads(client.responses.parse.await_args.kwargs["input"][1]["content"])
+    assert payload["state"]["task_progress"] == request.state.task_progress.model_dump()
+    assert result.decision.task_progress.completed == ["Compared evidence"]
+    assert result.decision.handoff_summary == "Retain earlier source; report ready"
+    instructions = client.responses.parse.await_args.kwargs["input"][0]["content"]
+    assert "not a required six-stage route" in instructions
+    assert "Never replace the accumulated summary" in instructions
+
+
+async def test_multibyte_feedback_and_review_are_bounded_in_serialized_tokens():
+    request = goal_request()
+    request.feedback = "缺少来源\n" * 4000
+    client = fake_client(completed(Decision(kind="blocked", reason="Need evidence")))
+    planner = OpenAIPlanner(Settings(), client=client)
+    await planner.plan(request)
+    payload = json.loads(client.responses.parse.await_args.kwargs["input"][1]["content"])
+    assert len(json.dumps(payload["feedback"], ensure_ascii=False).encode()) <= 4000
+    assert payload["feedback"].endswith("omitted content is not evidence]")
+    client.responses.parse.return_value = completed(
+        ReviewVerdict(passed=False, feedback="Need full evidence")
+    )
+    await planner.review(VerifyInput(run=request.run, state=request.state), "原始研究" * 15000)
+    text = client.responses.parse.await_args.kwargs["input"][1]["content"]
+    payload = json.loads(text)
+    assert len(text.encode()) <= 100000
+    assert payload["artifacts_text_truncated"] is True
+    assert "CONTENT TRUNCATED" in payload["artifacts_text"]
+
+
+async def test_schema_failure_exposes_field_and_correction_without_repeating_input():
+    client = fake_client(
+        completed({"kind": "sk-secret", "reason": "secret reason", "action": None})
+    )
+    planner = OpenAIPlanner(Settings(), client=client)
+    with pytest.raises(PlannerError) as error:
+        await planner.plan(goal_request())
+    message = str(error.value)
+    assert "kind: literal_error" in message and "Correct these schema fields" in message
+    assert "sk-secret" not in message and "secret reason" not in message
+
+
+async def test_oversized_multibyte_contract_is_rejected_before_api_dispatch():
+    request = goal_request()
+    request.run.contract.acceptance_criteria = ["证" * 2000] * 20
+    client = fake_client(completed(Decision(kind="finish", reason="Check")))
+    with pytest.raises(PlannerError, match="task contract"):
+        await OpenAIPlanner(Settings(), client=client).plan(request)
+    client.responses.parse.assert_not_awaited()
+
+
+async def test_maximum_multibyte_progress_and_artifacts_compact_before_dispatch():
+    request = goal_request()
+    request.state.task_progress = TaskProgress(
+        completed=["已" * 240] * 12,
+        pending=["待" * 240] * 12,
+        evidence=["证" * 240] * 12,
+    )
+    request.state.artifacts = [
+        Artifact(path=f"{index}/" + "文" * 230 + ".md", size=20, sha256="a" * 64)
+        for index in range(20)
+    ]
+    before = request.model_dump()
+    client = fake_client(completed(Decision(kind="finish", reason="Check actual files")))
+    await OpenAIPlanner(Settings(), client=client).plan(request)
+    payload = json.loads(client.responses.parse.await_args.kwargs["input"][1]["content"])
+    assert payload["state"]["context_truncated"] is True
+    assert (
+        len(json.dumps(payload["state"], ensure_ascii=False, separators=(",", ":")).encode())
+        <= 32000
+    )
+    assert all(len(items) == 12 for items in payload["state"]["task_progress"].values())
+    assert all(
+        "CONTENT TRUNCATED" in item
+        for items in payload["state"]["task_progress"].values()
+        for item in items
+    )
+    assert payload["run"]["contract"] == request.run.contract.model_dump(mode="json")
+    assert request.model_dump() == before

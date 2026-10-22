@@ -44,13 +44,9 @@ def assert_denied(response):
     assert "access-control-allow-origin" not in response.headers
 
 
-def test_loopback_console_and_api_work_without_any_bearer_token(local_client, app_store):
+def test_loopback_api_works_without_any_bearer_token(local_client, app_store):
     _, store = app_store
-    assert local_client.get("/").status_code == 200
-    assert local_client.get("/console-assets/app.js").status_code == 200
-    info = local_client.get("/console-info")
-    assert info.status_code == 200
-    assert info.json()["auth_mode"] == "local"
+    assert local_client.get("/health").json() == {"status": "ok", "service": "rocky"}
     assert local_client.get("/goals").json() == []
     assert local_client.put("/model-settings", json=_MODEL).json() == _MODEL
     assert local_client.get("/model-settings").json() == _MODEL
@@ -89,10 +85,10 @@ def test_matching_origin_loopback_and_canonical_default_ports_are_allowed(
     app, _ = app_store
     with TestClient(app, client=(peer, 45678), base_url=base_url) as client:
         response = client.get(
-            "/console-info", headers={"Origin": origin, "Sec-Fetch-Site": "same-origin"}
+            "/model-settings", headers={"Origin": origin, "Sec-Fetch-Site": "same-origin"}
         )
         assert response.status_code == 200
-        assert response.json()["auth_mode"] == "local"
+        assert response.json()["model"]
 
 
 @pytest.mark.parametrize(
@@ -155,12 +151,12 @@ def test_cross_origin_opaque_or_malformed_origins_are_rejected_before_writes(
         "localhost\r\n:8000",
     ],
 )
-def test_dns_rebinding_and_malformed_host_authorities_cannot_even_load_shell(local_client, host):
-    assert_denied(local_client.get("/", headers={"Host": host}))
+def test_dns_rebinding_and_malformed_host_authorities_cannot_access_api(local_client, host):
+    assert_denied(local_client.get("/goals", headers={"Host": host}))
 
 
 def test_non_ascii_host_is_rejected_as_fixed_json_not_a_server_error(local_client):
-    response = local_client.get("/", headers=[(b"host", b"\xff")])
+    response = local_client.get("/goals", headers=[(b"host", b"\xff")])
     assert_denied(response)
 
 
@@ -182,7 +178,7 @@ def test_missing_asgi_connection_information_cannot_fall_back_to_server_name(app
         await app(scope, receive, send)
 
     with TestClient(missing_connection, client=("127.0.0.1", 45678), base_url=_BASE) as client:
-        assert_denied(client.get("/console-info"))
+        assert_denied(client.get("/model-settings"))
 
 
 @pytest.mark.parametrize(
@@ -195,11 +191,13 @@ def test_missing_asgi_connection_information_cannot_fall_back_to_server_name(app
     ],
 )
 def test_duplicate_security_headers_are_rejected(local_client, headers):
-    assert_denied(local_client.get("/console-info", headers=headers))
+    assert_denied(local_client.get("/model-settings", headers=headers))
 
 
 @pytest.mark.parametrize("peer", ["203.0.113.7", "10.0.0.4", "::2", "localhost", "testclient"])
-@pytest.mark.parametrize("path", ["/", "/console-assets/app.js", "/health", "/docs", "/goals"])
+@pytest.mark.parametrize(
+    "path", ["/health", "/goals", "/model-settings", "/provider-settings", "/openapi.json"]
+)
 def test_remote_or_non_ip_peer_cannot_access_any_route_even_with_spoofed_proxy_headers(
     app_store, peer, path
 ):
@@ -219,7 +217,7 @@ def test_remote_or_non_ip_peer_cannot_access_any_route_even_with_spoofed_proxy_h
 
 def test_local_peer_ignores_proxy_headers_instead_of_treating_them_as_authority(local_client):
     response = local_client.get(
-        "/console-info",
+        "/model-settings",
         headers={
             "Origin": _BASE,
             "X-Forwarded-For": "203.0.113.7",
@@ -234,7 +232,7 @@ def test_local_peer_ignores_proxy_headers_instead_of_treating_them_as_authority(
 @pytest.mark.parametrize(
     ("method", "path", "body"),
     [
-        ("GET", "/", None),
+        ("GET", "/health", None),
         ("GET", "/goals", None),
         ("POST", "/goals", _GOAL),
         ("PUT", "/model-settings", _MODEL),
@@ -269,55 +267,11 @@ _NAVIGATION = {
 }
 
 
-@pytest.mark.parametrize("path", ["/", "/console-assets/index.html"])
-def test_user_activated_cross_site_top_level_navigation_can_load_only_static_entry(
-    local_client, path
-):
-    response = local_client.get(path, headers=_NAVIGATION)
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/html")
-    assert response.headers["cache-control"] == "no-store"
-
-
 @pytest.mark.parametrize(
-    "path", ["/goals", "/model-settings", "/console-info", "/health", "/console-assets/app.js"]
+    "path", ["/", "/goals", "/model-settings", "/provider-settings", "/health", "/openapi.json"]
 )
-def test_navigation_markers_never_bypass_cross_site_api_or_other_asset_protection(
-    local_client, path
-):
+def test_user_activated_navigation_never_bypasses_cross_site_protection(local_client, path):
     assert_denied(local_client.get(path, headers=_NAVIGATION))
-
-
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"Sec-Fetch-Mode": "cors"},
-        {"Sec-Fetch-Dest": "iframe"},
-        {"Sec-Fetch-User": "?0"},
-        {"Sec-Fetch-Mode": None},
-        {"Sec-Fetch-Dest": None},
-        {"Sec-Fetch-User": None},
-        {"Origin": "http://evil.example"},
-        {"Host": "evil.example"},
-    ],
-)
-def test_static_entry_navigation_exception_keeps_all_other_boundaries(local_client, changes):
-    headers = _NAVIGATION | changes
-    headers = {key: value for key, value in headers.items() if value is not None}
-    assert_denied(local_client.get("/", headers=headers))
-
-
-def test_cross_site_navigation_exception_never_applies_to_posts_or_duplicate_markers(local_client):
-    assert_denied(local_client.post("/", headers=_NAVIGATION))
-    assert_denied(local_client.post("/goals", json=_GOAL, headers=_NAVIGATION))
-    headers = list(_NAVIGATION.items()) + [("Sec-Fetch-Mode", "navigate")]
-    assert_denied(local_client.get("/", headers=headers))
-
-
-def test_remote_peer_cannot_use_static_navigation_exception(app_store):
-    app, _ = app_store
-    with TestClient(app, client=("203.0.113.7", 45678), base_url=_BASE) as client:
-        assert_denied(client.get("/", headers=_NAVIGATION))
 
 
 @pytest.mark.parametrize(
@@ -355,12 +309,12 @@ def test_token_mode_allows_remote_binding_and_keeps_bearer_auth_fail_closed(tmp_
             client=("203.0.113.7", 45678),
             base_url="http://service.example:8000",
         ) as client:
-            assert client.get("/console-info").status_code == 401
+            assert client.get("/model-settings").status_code == 401
             response = client.get(
-                "/console-info", headers={"Authorization": "Bearer owner-test-token"}
+                "/model-settings", headers={"Authorization": "Bearer owner-test-token"}
             )
             assert response.status_code == 200
-            assert response.json()["auth_mode"] == "token"
+            assert response.json()["model"]
             assert "access-control-allow-origin" not in response.headers
             schema = client.get("/openapi.json").json()
             assert schema["components"]["securitySchemes"]["HTTPBearer"]["scheme"] == "bearer"
@@ -368,6 +322,6 @@ def test_token_mode_allows_remote_binding_and_keeps_bearer_auth_fail_closed(tmp_
         with TestClient(
             create_app(Settings(auth_mode="token", host="0.0.0.0", api_token=None), store)
         ) as client:
-            assert client.get("/console-info").status_code == 503
+            assert client.get("/model-settings").status_code == 503
     finally:
         store.close()

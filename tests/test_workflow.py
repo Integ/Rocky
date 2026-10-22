@@ -12,19 +12,24 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from temporalio import activity
+from temporalio import activity, workflow
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Worker
+from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
 
 from rocky.models import (
     Action,
     Decision,
     Deliverable,
+    ExecutionStep,
     GoalContract,
+    Observation,
+    PhaseInput,
+    PhaseResult,
     PlanInput,
     PlanResult,
+    RunCheckpoint,
     RunInput,
     RunState,
     ToolInput,
@@ -33,9 +38,26 @@ from rocky.models import (
     VerifyInput,
     WakeCommand,
 )
-from rocky.workflow import GoalWorkflow
+from rocky.workflow import GoalWorkflow as CurrentGoalWorkflow
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
+PHASE_ORDER = ["perceive", "think", "decide", "act", "reflect", "complete"]
+
+
+@workflow.defn(name="RockyGoal")
+class GoalWorkflow(CurrentGoalWorkflow):
+    """Keep pre-adaptive histories executable as compatibility regression tests.
+
+    New decision-loop behavior is tested with the production Workflow in
+    test_adaptive_workflow.py, including replay of this legacy command stream.
+    """
+
+    def _adaptive_execution(self) -> bool:
+        return False
+
+    @workflow.run
+    async def run(self, run: RunInput) -> RunState:
+        return await super().run(run)
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
@@ -64,6 +86,8 @@ async def temporal_env(tmp_path_factory):
 class Activities:
     decisions: list[Decision] = field(default_factory=list)
     plans: list[PlanInput] = field(default_factory=list)
+    plan_run_ids: list[str] = field(default_factory=list)
+    phases: list[PhaseInput] = field(default_factory=list)
     tools: list[ToolInput] = field(default_factory=list)
     snapshots: list[RunState] = field(default_factory=list)
     verifications: int = 0
@@ -79,11 +103,31 @@ class Activities:
     reservation_gate: asyncio.Event | None = None
     cancel_in_plan: bool = False
     tool_failures: int = 0
+    planning_failures: int = 0
+    phase_started: asyncio.Event = field(default_factory=asyncio.Event)
+    phase_gate: asyncio.Event | None = None
+    failing_phases: set[str] = field(default_factory=set)
+    complete_persist_reached: asyncio.Event = field(default_factory=asyncio.Event)
+    complete_persist_gate: asyncio.Event | None = None
+    complete_persist_cycle: int = 1
+
+    @activity.defn(name="rocky.phase")
+    async def phase(self, request: PhaseInput) -> PhaseResult:
+        self.phases.append(request)
+        self.phase_started.set()
+        if self.phase_gate is not None:
+            await self.phase_gate.wait()
+        if request.phase in self.failing_phases:
+            raise ApplicationError("Extension dependency unavailable", type="Transient")
+        return PhaseResult()
 
     @activity.defn(name="rocky.plan")
     async def plan(self, request: PlanInput) -> PlanResult:
         self.plans.append(request)
+        self.plan_run_ids.append(activity.info().workflow_run_id)
         self.plan_started.set()
+        if len(self.plans) <= self.planning_failures:
+            raise ApplicationError("Planning dependency unavailable", type="Transient")
         if self.plan_gate is not None:
             await self.plan_gate.wait()
         if self.cancel_in_plan:
@@ -120,6 +164,15 @@ class Activities:
     @activity.defn(name="rocky.persist")
     async def persist(self, state: RunState) -> None:
         self.snapshots.append(state.model_copy(deep=True))
+        if (
+            self.complete_persist_gate is not None
+            and state.cycle == self.complete_persist_cycle
+            and state.execution_step is not None
+            and state.execution_step.phase == "complete"
+            and state.execution_step.status == "completed"
+        ):
+            self.complete_persist_reached.set()
+            await self.complete_persist_gate.wait()
         if state.status == "waiting":
             self.waiting.set()
             self.wait_steps.put_nowait(state.steps)
@@ -132,7 +185,7 @@ class Activities:
             await self.reservation_gate.wait()
 
     def registered(self):
-        return [self.plan, self.execute, self.verify, self.persist]
+        return [self.plan, self.execute, self.verify, self.persist, self.phase]
 
 
 def finish() -> Decision:
@@ -164,6 +217,107 @@ def worker(env, queue: str, activities: Activities) -> Worker:
     )
 
 
+@workflow.defn(name="RockyGoal")
+class LegacyBudgetWorkflow(GoalWorkflow):
+    """Produce real pre-upgrade commands without any unlimited-budget markers."""
+
+    def _unlimited_execution(self) -> bool:
+        return False
+
+    def _harness_execution(self) -> bool:
+        return False
+
+    @workflow.run
+    async def run(self, run: RunInput) -> RunState:
+        return await super().run(run)
+
+
+async def test_existing_finite_history_replays_and_adopts_unlimited_execution(temporal_env):
+    first = Activities(
+        decisions=[Decision(kind="wait", reason="Waiting before upgrade", wait_seconds=100)]
+    )
+    run = request(max_steps=1, max_model_calls=1, deadline_seconds=10)
+    legacy = Worker(
+        temporal_env.client,
+        task_queue=run.goal_id,
+        workflows=[LegacyBudgetWorkflow],
+        activities=first.registered(),
+        workflow_runner=UnsandboxedWorkflowRunner(),
+        max_cached_workflows=0,
+    )
+    async with legacy:
+        handle = await temporal_env.client.start_workflow(
+            LegacyBudgetWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        await asyncio.wait_for(first.waiting.wait(), timeout=15)
+        assert (await handle.query(GoalWorkflow.state)).status == "waiting"
+    before_upgrade = await handle.fetch_history()
+    replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
+    await asyncio.wait_for(replayer.replay_workflow(before_upgrade), timeout=15)
+
+    replacement = Activities(decisions=[finish()])
+    upgraded = Worker(
+        temporal_env.client,
+        task_queue=run.goal_id,
+        workflows=[GoalWorkflow],
+        activities=replacement.registered(),
+        max_cached_workflows=0,
+    )
+    async with upgraded:
+        # Let the old durable timer expire. Its historical deadline must no
+        # longer stop this execution when the upgraded worker resumes it.
+        result = await asyncio.wait_for(handle.result(), timeout=15)
+    assert result.status == "succeeded"
+    assert result.steps == 2
+    assert result.model_calls == 3
+    assert replacement.verifications == 1
+    assert not first.phases
+    assert [item.phase for item in replacement.phases] == PHASE_ORDER
+    await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)
+
+
+async def test_legacy_block_deadline_does_not_resume_without_external_input(temporal_env):
+    first = Activities(decisions=[Decision(kind="blocked", reason="Missing information")])
+    run = request(max_steps=10, max_model_calls=10, deadline_seconds=10)
+    async with Worker(
+        temporal_env.client,
+        task_queue=run.goal_id,
+        workflows=[LegacyBudgetWorkflow],
+        activities=first.registered(),
+        workflow_runner=UnsandboxedWorkflowRunner(),
+        max_cached_workflows=0,
+    ):
+        handle = await temporal_env.client.start_workflow(
+            LegacyBudgetWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        await asyncio.wait_for(first.blocked.wait(), timeout=15)
+        assert (await handle.query(GoalWorkflow.state)).wake_at is not None
+
+    replacement = Activities(decisions=[finish()])
+    async with Worker(
+        temporal_env.client,
+        task_queue=run.goal_id,
+        workflows=[GoalWorkflow],
+        activities=replacement.registered(),
+        max_cached_workflows=0,
+    ):
+        await temporal_env.sleep(20)
+        state = await handle.query(GoalWorkflow.state)
+        assert state.status == "blocked"
+        assert state.wake_at is None
+        assert state.model_calls == 1
+        assert not replacement.plans
+        await handle.signal(GoalWorkflow.wake, "The missing information is now available")
+        result = await asyncio.wait_for(handle.result(), timeout=15)
+    assert result.status == "succeeded"
+    assert result.model_calls == 3
+    assert replacement.plans[0].feedback == "The missing information is now available"
+    assert not first.phases
+    assert [item.phase for item in replacement.phases] == PHASE_ORDER
+    replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
+    await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)
+
+
 async def test_goal_requires_independent_verification(temporal_env):
     activities = Activities(decisions=[act(), finish()])
     run = request()
@@ -179,16 +333,28 @@ async def test_goal_requires_independent_verification(temporal_env):
     assert activities.snapshots[-1].status == "succeeded"
 
 
-async def test_verification_is_included_in_model_call_budget(temporal_env):
+async def test_legacy_model_call_limit_cannot_prevent_independent_verification(temporal_env):
     activities = Activities(decisions=[finish()])
     run = request(max_model_calls=1)
     async with worker(temporal_env, run.goal_id, activities):
         result = await temporal_env.client.execute_workflow(
             GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
         )
-    assert result.status == "budget_exhausted"
-    assert result.model_calls == 1
-    assert activities.verifications == 0
+    assert result.status == "succeeded"
+    assert result.model_calls == 2
+    assert activities.verifications == 1
+
+
+async def test_legacy_step_limit_does_not_stop_further_progress(temporal_env):
+    activities = Activities(decisions=[act(), finish()])
+    run = request(max_steps=1, max_model_calls=1)
+    async with worker(temporal_env, run.goal_id, activities):
+        result = await temporal_env.client.execute_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+    assert result.status == "succeeded"
+    assert result.steps == 2
+    assert result.model_calls == 3
 
 
 async def test_wait_is_durable_and_can_be_woken(temporal_env):
@@ -232,10 +398,11 @@ async def test_cancel_while_waiting_stops_further_work(temporal_env):
     assert activities.verifications == 0
 
 
-async def test_wall_clock_deadline_includes_waits(temporal_env):
+async def test_legacy_deadline_does_not_end_waiting_tasks(temporal_env):
     activities = Activities(
         decisions=[
-            Decision(kind="wait", reason="Wait longer than the goal deadline", wait_seconds=100)
+            Decision(kind="wait", reason="Wait beyond the historical deadline", wait_seconds=100),
+            finish(),
         ]
     )
     run = request(deadline_seconds=10)
@@ -243,12 +410,12 @@ async def test_wall_clock_deadline_includes_waits(temporal_env):
         result = await temporal_env.client.execute_workflow(
             GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
         )
-    assert result.status == "deadline_exceeded"
-    assert result.model_calls == 1
+    assert result.status == "succeeded"
+    assert result.model_calls == 3
 
 
 async def test_repeated_identical_results_stop_without_infinite_replanning(temporal_env):
-    activities = Activities(decisions=[act(), act(), act(), act()])
+    activities = Activities(decisions=[act()] * 5)
     run = request(max_no_progress=2)
     async with worker(temporal_env, run.goal_id, activities):
         handle = await temporal_env.client.start_workflow(
@@ -257,12 +424,12 @@ async def test_repeated_identical_results_stop_without_infinite_replanning(tempo
         await asyncio.wait_for(activities.blocked.wait(), timeout=15)
         blocked = await handle.query(GoalWorkflow.state)
         assert blocked.status == "blocked"
-        assert blocked.model_calls == 3
+        assert blocked.model_calls == 5
         await handle.signal(GoalWorkflow.cancel)
         result = await handle.result()
     assert result.status == "cancelled"
-    assert len(activities.tools) == 3
-    assert result.model_calls == 3
+    assert len(activities.tools) == 5
+    assert result.model_calls == 5
 
 
 async def test_worker_replacement_resumes_existing_wait(temporal_env):
@@ -283,6 +450,9 @@ async def test_worker_replacement_resumes_existing_wait(temporal_env):
     assert result.model_calls == 3
     assert len(first.plans) == len(replacement.plans) == 1
     assert replacement.plans[0].state.steps == 2
+    phases = first.phases + replacement.phases
+    assert [item.phase for item in phases] == PHASE_ORDER * 2
+    assert len({item.state.execution_step.step_id for item in phases}) == 12
 
 
 async def test_activity_cancellation_fence_is_terminal(temporal_env):
@@ -313,7 +483,7 @@ async def test_signal_during_model_call_prevents_following_tool(temporal_env):
     assert not activities.tools
 
 
-async def test_signal_during_budget_persistence_prevents_model_dispatch(temporal_env):
+async def test_signal_during_usage_persistence_prevents_model_dispatch(temporal_env):
     gate = asyncio.Event()
     activities = Activities(reservation_gate=gate)
     run = request()
@@ -344,7 +514,7 @@ async def test_tool_retries_reuse_the_same_operation_id(temporal_env):
 
 
 async def test_failed_verification_replans_and_never_claims_success(temporal_env):
-    activities = Activities(decisions=[finish(), finish()], verification_passed=False)
+    activities = Activities(decisions=[finish()] * 4, verification_passed=False)
     run = request(max_no_progress=2)
     async with worker(temporal_env, run.goal_id, activities):
         handle = await temporal_env.client.start_workflow(
@@ -353,12 +523,12 @@ async def test_failed_verification_replans_and_never_claims_success(temporal_env
         await asyncio.wait_for(activities.blocked.wait(), timeout=15)
         blocked = await handle.query(GoalWorkflow.state)
         assert blocked.status == "blocked"
-        assert blocked.model_calls == 4
+        assert blocked.model_calls == 8
         await handle.signal(GoalWorkflow.cancel)
         result = await handle.result()
     assert result.status == "cancelled"
-    assert activities.verifications == 2
-    assert result.model_calls == 4
+    assert activities.verifications == 4
+    assert result.model_calls == 8
     assert activities.plans[1].feedback == "Missing required evidence"
 
 
@@ -388,30 +558,40 @@ async def test_explicit_blocked_goal_sleeps_then_wake_resumes_same_execution(tem
 
 
 async def test_no_progress_block_can_be_resolved_by_explicit_input(temporal_env):
-    activities = Activities(decisions=[act(), act(), act(), finish()])
+    activities = Activities(decisions=[act()] * 5 + [finish()])
     run = request(max_no_progress=2)
     async with worker(temporal_env, run.goal_id, activities):
         handle = await temporal_env.client.start_workflow(
             GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
         )
         await asyncio.wait_for(activities.blocked.wait(), timeout=15)
-        assert len(activities.plans) == 3
+        assert len(activities.plans) == 5
         await handle.signal(GoalWorkflow.wake, "The report is now complete; verify it")
         result = await handle.result()
     assert result.status == "succeeded"
-    assert result.model_calls == 5
+    assert result.model_calls == 7
     assert activities.plans[-1].feedback == "The report is now complete; verify it"
 
 
-async def test_blocked_goal_keeps_original_wall_clock_deadline(temporal_env):
-    activities = Activities(decisions=[Decision(kind="blocked", reason="Missing information")])
+async def test_blocked_goal_has_no_deadline_and_can_resume_later(temporal_env):
+    activities = Activities(
+        decisions=[Decision(kind="blocked", reason="Missing information"), finish()]
+    )
     run = request(deadline_seconds=10)
     async with worker(temporal_env, run.goal_id, activities):
-        result = await temporal_env.client.execute_workflow(
+        handle = await temporal_env.client.start_workflow(
             GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
         )
-    assert result.status == "deadline_exceeded"
-    assert len(activities.plans) == result.model_calls == 1
+        await asyncio.wait_for(activities.blocked.wait(), timeout=15)
+        await temporal_env.sleep(20)
+        state = await handle.query(GoalWorkflow.state)
+        assert state.status == "blocked"
+        assert state.wake_at is None
+        assert state.model_calls == 1
+        await handle.signal(GoalWorkflow.wake, "The missing information is now available")
+        result = await handle.result()
+    assert result.status == "succeeded"
+    assert result.model_calls == 3
 
 
 async def test_wake_during_blocked_snapshot_is_not_lost(temporal_env):
@@ -433,15 +613,18 @@ async def test_wake_during_blocked_snapshot_is_not_lost(temporal_env):
     assert activities.plans[1].feedback == "Input received before persistence finished"
 
 
-async def test_blocked_decision_cannot_extend_an_exhausted_budget(temporal_env):
-    activities = Activities(decisions=[Decision(kind="blocked", reason="Need more time")])
+async def test_legacy_limit_does_not_prevent_blocking_and_resuming(temporal_env):
+    activities = Activities(decisions=[Decision(kind="blocked", reason="Need more time"), finish()])
     run = request(max_model_calls=1)
     async with worker(temporal_env, run.goal_id, activities):
-        result = await temporal_env.client.execute_workflow(
+        handle = await temporal_env.client.start_workflow(
             GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
         )
-    assert result.status == "budget_exhausted"
-    assert not activities.blocked.is_set()
+        await asyncio.wait_for(activities.blocked.wait(), timeout=15)
+        await handle.signal(GoalWorkflow.wake, "Continue with the supplied information")
+        result = await handle.result()
+    assert result.status == "succeeded"
+    assert result.model_calls == 3
 
 
 async def test_duplicate_wake_command_does_not_release_the_next_wait(temporal_env):
@@ -474,3 +657,442 @@ async def test_duplicate_wake_command_does_not_release_the_next_wait(temporal_en
     assert result.status == "succeeded"
     assert result.model_calls == 4
     assert activities.plans[2].feedback == "Second distinct event received"
+
+
+async def test_harness_records_each_phase_and_replays_completed_rounds(temporal_env):
+    activities = Activities(decisions=[act(), finish()])
+    run = request()
+    async with worker(temporal_env, run.goal_id, activities):
+        handle = await temporal_env.client.start_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        result = await handle.result()
+    assert result.status == "succeeded"
+    assert [item.phase for item in activities.phases] == PHASE_ORDER * 2
+    steps = {
+        state.execution_step.step_id: state.execution_step
+        for state in activities.snapshots
+        if state.execution_step is not None
+    }
+    assert len(steps) == 12
+    assert all(item.status == "completed" for item in steps.values())
+    assert all(item.completed_at is not None for item in steps.values())
+    assert result.handoff_summary
+    replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
+    await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)
+
+
+async def test_failed_planning_still_reflects_and_completes_the_round(temporal_env):
+    activities = Activities(planning_failures=1)
+    run = request()
+    async with worker(temporal_env, run.goal_id, activities):
+        result = await temporal_env.client.execute_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+    assert result.status == "succeeded"
+    assert [item.phase for item in activities.phases] == PHASE_ORDER * 2
+    assert "Planning" in activities.plans[1].feedback
+    assert activities.plans[1].state.handoff_summary
+    assert not activities.tools
+    assert activities.verifications == 1
+
+
+async def test_automatic_recovery_can_finish_without_external_wake(temporal_env):
+    activities = Activities(decisions=[act()] * 3 + [finish()])
+    run = request(max_no_progress=2)
+    async with worker(temporal_env, run.goal_id, activities):
+        result = await temporal_env.client.execute_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+    assert result.status == "succeeded"
+    assert not activities.blocked.is_set()
+    assert activities.plans[3].feedback
+    assert activities.plans[3].state.handoff_summary
+    assert len(activities.tools) == 3
+    assert activities.verifications == 1
+
+
+async def test_changed_action_is_progress_even_when_tool_content_is_unchanged(temporal_env):
+    changed = Decision(
+        kind="act",
+        reason="Inspect a different source after repeated results",
+        action=Action(tool="read_file", path="different.txt"),
+    )
+    activities = Activities(decisions=[act(), act(), changed, finish()])
+    run = request(max_no_progress=2)
+    async with worker(temporal_env, run.goal_id, activities):
+        result = await temporal_env.client.execute_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+    assert result.status == "succeeded"
+    assert not activities.blocked.is_set()
+    assert not activities.plans[3].feedback
+    assert len(activities.tools) == 3
+
+
+async def test_cancel_during_phase_hook_prevents_model_dispatch(temporal_env):
+    gate = asyncio.Event()
+    activities = Activities(phase_gate=gate)
+    run = request()
+    async with worker(temporal_env, run.goal_id, activities):
+        handle = await temporal_env.client.start_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        await asyncio.wait_for(activities.phase_started.wait(), timeout=15)
+        await handle.signal(GoalWorkflow.cancel)
+        gate.set()
+        result = await handle.result()
+    assert result.status == "cancelled"
+    assert not activities.plans
+    assert not activities.tools
+
+
+async def test_complete_hook_failure_recovers_then_blocks_without_endless_reviews(temporal_env):
+    activities = Activities(decisions=[finish()] * 4, failing_phases={"complete"})
+    run = request(max_no_progress=2)
+    async with worker(temporal_env, run.goal_id, activities):
+        handle = await temporal_env.client.start_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        await asyncio.wait_for(activities.blocked.wait(), timeout=15)
+        state = await handle.query(GoalWorkflow.state)
+        assert state.status == "blocked"
+        assert state.recovery_attempts == 1
+        assert activities.verifications == 4
+        assert state.model_calls == 8
+        assert "Recovery required" in activities.plans[2].feedback
+        assert "complete phase failed" in state.reason
+        await handle.signal(GoalWorkflow.cancel)
+        result = await handle.result()
+    assert result.status == "cancelled"
+    assert [item.phase for item in activities.phases] == PHASE_ORDER * 4
+    assert not any(snapshot.status == "succeeded" for snapshot in activities.snapshots)
+
+
+async def test_wait_wake_gives_stalled_task_a_fresh_recovery_allowance(temporal_env):
+    activities = Activities(
+        decisions=[
+            *[act()] * 3,
+            Decision(kind="wait", reason="Await changed external conditions", wait_seconds=3600),
+            act(),
+            act(),
+            finish(),
+        ]
+    )
+    run = request(max_no_progress=2)
+    async with worker(temporal_env, run.goal_id, activities):
+        handle = await temporal_env.client.start_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        assert await asyncio.wait_for(activities.wait_steps.get(), timeout=15) == 4
+        waiting = await handle.query(GoalWorkflow.state)
+        assert waiting.recovery_attempts == 1
+        await handle.signal(GoalWorkflow.wake, "External conditions changed; inspect again")
+        result = await handle.result()
+    assert result.status == "succeeded"
+    assert not activities.blocked.is_set()
+    assert activities.plans[4].feedback == "External conditions changed; inspect again"
+    assert activities.plans[4].state.recovery_attempts == 0
+    assert activities.plans[6].state.recovery_attempts == 1
+    assert "Recovery required" in activities.plans[6].feedback
+    assert activities.verifications == 1
+
+
+async def test_exhausted_tool_retries_still_reflect_and_finish_the_round(temporal_env):
+    activities = Activities(decisions=[act(), finish()], tool_failures=3)
+    run = request()
+    async with worker(temporal_env, run.goal_id, activities):
+        result = await temporal_env.client.execute_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+    assert result.status == "succeeded"
+    assert [item.phase for item in activities.phases] == PHASE_ORDER * 2
+    assert len(activities.tools) == 3
+    assert {item.operation_id for item in activities.tools} == {"step-0001"}
+    assert "act phase failed" in activities.plans[1].feedback
+    assert activities.plans[1].state.handoff_summary
+    assert activities.plans[1].state.observations[-1].success is False
+    assert activities.verifications == 1
+
+
+@workflow.defn(name="RockyGoal")
+class FrequentContinuationWorkflow(GoalWorkflow):
+    """Exercise production checkpointing with short, real Temporal histories."""
+
+    def _should_continue_as_new(self) -> bool:
+        return self._state.cycle - self._run_start_cycle >= 2
+
+    @workflow.run
+    async def run(self, run: RunInput) -> RunState:
+        return await super().run(run)
+
+
+def continuation_worker(env, queue: str, activities: Activities) -> Worker:
+    return Worker(
+        env.client,
+        task_queue=queue,
+        workflows=[FrequentContinuationWorkflow],
+        activities=activities.registered(),
+        workflow_runner=UnsandboxedWorkflowRunner(),
+    )
+
+
+def distinct_action(index: int) -> Decision:
+    return Decision(
+        kind="act",
+        reason=f"Inspect source {index}",
+        action=Action(tool="read_file", path=f"source-{index}.txt"),
+    )
+
+
+async def test_continue_as_new_preserves_cumulative_state_and_replays_each_run(temporal_env):
+    activities = Activities(decisions=[*[distinct_action(index) for index in range(3)], finish()])
+    run = request()
+    async with continuation_worker(temporal_env, run.goal_id, activities):
+        result = await temporal_env.client.execute_workflow(
+            FrequentContinuationWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+    assert result.status == "succeeded"
+    assert (result.steps, result.model_calls, result.cycle) == (4, 5, 4)
+    assert (result.input_tokens, result.output_tokens) == (53, 31)
+    assert len(result.observations) == 3
+    assert result.handoff_summary
+    assert activities.plans[2].state.handoff_summary
+    assert activities.plans[2].state.steps == 3
+    assert activities.plans[2].state.model_calls == 3
+    assert activities.plans[2].run.checkpoint is None
+    assert len(set(activities.plan_run_ids)) == 2
+    assert [item.operation_id for item in activities.tools] == [
+        "step-0001",
+        "step-0002",
+        "step-0003",
+    ]
+    revisions = [item.revision for item in activities.snapshots]
+    assert revisions == sorted(set(revisions))
+    assert [item.phase for item in activities.phases] == PHASE_ORDER * 4
+    step_ids = {
+        item.execution_step.step_id
+        for item in activities.snapshots
+        if item.execution_step is not None
+    }
+    assert len(step_ids) == 24
+    replayer = Replayer(
+        workflows=[FrequentContinuationWorkflow],
+        data_converter=pydantic_data_converter,
+        workflow_runner=UnsandboxedWorkflowRunner(),
+    )
+    for run_id in set(activities.plan_run_ids):
+        history = await temporal_env.client.get_workflow_handle(
+            run.goal_id, run_id=run_id
+        ).fetch_history()
+        await asyncio.wait_for(replayer.replay_workflow(history), timeout=15)
+
+
+async def test_continue_as_new_preserves_stall_detection_and_recovery_allowance(temporal_env):
+    activities = Activities(decisions=[act()] * 5)
+    run = request(max_no_progress=2)
+    async with continuation_worker(temporal_env, run.goal_id, activities):
+        handle = await temporal_env.client.start_workflow(
+            FrequentContinuationWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        await asyncio.wait_for(activities.blocked.wait(), timeout=15)
+        state = await handle.query(GoalWorkflow.state)
+        assert state.steps == 5
+        assert state.model_calls == 5
+        assert state.recovery_attempts == 1
+        assert len(set(activities.plan_run_ids)) == 3
+        assert "Recovery required" in activities.plans[3].feedback
+        await handle.signal(GoalWorkflow.cancel)
+        result = await handle.result()
+    assert result.status == "cancelled"
+    assert len(activities.tools) == 5
+
+
+async def test_wake_command_deduplication_survives_continue_as_new(temporal_env):
+    activities = Activities(
+        decisions=[
+            distinct_action(1),
+            Decision(kind="wait", reason="Await first event", wait_seconds=3600),
+            Decision(kind="wait", reason="Await a distinct second event", wait_seconds=3600),
+            finish(),
+        ]
+    )
+    run = request()
+    first = WakeCommand(command_id="first-event", message="First event is available")
+    async with continuation_worker(temporal_env, run.goal_id, activities):
+        handle = await temporal_env.client.start_workflow(
+            FrequentContinuationWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        assert await asyncio.wait_for(activities.wait_steps.get(), timeout=15) == 2
+        await handle.signal(GoalWorkflow.wake_command, first)
+        assert await asyncio.wait_for(activities.wait_steps.get(), timeout=15) == 3
+        assert len(set(activities.plan_run_ids)) == 2
+        await handle.signal(GoalWorkflow.wake_command, first)
+        state = await handle.query(GoalWorkflow.state)
+        assert state.status == "waiting"
+        assert state.model_calls == 3
+        await handle.signal(
+            GoalWorkflow.wake_command,
+            WakeCommand(command_id="second-event", message="Distinct second event is available"),
+        )
+        result = await handle.result()
+    assert result.status == "succeeded"
+    assert activities.plans[3].feedback == "Distinct second event is available"
+
+
+async def test_pending_wake_at_rollover_reaches_the_next_run(temporal_env):
+    gate = asyncio.Event()
+    activities = Activities(
+        decisions=[distinct_action(1), distinct_action(2), finish()],
+        complete_persist_gate=gate,
+        complete_persist_cycle=2,
+    )
+    run = request()
+    async with continuation_worker(temporal_env, run.goal_id, activities):
+        handle = await temporal_env.client.start_workflow(
+            FrequentContinuationWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        await asyncio.wait_for(activities.complete_persist_reached.wait(), timeout=15)
+        await handle.signal(
+            GoalWorkflow.wake_command,
+            WakeCommand(command_id="rollover-event", message="New evidence arrived at rollover"),
+        )
+        gate.set()
+        result = await handle.result()
+    assert result.status == "succeeded"
+    assert len(set(activities.plan_run_ids)) == 2
+    assert activities.plans[2].feedback == "New evidence arrived at rollover"
+    assert result.steps == 3
+
+
+async def test_cancel_at_rollover_prevents_dispatch_in_another_run(temporal_env):
+    gate = asyncio.Event()
+    activities = Activities(
+        decisions=[distinct_action(1), distinct_action(2), finish()],
+        complete_persist_gate=gate,
+        complete_persist_cycle=2,
+    )
+    run = request()
+    async with continuation_worker(temporal_env, run.goal_id, activities):
+        handle = await temporal_env.client.start_workflow(
+            FrequentContinuationWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        await asyncio.wait_for(activities.complete_persist_reached.wait(), timeout=15)
+        await handle.signal(GoalWorkflow.cancel)
+        gate.set()
+        result = await handle.result()
+    assert result.status == "cancelled"
+    assert len(set(activities.plan_run_ids)) == 1
+    assert len(activities.plans) == len(activities.tools) == 2
+    assert activities.verifications == 0
+
+
+async def test_saved_completed_action_resumes_at_reflection_without_repeating_the_tool(
+    temporal_env,
+):
+    run = request()
+    previous_result = ToolResult(
+        success=True, content="Saved external result", progress_key="saved"
+    )
+    state = RunState(
+        goal_id=run.goal_id,
+        status="running",
+        revision=535,
+        steps=54,
+        model_calls=54,
+        cycle=39,
+        phase="act",
+        input_tokens=1000,
+        output_tokens=100,
+        handoff_summary="Inspect the saved result before continuing",
+        observations=[
+            Observation(
+                step=54,
+                tool="list_files",
+                success=True,
+                content=previous_result.content,
+                progress_key=previous_result.progress_key,
+            )
+        ],
+        execution_step=ExecutionStep(
+            step_id=f"{run.goal_id}:39:act",
+            cycle=39,
+            phase="act",
+            status="completed",
+            started_at="2026-10-21T20:00:00+00:00",
+            completed_at="2026-10-21T20:00:01+00:00",
+            output={"result": previous_result.model_dump(mode="json")},
+        ),
+    )
+    run.checkpoint = RunCheckpoint(
+        state=state,
+        no_progress=2,
+        feedback="Saved action completed before engine termination",
+        resume_phase="reflect",
+        decision=act(),
+        tool_result=previous_result,
+    )
+    activities = Activities(decisions=[finish()])
+    async with worker(temporal_env, run.goal_id, activities):
+        result = await temporal_env.client.execute_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+    assert result.status == "succeeded"
+    assert not activities.tools
+    assert [item.phase for item in activities.phases] == PHASE_ORDER[4:] + PHASE_ORDER
+    assert (result.steps, result.model_calls, result.cycle) == (55, 56, 40)
+    assert (result.input_tokens, result.output_tokens) == (1017, 110)
+    assert result.revision > 535
+    assert len(result.observations) == 1
+    assert activities.plans[0].state.recovery_attempts == 0
+    assert "Saved external result" in activities.plans[0].state.handoff_summary
+    assert activities.plans[0].run.checkpoint is None
+
+
+@workflow.defn(name="RockyGoal")
+class LegacyUnboundedHarnessWorkflow(GoalWorkflow):
+    """Produce six-phase history from before payload compaction and rollover."""
+
+    def _maintain_history(self) -> bool:
+        return False
+
+    @workflow.run
+    async def run(self, run: RunInput) -> RunState:
+        return await super().run(run)
+
+
+async def test_existing_harness_history_replays_and_adopts_history_maintenance(temporal_env):
+    first = Activities(
+        decisions=[
+            distinct_action(1),
+            Decision(
+                kind="wait", reason="Wait through history maintenance upgrade", wait_seconds=3600
+            ),
+        ]
+    )
+    run = request()
+    async with Worker(
+        temporal_env.client,
+        task_queue=run.goal_id,
+        workflows=[LegacyUnboundedHarnessWorkflow],
+        activities=first.registered(),
+        workflow_runner=UnsandboxedWorkflowRunner(),
+        max_cached_workflows=0,
+    ):
+        handle = await temporal_env.client.start_workflow(
+            LegacyUnboundedHarnessWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        assert await asyncio.wait_for(first.wait_steps.get(), timeout=15) == 2
+    replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
+    await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)
+    replacement = Activities(decisions=[finish()])
+    async with worker(temporal_env, run.goal_id, replacement):
+        await handle.signal(GoalWorkflow.wake, "Continue after history maintenance upgrade")
+        result = await handle.result()
+    assert result.status == "succeeded"
+    assert (result.steps, result.model_calls, result.cycle) == (3, 4, 3)
+    assert len(first.tools) == 1
+    assert not replacement.tools
+    assert replacement.plans[0].feedback == "Continue after history maintenance upgrade"
+    assert [item.phase for item in first.phases + replacement.phases] == PHASE_ORDER * 3
+    await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)

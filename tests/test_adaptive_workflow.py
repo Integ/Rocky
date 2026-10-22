@@ -1,0 +1,393 @@
+"""Exercise the production decision loop, approvals and replay with Temporal."""
+
+import asyncio
+from dataclasses import dataclass
+
+import pytest
+from temporalio import activity, workflow
+from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
+from test_workflow import Activities, act, finish, request
+from test_workflow import temporal_env as _temporal_env
+
+from rocky.config import Settings
+from rocky.models import (
+    Action,
+    Decision,
+    ExecutionLimits,
+    RunInput,
+    RunState,
+    TaskProgress,
+    ToolInput,
+    ToolResult,
+    WakeCommand,
+)
+from rocky.tools import WorkspaceTools
+from rocky.workflow import GoalWorkflow
+
+pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
+temporal_env = _temporal_env
+
+
+def worker(env, run, activities, workflow_type=GoalWorkflow):
+    return Worker(
+        env.client,
+        task_queue=run.goal_id,
+        workflows=[workflow_type],
+        activities=activities.registered(),
+        # Worker replacement in the approval test must replay durable history.
+        max_cached_workflows=0,
+    )
+
+
+async def test_default_loop_records_actual_work_without_six_phase_ceremony(temporal_env):
+    activities = Activities(decisions=[act(), finish()])
+    run = request()
+    async with worker(temporal_env, run, activities):
+        result = await temporal_env.client.execute_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+    assert result.status == "succeeded"
+    assert activities.phases == []
+    steps = {
+        state.execution_step.step_id: state.execution_step
+        for state in activities.snapshots
+        if state.execution_step is not None
+    }
+    assert [item.phase for item in steps.values()] == ["think", "act", "think", "complete"]
+    assert all(item.status == "completed" and item.completed_at for item in steps.values())
+    assert len(activities.tools) == activities.verifications == 1
+    assert result.model_calls == 3
+
+
+async def test_only_explicitly_registered_checkpoints_dispatch_hooks(temporal_env):
+    activities = Activities(decisions=[act(), finish()])
+    run = request()
+    run.hook_phases = ["think", "reflect"]
+    async with worker(temporal_env, run, activities):
+        result = await temporal_env.client.execute_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+    assert result.status == "succeeded"
+    assert [item.phase for item in activities.phases] == ["think", "reflect"] * 2
+
+
+@pytest.mark.parametrize("phase", ["perceive", "think", "decide", "act", "reflect", "complete"])
+async def test_observer_failures_become_visible_recovery_and_blocking(temporal_env, phase):
+    activities = Activities(
+        decisions=([act()] * 2 if phase == "act" else [finish()] * 2),
+        failing_phases={phase},
+    )
+    run = request(max_no_progress=1)
+    run.hook_phases = [phase]
+    async with worker(temporal_env, run, activities):
+        handle = await temporal_env.client.start_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        await asyncio.wait_for(activities.blocked.wait(), timeout=15)
+        state = await handle.query(GoalWorkflow.state)
+        assert state.status == "blocked"
+        assert state.recovery_attempts == 1
+        assert "Recovery" in state.reason
+        assert not any(item.status == "succeeded" for item in activities.snapshots)
+        await handle.signal(GoalWorkflow.cancel)
+        result = await asyncio.wait_for(handle.result(), timeout=15)
+    assert result.status == "cancelled"
+    if phase in {"perceive", "think"}:
+        assert not activities.plans
+
+
+async def test_verification_usage_is_checked_before_claiming_success(temporal_env):
+    activities = Activities(decisions=[finish()])
+    # Planning consumes 19 tokens, so review is allowed. Its additional eight
+    # tokens take the task over the cap and must be reflected in the result.
+    run = request(limits=ExecutionLimits(max_tokens=20))
+    async with worker(temporal_env, run, activities):
+        result = await temporal_env.client.execute_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+    assert result.status == "budget_exhausted"
+    assert activities.verifications == 1
+    assert result.input_tokens + result.output_tokens == 27
+
+
+async def test_fallback_handoff_refreshes_until_a_model_summary_is_supplied(temporal_env):
+    activities = Activities(
+        decisions=[
+            Decision(
+                kind="act",
+                reason="Read the first source",
+                action=Action(tool="read_file", path="first.txt"),
+            ),
+            Decision(
+                kind="act",
+                reason="Read the second source",
+                action=Action(tool="read_file", path="second.txt"),
+            ),
+            finish(),
+        ]
+    )
+    run = request()
+    async with worker(temporal_env, run, activities):
+        result = await temporal_env.client.execute_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+    assert result.status == "succeeded"
+    assert "first.txt" in activities.plans[1].state.handoff_summary
+    assert "second.txt" in activities.plans[2].state.handoff_summary
+    assert not activities.plans[2].state.handoff_is_model
+
+
+@pytest.mark.parametrize(
+    "limits,decisions,status,steps,calls,tools,verifications",
+    [
+        (ExecutionLimits(max_steps=1), [act(), finish()], "budget_exhausted", 1, 1, 1, 0),
+        (ExecutionLimits(max_model_calls=1), [finish()], "budget_exhausted", 1, 1, 0, 0),
+        (ExecutionLimits(max_tokens=10), [act()], "budget_exhausted", 1, 1, 0, 0),
+        (
+            ExecutionLimits(timeout_seconds=1),
+            [Decision(kind="wait", reason="Wait for a remote result", wait_seconds=100)],
+            "deadline_exceeded",
+            1,
+            1,
+            0,
+            0,
+        ),
+    ],
+)
+async def test_owner_limits_stop_before_more_work(
+    temporal_env, limits, decisions, status, steps, calls, tools, verifications
+):
+    activities = Activities(decisions=decisions)
+    run = request(limits=limits)
+    async with worker(temporal_env, run, activities):
+        result = await asyncio.wait_for(
+            temporal_env.client.execute_workflow(
+                GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+            ),
+            timeout=20,
+        )
+    assert result.status == status
+    assert (result.steps, result.model_calls) == (steps, calls)
+    assert len(activities.tools) == tools
+    assert activities.verifications == verifications
+    assert activities.snapshots[-1].status == status
+    assert result.reason
+
+
+@dataclass
+class ApprovalActivities(Activities):
+    workspace_tools: WorkspaceTools | None = None
+
+    @activity.defn(name="rocky.execute")
+    async def execute(self, value: ToolInput) -> ToolResult:
+        self.tools.append(value)
+        assert self.workspace_tools is not None
+        return await asyncio.to_thread(self.workspace_tools.execute, value)
+
+
+@dataclass
+class RepairActivities(Activities):
+    @activity.defn(name="rocky.execute")
+    async def execute(self, value: ToolInput) -> ToolResult:
+        self.tools.append(value)
+        return ToolResult(
+            success=False,
+            content="Command exited without producing the report.",
+            error_code="missing_dependency",
+            retry_hint="Install the missing fixture dependency before retrying.",
+        )
+
+
+async def test_tool_error_code_and_repair_hint_reach_the_next_model_turn(temporal_env):
+    activities = RepairActivities(decisions=[act(), finish()])
+    run = request()
+    async with worker(temporal_env, run, activities):
+        result = await temporal_env.client.execute_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+    assert result.status == "succeeded"
+    feedback = activities.plans[1].feedback
+    observation = activities.plans[1].state.observations[-1].content
+    for text in (feedback, observation):
+        assert "missing_dependency" in text
+        assert "Install the missing fixture dependency" in text
+
+
+async def test_waiting_for_approval_obeys_the_absolute_task_timeout(temporal_env, tmp_path):
+    settings = Settings(workspace_root=tmp_path / "approval-timeout")
+    run = request(limits=ExecutionLimits(timeout_seconds=1))
+    activities = ApprovalActivities(
+        decisions=[
+            Decision(
+                kind="act",
+                reason="Prepare result",
+                action=Action(tool="run_command", content="printf prepared > mutation.txt"),
+            )
+        ],
+        workspace_tools=WorkspaceTools(settings),
+    )
+    async with worker(temporal_env, run, activities):
+        result = await asyncio.wait_for(
+            temporal_env.client.execute_workflow(
+                GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+            ),
+            timeout=20,
+        )
+    assert result.status == "deadline_exceeded"
+    assert result.pending_approval is None
+    assert len(activities.plans) == len(activities.tools) == 1
+    assert activities.verifications == 0
+    assert not (settings.workspace_root / run.goal_id / "mutation.txt").exists()
+
+
+async def test_blocked_task_obeys_the_absolute_timeout_without_replanning(temporal_env):
+    activities = Activities(decisions=[Decision(kind="blocked", reason="Missing source")])
+    run = request(limits=ExecutionLimits(timeout_seconds=1))
+    async with worker(temporal_env, run, activities):
+        result = await asyncio.wait_for(
+            temporal_env.client.execute_workflow(
+                GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+            ),
+            timeout=20,
+        )
+    assert result.status == "deadline_exceeded"
+    assert len(activities.plans) == result.model_calls == 1
+    assert not activities.tools
+    assert activities.verifications == 0
+
+
+async def test_exact_owner_approval_survives_worker_replacement_and_wake_cannot_grant_it(
+    temporal_env, tmp_path
+):
+    settings = Settings(workspace_root=tmp_path / "workspaces")
+    run = request()
+    action = Action(tool="run_command", content="printf prepared > mutation.txt")
+    first = ApprovalActivities(
+        decisions=[Decision(kind="act", reason="Prepare the requested result", action=action)],
+        workspace_tools=WorkspaceTools(settings),
+    )
+    destination = settings.workspace_root / run.goal_id / "mutation.txt"
+    async with worker(temporal_env, run, first):
+        handle = await temporal_env.client.start_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        await asyncio.wait_for(first.blocked.wait(), timeout=15)
+        state = await handle.query(GoalWorkflow.state)
+        assert state.pending_approval is not None
+        fingerprint = state.pending_approval.fingerprint
+        assert state.pending_approval.action == action
+        assert state.pending_approval.operation_id == first.tools[0].operation_id
+        assert not destination.exists()
+        await handle.signal(GoalWorkflow.wake, fingerprint)
+        unchanged = await handle.query(GoalWorkflow.state)
+        assert unchanged.pending_approval is not None
+        assert unchanged.model_calls == 1
+        assert len(first.tools) == 1
+        assert not destination.exists()
+
+    replacement = ApprovalActivities(decisions=[finish()], workspace_tools=WorkspaceTools(settings))
+    async with worker(temporal_env, run, replacement):
+        await handle.signal(
+            GoalWorkflow.approval_command,
+            WakeCommand(command_id="wrong", message="0" * 64),
+        )
+        unchanged = await handle.query(GoalWorkflow.state)
+        assert unchanged.pending_approval.fingerprint == fingerprint
+        assert not replacement.plans
+        assert not replacement.tools
+        assert not destination.exists()
+        await handle.signal(
+            GoalWorkflow.approval_command,
+            WakeCommand(command_id="approve-exact-operation", message=fingerprint),
+        )
+        result = await asyncio.wait_for(handle.result(), timeout=20)
+    assert result.status == "succeeded"
+    assert result.pending_approval is None
+    assert destination.read_text() == "prepared"
+    assert len(replacement.tools) == 1
+    assert replacement.tools[0].operation_id == first.tools[0].operation_id
+    assert replacement.tools[0].action == action
+    assert replacement.tools[0].approved_action_fingerprints == [fingerprint]
+    assert len(first.plans) == len(replacement.plans) == 1
+    replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
+    await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)
+
+
+async def test_model_handoff_and_progress_survive_actions_and_continue_as_new(temporal_env):
+    progress = TaskProgress(
+        completed=["Located primary sources"],
+        pending=["Compare evidence and verify the final report"],
+        evidence=["sources/primary.txt contains the retrieved evidence"],
+    )
+    summary = "Primary sources located; use their dates to resolve contradictions."
+    decisions = [
+        Decision(
+            kind="act",
+            reason="Inspect the next independent source",
+            action=Action(tool="read_file", path=f"sources/source-{index}.txt"),
+            handoff_summary=summary if index == 0 else None,
+            task_progress=progress if index == 0 else None,
+        )
+        for index in range(8)
+    ]
+    activities = Activities(decisions=[*decisions, finish()])
+    run = request()
+    async with worker(temporal_env, run, activities):
+        result = await asyncio.wait_for(
+            temporal_env.client.execute_workflow(
+                GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+            ),
+            timeout=30,
+        )
+    assert result.status == "succeeded"
+    assert result.handoff_summary == summary
+    assert result.task_progress == progress
+    assert len(set(activities.plan_run_ids)) == 2
+    assert activities.plan_run_ids[7] != activities.plan_run_ids[8]
+    for planned in activities.plans[1:]:
+        assert planned.state.handoff_summary == summary
+        assert planned.state.task_progress == progress
+    assert activities.plans[-1].run.checkpoint is None
+    assert len(result.observations) <= 6
+    assert result.steps == 9
+    assert result.model_calls == 10
+
+
+@workflow.defn(name="RockyGoal")
+class SixPhaseHistoryWorkflow(GoalWorkflow):
+    """Capture real pre-adaptive commands without the new version marker."""
+
+    def _adaptive_execution(self) -> bool:
+        return False
+
+    @workflow.run
+    async def run(self, run: RunInput) -> RunState:
+        return await super().run(run)
+
+
+async def test_production_workflow_replays_captured_six_phase_history(temporal_env):
+    activities = Activities(decisions=[act(), finish()])
+    run = request()
+    async with Worker(
+        temporal_env.client,
+        task_queue=run.goal_id,
+        workflows=[SixPhaseHistoryWorkflow],
+        activities=activities.registered(),
+        workflow_runner=UnsandboxedWorkflowRunner(),
+    ):
+        handle = await temporal_env.client.start_workflow(
+            SixPhaseHistoryWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        result = await asyncio.wait_for(handle.result(), timeout=20)
+    assert result.status == "succeeded"
+    assert [item.phase for item in activities.phases] == [
+        "perceive",
+        "think",
+        "decide",
+        "act",
+        "reflect",
+        "complete",
+    ] * 2
+    replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
+    await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)
