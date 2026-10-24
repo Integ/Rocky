@@ -7,6 +7,7 @@ and artifact exports independently of the selected execution access policy.
 
 import fcntl
 import hashlib
+import io
 import json
 import os
 import re
@@ -41,6 +42,7 @@ from rocky.tool_contracts import (
     ActionValidationError,
     approval_fingerprint,
     parse_edits,
+    parse_read_range,
     requires_approval,
     validate_action,
 )
@@ -193,6 +195,32 @@ def _read_regular(parent: int, name: str, *, max_bytes: int | None = MAX_BYTES) 
         if max_bytes is not None and len(content) > max_bytes:
             raise ToolError("File exceeds the maximum size")
         return content
+
+
+def _read_lines(handle, bounds: tuple[int, int], *, errors: str = "strict") -> str:
+    start, end = bounds
+    selected = []
+    scanned = 0
+    last = 0
+    for number in range(1, end + 1):
+        line = handle.readline(MAX_EDIT_BYTES - scanned + 1)
+        scanned += len(line)
+        if scanned > MAX_EDIT_BYTES:
+            raise ToolError(
+                "Line range exceeds the bounded scan size; use a targeted search command."
+            )
+        if not line:
+            break
+        if number >= start:
+            selected.append(line)
+            last = number
+    if not selected:
+        raise ToolError("start_line is beyond the end of the file; choose an earlier range.")
+    try:
+        text = b"".join(selected).decode("utf-8", errors=errors)
+    except UnicodeDecodeError:
+        raise ToolError("The selected lines are not UTF-8 text") from None
+    return _clip(f"[Lines {start}-{last}; other lines are not included]\n" + text)
 
 
 def _apply_edits(text: str, edits: list[tuple[str, str, bool]]) -> str:
@@ -481,6 +509,11 @@ class WorkspaceTools:
         with _parent_directory(goal_fd, parts, create=create) as parent:
             if action.tool == "read_file":
                 content = _read_regular(parent, parts[-1])
+                if bounds := parse_read_range(action.content):
+                    text = _read_lines(io.BytesIO(content), bounds)
+                    return ToolResult(
+                        success=True, content=text, progress_key="read:" + _digest(text.encode())
+                    )
                 try:
                     text = content.decode("utf-8")
                 except UnicodeDecodeError as exc:
@@ -786,6 +819,10 @@ class WorkspaceTools:
                     if len(entries) >= 300:
                         return
                     item = directory / name
+                    # Task runtime caches are implementation details, not sources.
+                    # They remain readable when explicitly requested.
+                    if name == ".rocky-sandbox":
+                        continue
                     if not self._visible_path(request.run.goal_id, item):
                         continue
                     try:
@@ -824,6 +861,13 @@ class WorkspaceTools:
             )
         if action.tool == "read_file":
             with self._full_file(request.run.goal_id, path) as handle:
+                if bounds := parse_read_range(action.content):
+                    content = _read_lines(handle, bounds, errors="replace")
+                    return ToolResult(
+                        success=True,
+                        content=content,
+                        progress_key="read:" + _digest(content.encode()),
+                    )
                 content = handle.read(MAX_CONTENT * 4 + 1).decode("utf-8", errors="replace")
             return ToolResult(
                 success=True,

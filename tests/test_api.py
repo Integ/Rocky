@@ -1,9 +1,13 @@
+from unittest.mock import AsyncMock
+
 import pytest
 from fastapi.testclient import TestClient
 
 from rocky.api import create_app
 from rocky.config import Settings
-from rocky.models import RunState
+from rocky.inference import ModelSettings
+from rocky.models import GoalContract, RunState
+from rocky.planner import OpenAIPlanner, PlannerError
 from rocky.store import Store
 
 
@@ -27,6 +31,58 @@ def contract():
 
 
 AUTH = {"Authorization": "Bearer owner-test-token"}
+
+
+def test_prepare_contract_requires_auth_and_uses_saved_model_without_creating_goal(
+    api, monkeypatch
+):
+    client, store = api
+    saved_model = store.set_model_settings(
+        ModelSettings(
+            model="configured-model",
+            provider="openai-compatible",
+            base_url="https://models.example/v1",
+            credential_id="saved-credential-reference",
+        )
+    )
+    generated = GoalContract(**contract())
+    prepare = AsyncMock(return_value=generated)
+    monkeypatch.setattr(OpenAIPlanner, "prepare_contract", prepare)
+    payload = {"objective": generated.objective}
+    assert client.post("/goal-contract", json=payload).status_code == 401
+    prepare.assert_not_awaited()
+    response = client.post("/goal-contract", json=payload, headers=AUTH)
+    assert response.status_code == 200
+    assert response.json()["deliverables"] == generated.model_dump()["deliverables"]
+    draft, model = prepare.await_args.args
+    assert draft.objective == generated.objective
+    assert model == saved_model
+    assert store.pending_goals() == []
+    assert store.list_goals() == []
+
+
+def test_prepare_contract_failure_is_sanitized_and_does_not_submit(api, monkeypatch):
+    client, store = api
+    monkeypatch.setattr(
+        OpenAIPlanner,
+        "prepare_contract",
+        AsyncMock(side_effect=PlannerError("sensitive provider response")),
+    )
+    response = client.post("/goal-contract", json={"objective": "整理材料"}, headers=AUTH)
+    assert response.status_code == 502
+    assert "sensitive" not in response.text
+    assert store.pending_goals() == []
+
+
+def test_automatic_preparation_rejects_manual_budget_override_before_model_call(api, monkeypatch):
+    client, _ = api
+    prepare = AsyncMock()
+    monkeypatch.setattr(OpenAIPlanner, "prepare_contract", prepare)
+    response = client.post(
+        "/goal-contract", json={"objective": "整理材料", "limits": {"max_steps": 0}}, headers=AUTH
+    )
+    assert response.status_code == 422
+    prepare.assert_not_awaited()
 
 
 def test_owner_auth_and_fail_closed_without_configuration(api):

@@ -12,7 +12,9 @@ from rocky.models import (
     Artifact,
     Decision,
     Deliverable,
+    DeliveryRequirements,
     GoalContract,
+    GoalDraft,
     Observation,
     PlanInput,
     ReviewVerdict,
@@ -88,10 +90,173 @@ async def test_plan_separates_untrusted_data_and_returns_usage():
     assert "run.contract.limits" in instructions["content"]
     assert "Ignore legacy contract.max_steps" in instructions["content"]
     payload = json.loads(data["content"])
-    assert payload["run"] == request.run.model_dump(mode="json")
+    assert payload["run"]["goal_id"] == request.run.goal_id
+    assert set(payload["run"]) == {"goal_id", "contract"}
+    assert payload["run"]["contract"]["objective"] == request.run.contract.objective
+    assert (
+        payload["run"]["contract"]["acceptance_criteria"]
+        == request.run.contract.acceptance_criteria
+    )
+    assert "model_settings" not in payload["run"]
     assert "UNTRUSTED:" in payload["memory"]["conversation"][0]["content"]
     assert "observations" not in payload["state"]
     assert payload["feedback"] == request.feedback
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [
+        {"max_steps": 12, "max_model_calls": 20, "max_tokens": 60000, "timeout_seconds": 600},
+        {"max_steps": 100, "max_model_calls": 150, "max_tokens": 500000, "timeout_seconds": 3600},
+    ],
+)
+async def test_prepare_contract_uses_configured_model_and_generated_budget(limits):
+    requirements = DeliveryRequirements(
+        acceptance_criteria=["逐项回答材料中的问题，并注明来源"],
+        deliverables=[Deliverable(path="notes/answers.md")],
+        limits=limits,
+    )
+    client = fake_client(completed(requirements))
+    planner = OpenAIPlanner(Settings(), client=client)
+    draft = GoalDraft(objective="整理材料中的问题和答案")
+    inference = ModelSettings(model="gpt-6-sol", reasoning_effort="low")
+
+    contract = await planner.prepare_contract(draft, inference)
+
+    assert contract.objective == draft.objective
+    assert contract.limits.max_steps == limits["max_steps"]
+    assert contract.limits.max_model_calls >= limits["max_model_calls"]
+    assert contract.limits.max_model_calls >= limits["max_steps"] + 8
+    assert contract.limits.max_tokens >= contract.limits.max_model_calls * 32000 + 64000
+    assert contract.limits.max_tokens >= limits["max_tokens"]
+    assert contract.limits.timeout_seconds >= limits["timeout_seconds"]
+    assert contract.acceptance_criteria == requirements.acceptance_criteria
+    assert contract.deliverables == requirements.deliverables
+    arguments = client.responses.parse.await_args.kwargs
+    assert arguments["model"] == inference.model
+    assert arguments["reasoning"] == {"effort": "low"}
+    assert arguments["text_format"] is DeliveryRequirements
+    assert "Estimate task difficulty" in arguments["input"][0]["content"]
+    assert "Reserve extra calls" in arguments["input"][0]["content"]
+    assert json.loads(arguments["input"][1]["content"]) == {"objective": draft.objective}
+    assert draft.objective not in arguments["input"][0]["content"]
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"acceptance_criteria": []},
+        {"deliverables": []},
+        {"deliverables": [{"path": "../outside.md"}]},
+        {"deliverables": [{"path": "/tmp/outside.md"}]},
+        {"deliverables": [{"path": ".env"}]},
+        {"allowed_tools": ["run_command"]},
+        {"objective": "different objective"},
+        {"limits": {}},
+        {"limits": None},
+    ],
+)
+async def test_prepare_contract_rejects_invalid_or_scope_expanding_model_output(override):
+    output = {
+        "acceptance_criteria": ["完成目标"],
+        "deliverables": [{"path": "summary.md"}],
+        "limits": {
+            "max_steps": 12,
+            "max_model_calls": 20,
+            "max_tokens": 60000,
+            "timeout_seconds": 600,
+        },
+    } | override
+    planner = OpenAIPlanner(Settings(), client=fake_client(completed(output)))
+    with pytest.raises(PlannerError):
+        await planner.prepare_contract(GoalDraft(objective="整理材料"), ModelSettings(model="test"))
+
+
+@pytest.mark.parametrize(
+    "field,ceiling",
+    [
+        ("max_steps", 100),
+        ("max_model_calls", 150),
+        ("max_tokens", 5000000),
+        ("timeout_seconds", 3600),
+    ],
+)
+@pytest.mark.parametrize("invalid", [None, 0, -1, "over_ceiling", "100", True])
+async def test_automatic_budget_rejects_unlimited_invalid_and_excessive_limits(
+    field, ceiling, invalid
+):
+    limits = {"max_steps": 12, "max_model_calls": 20, "max_tokens": 60000, "timeout_seconds": 600}
+    limits[field] = ceiling + 1 if invalid == "over_ceiling" else invalid
+    output = {
+        "acceptance_criteria": ["完成目标"],
+        "deliverables": [{"path": "summary.md"}],
+        "limits": limits,
+    }
+    planner = OpenAIPlanner(Settings(), client=fake_client(completed(output)))
+    with pytest.raises(PlannerError):
+        await planner.prepare_contract(GoalDraft(objective="整理材料"), ModelSettings(model="test"))
+
+
+async def test_project_documentation_task_does_not_exhaust_tokens_after_eight_calls():
+    # Regression: the real 20-step/30-call task stopped at call 8 after
+    # 102079 input + 2998 output tokens against an AI estimate of 100000.
+    requirements = DeliveryRequirements(
+        acceptance_criteria=["Explain the project with source evidence"],
+        deliverables=[Deliverable(path="project.md")],
+        limits={
+            "max_steps": 20,
+            "max_model_calls": 30,
+            "max_tokens": 100000,
+            "timeout_seconds": 900,
+        },
+    )
+    planner = OpenAIPlanner(Settings(), client=fake_client(completed(requirements)))
+    contract = await planner.prepare_contract(
+        GoalDraft(objective="Explain Rocky"), ModelSettings(model="test")
+    )
+    assert contract.limits.max_tokens >= 1000000
+    assert contract.limits.max_tokens > (102079 + 2998) * 30 / 8
+    assert contract.limits.max_steps == 20
+    assert contract.limits.max_model_calls == 30
+    assert contract.limits.timeout_seconds >= 900
+
+
+def test_automatic_budget_stays_within_finite_ceilings():
+    requirements = DeliveryRequirements(
+        acceptance_criteria=["Complete the task"],
+        deliverables=[Deliverable(path="result.md")],
+        limits={
+            "max_steps": 100,
+            "max_model_calls": 150,
+            "max_tokens": 5000000,
+            "timeout_seconds": 3600,
+        },
+    )
+    limits = OpenAIPlanner._automatic_limits(requirements)
+    assert limits.max_steps <= 100
+    assert limits.max_model_calls <= 150
+    assert limits.max_tokens <= 5000000
+    assert limits.timeout_seconds <= 3600
+
+
+@pytest.mark.parametrize("unlimited", [False, True])
+async def test_plan_receives_actual_remaining_budget_for_delivery_and_review(unlimited):
+    request = goal_request()
+    request.run.contract.limits.max_steps = None if unlimited else 20
+    request.run.contract.limits.max_model_calls = None if unlimited else 30
+    request.run.contract.limits.max_tokens = None if unlimited else 1000000
+    request.state.steps = 8
+    request.state.model_calls = 8
+    request.state.input_tokens = 102079
+    request.state.output_tokens = 2998
+    client = fake_client(completed(Decision(kind="blocked", reason="Need source material")))
+    await OpenAIPlanner(Settings(), client=client).plan(request)
+    payload = json.loads(client.responses.parse.await_args.kwargs["input"][1]["content"])
+    assert payload["execution"]["budget_remaining"] == (
+        {"steps": None, "model_calls": None, "tokens": None}
+        if unlimited
+        else {"steps": 12, "model_calls": 22, "tokens": 894923}
+    )
 
 
 async def test_full_access_planner_can_login_and_execute_even_for_a_legacy_task():
@@ -454,7 +619,15 @@ async def test_maximum_multibyte_progress_and_artifacts_compact_before_dispatch(
         for items in payload["state"]["task_progress"].values()
         for item in items
     )
-    assert payload["run"]["contract"] == request.run.contract.model_dump(mode="json")
+    for key in (
+        "objective",
+        "acceptance_criteria",
+        "deliverables",
+        "limits",
+        "max_wait_seconds",
+        "max_no_progress",
+    ):
+        assert payload["run"]["contract"][key] == request.run.contract.model_dump(mode="json")[key]
     assert request.model_dump() == before
 
 
@@ -479,6 +652,74 @@ async def test_large_contract_and_state_shrink_memory_instead_of_failing():
     payload = json.loads(content)
     # Essential layers keep the request bound; recall takes only what is left.
     assert len(content.encode()) <= 100_000
-    assert payload["run"]["contract"] == request.run.contract.model_dump(mode="json")
+    for key in (
+        "objective",
+        "acceptance_criteria",
+        "deliverables",
+        "limits",
+        "max_wait_seconds",
+        "max_no_progress",
+    ):
+        assert payload["run"]["contract"][key] == request.run.contract.model_dump(mode="json")[key]
     assert 256 <= payload["memory"]["token_budget"] < MEMORY_TOKEN_BUDGET
     assert "Step 5" in payload["memory"]["conversation"][0]["content"]
+
+
+async def test_planning_context_keeps_effective_policy_but_omits_runtime_configuration():
+    request = goal_request()
+    request.run.model_settings = ModelSettings(model="model-name", credential_id="opaque-reference")
+    request.run.contract.max_steps = 1
+    client = fake_client(completed(Decision(kind="blocked", reason="Need evidence")))
+    for access in ("full", "scoped"):
+        await OpenAIPlanner(Settings(tool_access=access), client=client).plan(request)
+        payload = json.loads(client.responses.parse.await_args.kwargs["input"][1]["content"])
+        contract = payload["run"]["contract"]
+        assert "credential_id" not in json.dumps(payload)
+        assert "model_settings" not in payload["run"] and "checkpoint" not in payload["run"]
+        assert "max_steps" not in contract and contract["limits"]["max_steps"] == 100
+        if access == "scoped":
+            assert contract["allowed_tools"] == request.run.contract.allowed_tools
+            assert contract["allowed_domains"] == request.run.contract.allowed_domains
+        else:
+            assert "allowed_tools" not in contract and "allowed_domains" not in contract
+
+
+def test_schema_compaction_preserves_validation_rules_and_properties_named_like_annotations():
+    schema = {
+        "title": "Envelope",
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["title"],
+        "properties": {
+            "title": {"title": "Title", "type": "string", "minLength": 1},
+            "default": {"type": "integer", "minimum": 1},
+        },
+        "const": {"title": "must stay"},
+    }
+    compact = planner_module._compact_schema(schema)
+    assert compact["required"] == ["title"] and compact["additionalProperties"] is False
+    assert compact["properties"]["title"] == {"type": "string", "minLength": 1}
+    assert compact["properties"]["default"]["minimum"] == 1
+    assert compact["const"] == schema["const"]
+    assert len(json.dumps(compact)) < len(json.dumps(schema))
+
+
+@pytest.mark.parametrize("long_feedback", [False, True])
+async def test_owner_feedback_is_deduplicated_only_when_the_full_text_is_resident(long_feedback):
+    request = goal_request()
+    owner = "用户补充：请使用中文，并注明来源。" * (300 if long_feedback else 1)
+    request.feedback = owner
+    request.memory = {
+        "conversation": [{"id": "owner", "role": "user", "content": owner}],
+        "knowledge": [],
+    }
+    client = fake_client(completed(Decision(kind="blocked", reason="Need evidence")))
+    await OpenAIPlanner(Settings(), client=client).plan(request)
+    payload = json.loads(client.responses.parse.await_args.kwargs["input"][1]["content"])
+    owners = [item for item in payload["memory"]["conversation"] if item["role"] == "user"]
+    if long_feedback:
+        assert payload["feedback"] != owner
+        assert owners and owners[0]["content"] == owner
+    else:
+        assert payload["feedback"] == owner
+        assert owners == []

@@ -91,10 +91,31 @@ class StoreMemoryProvider:
             rows = list(self.store.recall_memory(request.run.goal_id, query=query, limit=24))
         else:
             rows = list(self.store.memory_records(request.run.goal_id))
-        for row in rows:
+        # A matching saved decision tells us exactly which earlier results the
+        # current handoff could have consumed. Never assume an arbitrary or
+        # stale summary covers newer evidence, and keep the newest batch raw.
+        ordered = sorted(enumerate(rows), key=lambda item: (item[1].get("created_at", ""), item[0]))
+        covered = set()
+        summary = request.state.handoff_summary
+        if summary:
+            for position, (_, row) in enumerate(ordered):
+                if row.get("role") != "assistant":
+                    continue
+                try:
+                    decision = json.loads(row["content"])
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(decision, dict) and decision.get("handoff_summary") == summary:
+                    covered = {index for index, _ in ordered[:position]}
+        latest = next((row for _, row in reversed(ordered) if row.get("role") == "tool"), None)
+        latest_batch = self._batch_key(latest) if latest else ""
+        for index, row in enumerate(rows):
+            content = self._working_content(row)
+            if summary and self._batch_key(row) != latest_batch:
+                content = self._earlier_excerpt(row, content, covered=index in covered)
             yield MemoryRecord(
                 kind=row["kind"],
-                content=self._working_content(row),
+                content=content,
                 key=str(row.get("id", "")),
                 role=row.get("role", ""),
                 priority=row.get("priority", 0),
@@ -109,6 +130,51 @@ class StoreMemoryProvider:
                 # The task itself is already present in run.contract; its copy
                 # in the message store must not displace prior tool evidence.
                 yield replace(record, priority=1)
+
+    @staticmethod
+    def _batch_key(row: dict) -> str:
+        key = str(row.get("id", ""))
+        # Parallel act messages append an integer to their shared phase ID.
+        prefix, separator, suffix = key.rpartition(":act")
+        if separator and (not suffix or (suffix.startswith(":") and suffix[1:].isdigit())):
+            return prefix + separator
+        if key.startswith("legacy-observation:"):
+            return key.rsplit(":", 1)[0]
+        return key
+
+    @staticmethod
+    def _earlier_excerpt(row: dict, original: str, *, covered: bool) -> str:
+        if row.get("kind") != "conversation" or row.get("role") != "tool":
+            return original
+        try:
+            payload = json.loads(row["content"])
+        except (ValueError, TypeError):
+            return original
+        if not isinstance(payload, dict) or payload.get("success") is not True:
+            return original  # Failures and repair advice remain available verbatim.
+        body = payload.get("content")
+        if not isinstance(body, str) or len(body.encode("utf-8")) <= 1024:
+            return original
+        metadata = {
+            key: payload[key]
+            for key in ("success", "action", "source_url", "status_code", "exit_code")
+            if key in payload
+        }
+        raw = body.encode("utf-8")
+        excerpt = raw[:640].decode("utf-8", errors="ignore")
+        excerpt += _TRUNCATED + "\n" + raw[-256:].decode("utf-8", errors="ignore")
+        return (
+            serialize_memory(metadata)
+            + (
+                "\nEarlier result covered by handoff; "
+                if covered
+                else "\nEarlier result excerpt; omitted details may require a targeted reread; "
+            )
+            + "full execution record "
+            + str(row.get("id", ""))
+            + ":\n"
+            + excerpt
+        )
 
     @staticmethod
     def _working_content(row: dict) -> str:
@@ -239,6 +305,7 @@ class MemoryManager:
         # Rank inside each layer. Even pinned knowledge cannot displace recent
         # raw errors, and a long history cannot displace the handoff summary.
         available.sort(key=lambda item: (item.priority, item.created_at), reverse=True)
+        memory["truncated"] = any(_TRUNCATED in record.content for record in available)
         grouped: dict[str, list[MemoryRecord]] = {"conversation": [], "knowledge": []}
         seen = set()
         for record in available:

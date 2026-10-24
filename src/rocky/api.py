@@ -20,7 +20,8 @@ from sqlalchemy.exc import IntegrityError
 from rocky.config import Settings
 from rocky.credentials import CredentialError, CredentialStore
 from rocky.inference import ModelSettings, model_catalog
-from rocky.models import GoalContract, GoalView, Model
+from rocky.models import GoalContract, GoalDraft, GoalView, Model
+from rocky.planner import OpenAIPlanner, PlannerError
 from rocky.providers import PRESETS, ProviderUpdate, credential_id, provider_model_catalog
 from rocky.store import MemoryConflictError, Store, equivalent_contracts
 from rocky.tools import ToolError, WorkspaceTools
@@ -163,11 +164,13 @@ def create_app(
     settings = settings or Settings()
     database = store or Store(settings.database_url)
     credentials = credential_store or CredentialStore(settings.credential_path)
+    planner = OpenAIPlanner(settings, defer_client=True, credential_store=credentials)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await asyncio.to_thread(database.initialize)
         yield
+        await planner.close()
         if store is None:
             database.close()
 
@@ -298,6 +301,15 @@ def create_app(
     def health():
         # This is liveness. Queued goals can remain pending while Temporal is offline.
         return {"status": "ok", "service": "rocky"}
+
+    @app.post("/goal-contract", response_model=GoalContract, dependencies=auth)
+    async def prepare_goal_contract(draft: GoalDraft):
+        try:
+            return await planner.prepare_contract(draft, get_default_model_settings())
+        except PlannerError:
+            raise HTTPException(
+                502, "Could not assess task requirements and budget; retry submission"
+            ) from None
 
     @app.post("/goals", response_model=GoalView, status_code=202, dependencies=auth)
     def submit_goal(

@@ -15,11 +15,10 @@ final class AppModel: ObservableObject {
     @Published var provider: ProviderSettings?
     @Published var showSettings = false
     @Published var showInspector = false
-    @Published var showScope = false
     @Published var input = ""
-    @Published var draft = TaskDraft()
     @Published var error: String?
     @Published var isSubmitting = false
+    @Published var submissionStatus: String?
     @Published var isConnected = false
     @Published var pendingCommand: String?
     @Published var artifactContents: [String: String] = [:]
@@ -27,6 +26,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var historyUpdates: Set<String> = []
     private var submissionKey = UUID().uuidString
     private var pendingContract: GoalContract?
+    private var pendingDraft: GoalDraft?
+    private var pendingModel: [String?] = []
     private var selectionGeneration = 0
     private var selectionLoadGeneration = 0
     private var eventCursor = 0
@@ -101,6 +102,7 @@ final class AppModel: ObservableObject {
         error = nil
         submissionKey = UUID().uuidString
         pendingContract = nil
+        pendingDraft = nil
     }
 
     func showHistory(archived: Bool) {
@@ -182,7 +184,7 @@ final class AppModel: ObservableObject {
         let generation = selectionGeneration
         isSubmitting = true
         error = nil
-        defer { isSubmitting = false }
+        defer { isSubmitting = false; submissionStatus = nil }
         do {
             if let selected {
                 let message = input.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -193,16 +195,46 @@ final class AppModel: ObservableObject {
                     input = ""
                 }
             } else {
-                let contract = try draft.contract(objective: input)
-                if pendingContract != contract { submissionKey = UUID().uuidString; pendingContract = contract }
-                let goal = try await api.submit(contract, key: submissionKey)
+                let submission = try GoalDraft(objective: input)
+                let modelIdentity = [provider?.provider, provider?.base_url, provider?.model, provider?.reasoning_effort]
+                let contract: GoalContract
+                let key: String
+                if pendingDraft == submission, pendingModel == modelIdentity, let pendingContract {
+                    contract = pendingContract
+                    key = submissionKey
+                } else {
+                    submissionStatus = "AI 正在评估任务难度并设定执行预算…"
+                    contract = try await api.prepareContract(submission)
+                    key = UUID().uuidString
+                    if generation == selectionGeneration {
+                        pendingDraft = submission
+                        pendingModel = modelIdentity
+                        pendingContract = contract
+                        submissionKey = key
+                    }
+                }
+                submissionStatus = "正在创建任务…"
+                let goal = try await api.submit(contract, key: key)
+                goals.removeAll { $0.id == goal.id }
                 goals.insert(goal, at: 0)
-                if generation == selectionGeneration { showArchived = false; select(goal.id) }
-                pendingContract = nil
-                submissionKey = UUID().uuidString
+                if generation == selectionGeneration {
+                    pendingContract = nil
+                    pendingDraft = nil
+                    submissionKey = UUID().uuidString
+                    showArchived = false
+                    select(goal.id)
+                }
             }
             await refresh()
         } catch { self.error = error.localizedDescription }
+    }
+
+    func retryBudgetExhausted(_ goal: Goal) async {
+        guard goal.state.status == "budget_exhausted", runtime.isReady, isConnected,
+              !isSubmitting, provider?.isConfigured == true else { return }
+        newTask()
+        input = goal.contract.objective
+        await send()
     }
 
     func cancel() async {

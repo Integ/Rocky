@@ -430,3 +430,87 @@ def test_tool_metadata_precedes_unescaped_raw_body():
     header, raw = content.split("\nContent:\n", 1)
     assert raw == body
     assert "command_failed" in header and '"exit_code":1' in header
+
+
+def test_earlier_successes_are_excerpted_after_handoff_without_filling_the_budget():
+    body = "SOURCE_HEAD\n" + "source line\n" * 1300 + "SOURCE_TAIL"
+    latest = "LATEST_EVIDENCE " + "new finding " * 250
+    rows = _store_rows([body] * 6 + [latest])
+    summary = "Modules 0-5 inspected; prepare the report using source evidence."
+    decision = json.loads(rows[-2]["content"])
+    decision["handoff_summary"] = summary
+    rows[-2]["content"] = json.dumps(decision)
+    before = deepcopy(rows)
+    manager = MemoryManager([StoreMemoryProvider(RowStore(rows))])
+    memory = manager.build(request(summary))
+    assert manager.count(memory) < 15000
+    assert latest in memory["conversation"][0]["content"]
+    old = next(item for item in memory["conversation"] if item["id"] == "phase:task:0:act")
+    assert "SOURCE_HEAD" in old["content"] and "SOURCE_TAIL" in old["content"]
+    assert "MEMORY TRUNCATED" in old["content"] and "covered by handoff" in old["content"]
+    assert body not in serialize_memory(memory)
+    assert "module_0.py" in serialize_memory(memory)
+    assert memory["truncated"] is True
+    assert rows == before
+
+
+def test_newest_parallel_batch_and_error_guidance_survive_earlier_result_compaction():
+    rows = _store_rows(["old body " * 1500])
+    rows += [
+        {
+            "id": "failure",
+            "kind": "conversation",
+            "role": "tool",
+            "created_at": "0002",
+            "content": json.dumps(
+                {
+                    "success": False,
+                    "content": "diagnostic " * 200,
+                    "error_code": "outcome_unknown",
+                    "retry_hint": "Inspect actual state before retrying",
+                }
+            ),
+        },
+        {
+            "id": "correction",
+            "kind": "conversation",
+            "role": "user",
+            "priority": 10,
+            "created_at": "0003",
+            "content": "Use Chinese and cite the original sources.",
+        },
+        *[
+            {
+                "id": f"phase:task:2:act:{index}",
+                "kind": "conversation",
+                "role": "tool",
+                "created_at": f"000{index + 3}",
+                "content": json.dumps(
+                    {"success": True, "content": f"BATCH_{index}_" + "evidence " * 300}
+                ),
+            }
+            for index in (1, 2)
+        ],
+    ]
+    memory = MemoryManager([StoreMemoryProvider(RowStore(rows))]).build(request("Working notes"))
+    serialized = serialize_memory(memory)
+    for index in (1, 2):
+        item = next(
+            item for item in memory["conversation"] if item["id"] == f"phase:task:2:act:{index}"
+        )
+        assert f"BATCH_{index}_" + "evidence " * 300 in item["content"]
+        assert "MEMORY TRUNCATED" not in item["content"]
+    assert "Inspect actual state before retrying" in serialized and "outcome_unknown" in serialized
+    assert "Use Chinese and cite the original sources." in serialized
+
+
+def test_uncovered_old_excerpts_do_not_claim_summary_coverage():
+    rows = _store_rows(["earlier source " * 200, "latest source"])
+    memory = MemoryManager([StoreMemoryProvider(RowStore(rows))]).build(
+        request("Unmatched summary")
+    )
+    older = next(item for item in memory["conversation"] if item["id"] == "phase:task:0:act")
+    assert "targeted reread" in older["content"]
+    assert "covered by handoff" not in older["content"]
+    uncompressed = MemoryManager([StoreMemoryProvider(RowStore(rows))]).build(request())
+    assert "earlier source " * 200 in serialize_memory(uncompressed)

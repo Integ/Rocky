@@ -32,8 +32,24 @@ final class APIClientTests: XCTestCase {
             XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
             return (202, Data(DesktopContractTests.goalJSON.utf8))
         }
-        let goal = try await api.submit(TaskDraft().contract(objective: "整理材料"), key: "retry-same-contract")
+        let goal = try await api.submit(GoalContract(objective: "整理材料", acceptance_criteria: ["完成整理"], deliverables: [Deliverable(path: "summary.md")]), key: "retry-same-contract")
         XCTAssertEqual(goal.state.status, "succeeded")
+    }
+
+    func testContractPreparationUsesModelTimeoutAndPreservesGeneratedRequirements() async throws {
+        InterceptingProtocol.handle = { request in
+            XCTAssertEqual(request.url?.path, "/goal-contract")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.timeoutInterval, 330)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer desktop-test-token")
+            let goal = try JSONDecoder().decode(Goal.self, from: Data(DesktopContractTests.goalJSON.utf8))
+            return (200, try JSONEncoder().encode(goal.contract))
+        }
+        let contract = try await api.prepareContract(GoalDraft(objective: "整理材料"))
+        XCTAssertEqual(contract.acceptance_criteria, ["来源可核验"])
+        XCTAssertEqual(contract.deliverables.first?.path, "report.md")
+        XCTAssertEqual(contract.deliverables.first?.min_bytes, 100)
+        XCTAssertEqual(contract.deliverables.first?.contains, ["证据"])
     }
 
     func testRecentAndArchivedHistoryUseSeparateServerFilters() async throws {

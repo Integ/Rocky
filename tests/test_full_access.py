@@ -31,6 +31,23 @@ def execute(tools, action, operation_id):
     return tools.execute(ToolInput(run=legacy_run(), action=action, operation_id=operation_id))
 
 
+def test_directory_listing_skips_runtime_cache_but_explicit_inspection_remains_available(tools):
+    root = tools.root / legacy_run().goal_id
+    cache = root / ".rocky-sandbox" / "cache"
+    cache.mkdir(parents=True)
+    (cache / "large.pyc").write_bytes(b"cache")
+    (root / "source.md").write_text("project source")
+    listing = execute(tools, Action(tool="list_files", path="."), "list-sources")
+    assert listing.success
+    assert "source.md" in listing.content
+    assert ".rocky-sandbox" not in listing.content
+    explicit = execute(
+        tools, Action(tool="list_files", path=".rocky-sandbox/cache"), "inspect-cache"
+    )
+    assert explicit.success
+    assert "large.pyc" in explicit.content
+
+
 @pytest.fixture
 def tools(tmp_path):
     return WorkspaceTools(Settings(workspace_root=tmp_path / "workspaces", approval_mode="trusted"))

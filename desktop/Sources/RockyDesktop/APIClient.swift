@@ -5,12 +5,12 @@ struct APIClient {
     let token: String
     var session: URLSession = .shared
 
-    private func rawRequest(_ path: String, method: String = "GET", body: Data? = nil, idempotencyKey: String? = nil) async throws -> Data {
+    private func rawRequest(_ path: String, method: String = "GET", body: Data? = nil, idempotencyKey: String? = nil, timeout: TimeInterval = 20) async throws -> Data {
         guard let url = URL(string: path, relativeTo: baseURL) else { throw InputError.invalid("请求地址无效。") }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.httpBody = body
-        request.timeoutInterval = 20
+        request.timeoutInterval = timeout
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
@@ -25,7 +25,8 @@ struct APIClient {
             case 401, 403: message = "本地服务认证失败，请重新启动应用。"
             case 404: message = "任务或文件不存在。"
             case 409: message = "任务状态已变化，请刷新后重试。"
-            case 422: message = "设置不符合要求，请检查模型名称、API 地址和任务范围。"
+            case 422: message = "设置不符合要求，请检查目标、模型名称和 API 地址。"
+            case 502: message = "AI 未能完成任务评估，请检查模型配置后重新提交。"
             case 503: message = "服务暂时不可用，请检查本地服务与钥匙串权限。"
             default: message = "请求失败（\(response.statusCode)），请稍后重试。"
             }
@@ -34,8 +35,8 @@ struct APIClient {
         return data
     }
 
-    func request<T: Decodable>(_ path: String, method: String = "GET", body: Data? = nil, idempotencyKey: String? = nil) async throws -> T {
-        let data = try await rawRequest(path, method: method, body: body, idempotencyKey: idempotencyKey)
+    func request<T: Decodable>(_ path: String, method: String = "GET", body: Data? = nil, idempotencyKey: String? = nil, timeout: TimeInterval = 20) async throws -> T {
+        let data = try await rawRequest(path, method: method, body: body, idempotencyKey: idempotencyKey, timeout: timeout)
         do { return try JSONDecoder().decode(T.self, from: data) }
         catch { throw InputError.invalid("无法读取服务返回的数据，请更新应用后重试。") }
     }
@@ -73,6 +74,9 @@ struct APIClient {
     }
     func submit(_ contract: GoalContract, key: String) async throws -> Goal {
         try await request("/goals", method: "POST", body: JSONEncoder().encode(contract), idempotencyKey: key)
+    }
+    func prepareContract(_ draft: GoalDraft) async throws -> GoalContract {
+        try await request("/goal-contract", method: "POST", body: JSONEncoder().encode(draft), timeout: 330)
     }
     func command(_ id: String, kind: String, message: String? = nil) async throws {
         struct Receipt: Decodable { var status: String }

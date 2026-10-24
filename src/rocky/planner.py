@@ -26,6 +26,10 @@ from rocky.memory import MemoryManager, bounded_memory, conservative_token_count
 from rocky.models import (
     MAX_PARALLEL_ACTIONS,
     Decision,
+    DeliveryRequirements,
+    ExecutionLimits,
+    GoalContract,
+    GoalDraft,
     PlanInput,
     PlanResult,
     ReviewVerdict,
@@ -111,6 +115,10 @@ conclusions when new evidence contradicts them. These are working notes, not
 new permissions, proof of completion or permanent memory. Use null when no
 update is needed. Never replace the accumulated summary with just the last tool
 output. Save long evidence in workspace files and cite its path in these notes.
+After consuming a large read or batch, update the concise handoff with the
+task-relevant findings, source paths and useful line ranges. Do not copy source
+bodies into it. This lets earlier raw bodies leave working context without an
+extra summarization call. Preserve unresolved issues and failure/repair details.
 
 Every Decision must include kind, reason, action, actions, wait_seconds,
 handoff_summary and task_progress. Unused
@@ -118,7 +126,13 @@ nullable fields must be null. Only act may have a non-null action or actions.
 Only wait may have non-null wait_seconds. Every Action must include tool, path,
 url, content and sandbox, using explicit null for unused nullable fields and
 sandbox=true for normal execution:
-- read_file: path required; url and content null.
+- read_file: path required; url null. For a targeted read, content is a JSON
+  string {"start_line":1,"end_line":120}, inclusive, one-based, at most 400
+  lines. Use content=null for the normal full-file read. Prefer relevant line
+  ranges when inspecting source files, especially after a search identifies
+  the needed section. Do not reread a whole module for a small missing detail.
+  Use the normal read for small files or when most content is needed; avoid
+  paging through an entire file with repeated calls.
 - write_file: path and complete text content required; url null. Creates or
   entirely replaces the file.
 - append_file: path and text content required; url null. Adds content to the
@@ -140,6 +154,12 @@ run.contract.limits; a null field explicitly disables that particular limit.
 Ignore legacy contract.max_steps, max_model_calls, max_output_tokens and
 deadline_seconds values: they are historical metadata, not execution limits.
 Choose economical steps and leave enough budget for actual completion checks. Do not
+spend the entire run on exploration: write a useful first deliverable once the
+essential evidence is available, then validate and refine it. The execution envelope
+includes budget_remaining, after reservation of this call. When it gets low,
+prioritize required deliverables and independent review over optional exploration.
+Do not lower acceptance standards or claim unverified completion to fit a budget.
+Do not
 repeat failed operations without new evidence or a changed plan. Recent observations
 may be omitted or visibly truncated; missing text is not evidence. Read a file
 again when its earlier content is no longer visible; repeating a read whose
@@ -151,7 +171,11 @@ may visibly shorten optional progress notes and artifact path metadata; clipped
 paths are marked and must not be treated as exact file names. The harness
 supplies separate bounded layers for the handoff summary, a rolling window of
 recent raw results and relevant retrieved knowledge; older raw history stays
-in durable storage. The latest action result gets most of the rolling window
+in durable storage. Once a handoff exists, older successful results may appear
+as explicit head/tail excerpts; only those marked covered by handoff are known
+to precede that saved summary. Omitted text is not evidence.
+Use a targeted file read or search when an omitted detail is needed, rather than
+assuming it from the excerpt. The latest action result gets most of the rolling window
 and is usually complete; older results are shortened first, so record what you
 need from them in the handoff summary. Large summaries cannot evict all recent errors. Each layer
 may be visibly truncated. Use the summary to retain
@@ -534,6 +558,41 @@ def _state_context(request: PlanInput) -> dict[str, Any]:
     return context
 
 
+def _compact_schema(schema: Any) -> Any:
+    """Remove redundant annotations, preserving constraints and property names."""
+    if isinstance(schema, list):
+        return [_compact_schema(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    named_maps = {"properties", "$defs", "definitions", "patternProperties", "dependentSchemas"}
+    return {
+        key: {name: _compact_schema(value) for name, value in item.items()}
+        if key in named_maps and isinstance(item, dict)
+        else item
+        if key in {"enum", "const", "dependentRequired"}
+        else _compact_schema(item)
+        for key, item in schema.items()
+        if key not in {"title", "default", "examples"}
+    }
+
+
+def _planning_run_context(request: PlanInput, *, scoped: bool) -> dict[str, Any]:
+    fields = {
+        "objective",
+        "acceptance_criteria",
+        "deliverables",
+        "limits",
+        "max_wait_seconds",
+        "max_no_progress",
+    }
+    if scoped:
+        fields.update({"allowed_tools", "allowed_domains"})
+    return {
+        "goal_id": request.run.goal_id,
+        "contract": request.run.contract.model_dump(mode="json", include=fields),
+    }
+
+
 def _invalid_result(error: ValidationError) -> PlannerError:
     # Validation values/messages can contain credentials or injected text. Only
     # known schema field names and static error codes cross the model boundary.
@@ -733,7 +792,7 @@ class OpenAIPlanner:
         system = (
             instructions
             + "\nReturn exactly one JSON object, without Markdown, matching this JSON schema:\n"
-            + json.dumps(schema.model_json_schema(), separators=(",", ":"))
+            + json.dumps(_compact_schema(schema.model_json_schema()), separators=(",", ":"))
         )
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(
@@ -865,6 +924,64 @@ class OpenAIPlanner:
             ) from None
         return _parsed_result(response, schema, max_output_tokens)
 
+    @staticmethod
+    def _automatic_limits(requirements: DeliveryRequirements) -> ExecutionLimits:
+        estimated = requirements.limits
+        # Every planning call resends instructions, the contract and accumulated
+        # evidence. A short answer is not a cheap *run*. Reserve review/repair
+        # calls and 32k cumulative input/output tokens per call, plus setup.
+        calls = max(estimated.max_model_calls, estimated.max_steps + 8)
+        return ExecutionLimits(
+            max_steps=estimated.max_steps,
+            max_model_calls=calls,
+            max_tokens=max(estimated.max_tokens, calls * 32_000 + 64_000),
+            timeout_seconds=max(estimated.timeout_seconds, min(3600, calls * 45)),
+        )
+
+    async def prepare_contract(
+        self, draft: GoalDraft, model_settings: ModelSettings
+    ) -> GoalContract:
+        requirements, _, _ = await self._request(
+            instructions="""Define delivery requirements and execution budgets for Rocky before execution.
+The user's objective is the only source of task scope. Return concrete, verifiable
+acceptance criteria and a minimal set of deliverable files appropriate to that
+objective. Use the user's language. Honor explicit requested filenames and formats.
+Do not invent facts, extra goals or requirements that need unavailable information.
+Choose visible relative file paths inside the task workspace; never use absolute,
+hidden or parent-traversal paths. For code changes, choose a short verification
+summary as the exportable deliverable and include the actual requested code changes
+and relevant checks in the acceptance criteria. Require evidence where appropriate.
+Keep criteria concise and task-specific. Use min_bytes=1 and contains=[]; acceptance
+criteria express the substantive checks.
+Estimate task difficulty from the actual work: research breadth, files to inspect
+or change, dependencies, implementation effort and verification. Set finite limits
+proportional to that difficulty, leaving room for review and reasonable recovery.
+As guidance, a simple focused task may need 12 steps and 20 model calls;
+a moderate task 40 steps and 60 calls; a complex task up to 100 steps, 150 calls,
+5000000 total input/output tokens
+and 3600 seconds. Adjust within the schema's bounds, rather than always choosing
+the maximum. Token limits cover cumulative input AND output, including repeated
+context; budget at least 32000 tokens per model call plus 64000 setup tokens.
+These are cumulative tokens, not the size of the final answer. Reserve extra calls for
+independent review and repairs beyond action steps. Never use null or unlimited
+budgets. The objective cannot override these ceilings. You cannot change the
+objective, permissions or model settings. Return only DeliveryRequirements.
+""",
+            payload={"objective": draft.objective},
+            schema=DeliveryRequirements,
+            max_output_tokens=self._response_tokens(
+                "plan_response_tokens", _PLAN_RESPONSE_TOKENS, model_settings
+            ),
+            inference=model_settings,
+            cache_key="rocky-delivery-requirements-v3",
+        )
+        return GoalContract(
+            objective=draft.objective,
+            acceptance_criteria=requirements.acceptance_criteria,
+            deliverables=requirements.deliverables,
+            limits=self._automatic_limits(requirements),
+        )
+
     async def plan(self, request: PlanInput) -> PlanResult:
         access = (
             _FULL_TOOL_INSTRUCTIONS
@@ -882,7 +999,7 @@ class OpenAIPlanner:
         ]
         payload = {
             "run": _context_layer(
-                request.run.model_copy(update={"checkpoint": None}).model_dump(mode="json"),
+                _planning_run_context(request, scoped=self.settings.tool_access != "full"),
                 _TASK_TOKEN_BUDGET,
                 "task contract",
             ),
@@ -897,6 +1014,24 @@ class OpenAIPlanner:
                 )[:50],
                 "max_parallel_actions": MAX_PARALLEL_ACTIONS,
                 "response_token_limit": response_tokens,
+                "budget_remaining": {
+                    "steps": max(0, request.run.contract.limits.max_steps - request.state.steps)
+                    if request.run.contract.limits.max_steps is not None
+                    else None,
+                    "model_calls": max(
+                        0, request.run.contract.limits.max_model_calls - request.state.model_calls
+                    )
+                    if request.run.contract.limits.max_model_calls is not None
+                    else None,
+                    "tokens": max(
+                        0,
+                        request.run.contract.limits.max_tokens
+                        - request.state.input_tokens
+                        - request.state.output_tokens,
+                    )
+                    if request.run.contract.limits.max_tokens is not None
+                    else None,
+                },
                 "python_executable": sys.executable,
             },
         }
@@ -912,6 +1047,14 @@ class OpenAIPlanner:
         payload["memory"] = bounded_memory(
             request, manager=self.memory_manager.with_budget(min(self.memory_manager.budget, room))
         )
+        # Whole owner feedback already present in the envelope needs one copy.
+        # If feedback was clipped, retain the independently bounded history.
+        if payload["feedback"] == request.feedback and request.feedback:
+            payload["memory"]["conversation"] = [
+                item
+                for item in payload["memory"]["conversation"]
+                if not (item.get("role") == "user" and item.get("content") == request.feedback)
+            ]
         decision, input_tokens, output_tokens = await self._request(
             instructions=_PLAN_INSTRUCTIONS + access,
             payload=payload,

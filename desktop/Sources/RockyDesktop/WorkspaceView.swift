@@ -39,7 +39,6 @@ struct WorkspaceView: View {
         }
         .tint(.rockyAccent)
         .sheet(isPresented: $model.showSettings) { SettingsView(model: model) }
-        .sheet(isPresented: $model.showScope) { scopeSettings }
         .confirmationDialog("停止这个任务？已经完成的文件会保留。", isPresented: $confirmStop, titleVisibility: .visible) {
             Button("停止任务", role: .destructive) { Task { await model.cancel() } }
         }
@@ -57,7 +56,6 @@ struct WorkspaceView: View {
                 RockyMark().frame(height: 28)
                 Text("Rocky").font(.system(size: 22, weight: .semibold, design: .rounded))
                 Spacer()
-                Text("本地").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary).padding(.horizontal, 7).padding(.vertical, 3).background(.quaternary, in: Capsule())
             }.padding(.top, 44).padding(.horizontal, 21).padding(.bottom, 25)
             Button { model.newTask(); composerFocused = true } label: {
                 HStack {
@@ -150,8 +148,10 @@ struct WorkspaceView: View {
                 }
             }
             Spacer()
-            Circle().fill(runtime.isReady && model.isConnected ? Color.green.opacity(0.8) : Color.orange).frame(width: 6, height: 6)
-            Text(runtime.isReady ? (model.isConnected ? "本地运行" : "正在重连") : runtime.status).font(.system(size: 10)).foregroundStyle(.secondary)
+            if !runtime.isReady || !model.isConnected {
+                Circle().fill(Color.orange).frame(width: 6, height: 6)
+                Text(runtime.isReady ? "正在重连" : runtime.status).font(.system(size: 10)).foregroundStyle(.secondary)
+            }
             HStack(spacing: 2) {
                 if let goal = model.selected, goal.state.isTerminal {
                     Button { Task { await model.archive(goal, archived: !goal.isArchived) } } label: { Image(systemName: goal.isArchived ? "arrow.uturn.backward" : "archivebox") }
@@ -230,11 +230,9 @@ struct WorkspaceView: View {
                             }
                             if !executionEntries.isEmpty {
                                 DisclosureGroup {
-                                    VStack(alignment: .leading, spacing: 12) {
-                                        ForEach(executionEntries) { entry in executionRecord(entry) }
-                                    }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 12)
+                                    ExecutionLogView(entries: executionEntries)
                                 } label: {
-                                    Label("执行记录 · \(executionEntries.count) 条", systemImage: "list.bullet").font(.system(size: 11)).foregroundStyle(.secondary)
+                                    Label("执行记录 · \(ExecutionLogGroup.build(executionEntries).count) 项", systemImage: "list.bullet").font(.system(size: 11)).foregroundStyle(.secondary)
                                 }
                             }
                             ForEach(goal.state.artifacts) { artifact in
@@ -246,7 +244,16 @@ struct WorkspaceView: View {
                         }
                     }
                     if goal.state.isTerminal {
-                        Button { model.newTask(); composerFocused = true } label: { Label("开始新任务", systemImage: "plus") }.buttonStyle(.bordered).padding(.leading, 41)
+                        HStack(spacing: 10) {
+                            if goal.state.status == "budget_exhausted" {
+                                Button { Task { await model.retryBudgetExhausted(goal) } } label: {
+                                    Label("使用新预算重试", systemImage: "arrow.clockwise")
+                                }.buttonStyle(.borderedProminent)
+                                    .disabled(!model.isConnected || model.isSubmitting || model.provider?.isConfigured != true)
+                                    .help("沿用原目标，重新评估预算并创建新任务；保留原任务记录。")
+                            }
+                            Button { model.newTask(); composerFocused = true } label: { Label("开始新任务", systemImage: "plus") }.buttonStyle(.bordered)
+                        }.padding(.leading, 41)
                     }
                 }.padding(.horizontal, 42).padding(.bottom, 36).frame(maxWidth: 850).frame(maxWidth: .infinity)
                     .disclosureGroupStyle(RowDisclosureStyle())
@@ -254,52 +261,6 @@ struct WorkspaceView: View {
                 welcome.frame(maxWidth: .infinity).padding(.top, 100)
             }
         }
-    }
-
-    private func executionRecord(_ entry: ExecutionEntry) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Text(entry.stepLabel).font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.tertiary).frame(width: 66, alignment: .leading)
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
-                    Text(entry.statusLabel)
-                    if entry.count > 1 { Text("重复 \(entry.count) 次") }
-                }.font(.system(size: 10)).foregroundStyle(.tertiary)
-                if !entry.reason.isEmpty || entry.displayReason != nil {
-                if entry.title != entry.statusLabel {
-                    Text(entry.title).font(.system(size: 11)).foregroundStyle(.secondary).textSelection(.enabled)
-                }
-                }
-                if let observation = entry.observation {
-                    Label("\(observation.toolLabel) · \(observation.success ? "成功" : "失败")", systemImage: observation.success ? "checkmark.circle" : "exclamationmark.circle")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
-                    if !observation.content.isEmpty {
-                        Text(String(observation.content.prefix(240)) + (observation.content.count > 240 ? "…" : ""))
-                            .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(3).textSelection(.enabled)
-                        if observation.content.count > 240 || observation.content.split(separator: "\n", omittingEmptySubsequences: false).count > 3 {
-                            DisclosureGroup("查看完整结果") {
-                                Text(observation.content).font(.system(size: 10, design: .monospaced)).textSelection(.enabled)
-                            }.font(.system(size: 10)).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                if entry.artifactsChanged {
-                    Text(entry.artifacts.isEmpty ? "产物列表已更新" : "产物更新：" + entry.artifacts.map(\.path).joined(separator: "、"))
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
-                }
-                if let wakeAt = entry.wakeAt, entry.status == "waiting" {
-                    Text("计划恢复：" + executionWakeTime(wakeAt))
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
-                }
-            }
-        }
-    }
-
-    private func executionWakeTime(_ value: String) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let date = formatter.date(from: value) ?? ISO8601DateFormatter().date(from: value)
-        return date?.formatted(date: .abbreviated, time: .shortened) ?? value
     }
 
     private var welcome: some View {
@@ -341,11 +302,8 @@ struct WorkspaceView: View {
                         .textFieldStyle(.plain).font(.system(size: 14)).lineLimit(3...7).focused($composerFocused).onSubmit { Task { await model.send() } }
                     HStack(spacing: 8) {
                         if model.selected == nil {
-                            Button { model.showScope = true } label: {
-                                Label("任务范围", systemImage: "slider.horizontal.3").font(.system(size: 11)).foregroundStyle(.secondary)
-                                    .padding(.horizontal, 8).frame(height: 28)
-                            }.buttonStyle(HoverButtonStyle()).padding(.leading, -8).help("调整验收标准、交付文件和执行预算")
-                            Text(scopeSummary).font(.system(size: 10)).foregroundStyle(.tertiary).lineLimit(1)
+                            Text(model.submissionStatus ?? "AI 自动设定交付要求和执行预算")
+                                .font(.system(size: 10)).foregroundStyle(.tertiary).lineLimit(1)
                         } else {
                             Text(model.pendingCommand ?? "补充信息会保存到同一个任务").font(.system(size: 10)).foregroundStyle(.secondary)
                         }
@@ -362,7 +320,7 @@ struct WorkspaceView: View {
                     .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Color.primary.opacity(composerFocused ? 0.24 : 0.14)))
                     .shadow(color: .black.opacity(0.035), radius: 10, y: 3)
                     .contentShape(RoundedRectangle(cornerRadius: 18)).onTapGesture { composerFocused = true }
-                Text("Rocky 会按你设定的范围执行。重要结果请自行核验。")
+                Text("Rocky 会根据目标规划并执行。重要结果请自行核验。")
                     .font(.system(size: 9)).foregroundStyle(.tertiary)
             }
         }.frame(maxWidth: 780).frame(maxWidth: .infinity)
@@ -408,12 +366,6 @@ struct WorkspaceView: View {
         }.padding(16).background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 12)).overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.primary.opacity(0.08)))
     }
 
-    private var scopeSummary: String {
-        let files = model.draft.files.lines
-        let deliverables = files.isEmpty ? "未设置交付文件" : "交付 " + files.prefix(2).joined(separator: "、") + (files.count > 2 ? " 等" : "")
-        return deliverables + " · " + (model.draft.unlimited ? "不限预算" : "最多 \(model.draft.maxSteps) 步")
-    }
-
     private var inspector: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 23) {
@@ -451,7 +403,7 @@ struct WorkspaceView: View {
             Text("已用 \(goal.state.input_tokens + goal.state.output_tokens) tokens").foregroundStyle(.secondary)
             if let limits = goal.contract.limits {
                 Text("步骤上限：\(limits.max_steps.map(String.init) ?? "不限") · 调用上限：\(limits.max_model_calls.map(String.init) ?? "不限")").foregroundStyle(.secondary)
-                Text("Token 上限：\(limits.max_tokens.map(String.init) ?? "不限") · 时限：\(limits.timeout_seconds.map { "\($0 / 60) 分钟" } ?? "不限")").foregroundStyle(.secondary)
+                Text("Token 上限：\(limits.max_tokens.map(String.init) ?? "不限") · 时限：\(limits.timeout_seconds.map { $0 % 60 == 0 ? "\($0 / 60) 分钟" : "\($0) 秒" } ?? "不限")").foregroundStyle(.secondary)
             }
         }
         detailSection("交付文件") {
@@ -470,15 +422,12 @@ struct WorkspaceView: View {
             inspectorAction("更改模型…", systemImage: "slider.horizontal.3") { model.showSettings = true }.disabled(!runtime.isReady)
         }
         detailSection("交付要求") {
-            ForEach(model.draft.criteria.lines, id: \.self) { Text("• \($0)").fixedSize(horizontal: false, vertical: true) }
-            ForEach(model.draft.files.lines, id: \.self) { Text($0).font(.system(size: 11, design: .monospaced)) }
+            Text("Rocky 会根据目标自动设定验收标准和产物路径，提交后可在任务详情中查看。")
+                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         detailSection("执行预算") {
-            if model.draft.unlimited { Text("不限制总预算") } else {
-                Text("最多 \(model.draft.maxSteps) 步 · \(model.draft.maxModelCalls) 次模型调用")
-                Text("\(model.draft.maxTokens) tokens · \(model.draft.timeoutMinutes) 分钟").foregroundStyle(.secondary)
-            }
-            inspectorAction("调整任务范围…", systemImage: "list.bullet.rectangle") { model.showScope = true }
+            Text("Rocky 会根据任务难度自动分配步骤、模型调用、tokens 和运行时间，无需手动设置。")
+                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -493,30 +442,6 @@ struct WorkspaceView: View {
             Text(title).font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
             content().font(.system(size: 11))
         }
-    }
-
-    private var scopeSettings: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack { Text("任务范围").font(.title2.weight(.semibold)); Spacer(); Button("完成") { model.showScope = false }.keyboardShortcut(.defaultAction) }
-            Text("先描述目标，其余交给 Rocky。需要时，在这里调整交付要求和执行预算。") .font(.system(size: 12)).foregroundStyle(.secondary)
-            Form {
-                Section("交付要求") {
-                    TextField("验收标准（每行一条）", text: $model.draft.criteria, axis: .vertical).lineLimit(2...4)
-                    TextField("产物路径（每行一个）", text: $model.draft.files, axis: .vertical).lineLimit(1...3)
-                }
-                Section {
-                    Toggle("不限制总预算", isOn: $model.draft.unlimited)
-                    if !model.draft.unlimited {
-                        TextField("最多规划步骤", value: $model.draft.maxSteps, format: .number)
-                        TextField("最多模型调用", value: $model.draft.maxModelCalls, format: .number)
-                        TextField("最多累计 tokens", value: $model.draft.maxTokens, format: .number)
-                        TextField("最长运行时间（分钟）", value: $model.draft.timeoutMinutes, format: .number)
-                    }
-                } header: { Text("执行预算") } footer: {
-                    Text("执行权限和审批方式见右侧“新任务设置”。")
-                }
-            }.formStyle(.grouped)
-        }.padding(25).frame(width: 540, height: 540)
     }
 
     private func errorBanner(_ message: String) -> some View {

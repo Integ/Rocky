@@ -109,6 +109,39 @@ def parse_edits(content: str | None) -> list[tuple[str, str, bool]]:
     return edits
 
 
+def parse_read_range(content: str | None) -> tuple[int, int] | None:
+    if content is None:
+        return None
+    message = (
+        'read_file content must be {"start_line":1,"end_line":120}, '
+        "using positive integer line numbers and at most 400 lines; use null to read normally."
+    )
+
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate field")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(content, object_pairs_hook=unique)
+    except (ValueError, TypeError, RecursionError):
+        raise ActionValidationError(message) from None
+    if not isinstance(value, dict) or set(value) != {"start_line", "end_line"}:
+        raise ActionValidationError(message)
+    start, end = value["start_line"], value["end_line"]
+    if (
+        type(start) is not int
+        or type(end) is not int
+        or not 1 <= start <= end <= 1_000_000
+        or end - start >= 400
+    ):
+        raise ActionValidationError(message)
+    return start, end
+
+
 def validate_action(action: Action, *, full_access: bool) -> dict | None:
     """Validate required/unused fields; return parsed HTTP options when relevant."""
     if not action.sandbox and action.tool != "run_command":
@@ -125,8 +158,10 @@ def validate_action(action: Action, *, full_access: bool) -> dict | None:
         )
     if action.tool not in {"fetch_url", "http_request"} and action.url is not None:
         raise ActionValidationError(f"{action.tool} does not accept url; set url to null.")
-    if action.tool in {"read_file", "list_files"} and action.content is not None:
+    if action.tool == "list_files" and action.content is not None:
         raise ActionValidationError(f"{action.tool} does not accept content; set content to null.")
+    if action.tool == "read_file":
+        parse_read_range(action.content)
     if action.tool == "write_file" and action.content is None:
         raise ActionValidationError(
             "write_file requires content; supply the complete text to write."

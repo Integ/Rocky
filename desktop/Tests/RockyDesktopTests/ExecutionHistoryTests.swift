@@ -241,6 +241,48 @@ final class ExecutionHistoryTests: XCTestCase {
         XCTAssertEqual(actual.map(\.lastTimestamp), expected.map(\.lastTimestamp))
     }
 
+    func testPresentationGroupsParallelResultsAndKeepsFailuresAndPauses() {
+        var parallel = event(2, reservedStep: 1, reason: "读取项目文件")
+        parallel.state.observations = [observation(step: 1, content: "file A"), observation(step: 1, success: false, content: "file B")]
+        let events = [
+            event(1, reservedStep: 1, reason: "读取项目文件"), parallel,
+            event(3, reservedStep: 1, status: "blocked", reason: "等待输入"),
+            event(4, reservedStep: 1, status: "budget_exhausted", reason: "预算用尽"),
+        ]
+        let entries = ExecutionEntry.build(from: events)
+        let groups = ExecutionLogGroup.build(entries)
+        XCTAssertEqual(groups.count, 3)
+        XCTAssertEqual(groups[0].entries.count, 2)
+        XCTAssertEqual(groups[0].stepLabel, "第 1 步")
+        XCTAssertTrue(groups[0].failed)
+        XCTAssertEqual(groups[0].statusLabel, "部分失败")
+        XCTAssertEqual(groups[1].title, "等待输入")
+        XCTAssertEqual(groups[2].title, "预算用尽")
+        XCTAssertTrue(groups[2].failed)
+        XCTAssertEqual(groups[2].statusLabel, "已达预算上限")
+        XCTAssertEqual(entries.count, 5) // Presentation never mutates the audit history.
+    }
+
+    func testCommandOutputSeparatesStatusStdoutAndStderrWithoutLosingText() {
+        let sections = ExecutionOutputSection.parse("Exit code: 1\nstdout:\nprogress\nstderr:\nfailed\n")
+        XCTAssertEqual(sections.map(\.title), ["执行状态", "标准输出", "错误输出"])
+        XCTAssertEqual(sections.map(\.text), ["Exit code: 1", "progress", "failed\n"])
+        let silent = ExecutionOutputSection.parse("Exit code: 0\nstdout:\n\nstderr:\n")
+        XCTAssertEqual(silent.map(\.title), ["执行状态"])
+    }
+
+    func testStructuredResultsAreFormattedAndPlainSourceIsPreserved() {
+        let json = ExecutionOutputSection.parse(#"{"status_code":200,"items":[1,2]}"#)
+        XCTAssertEqual(json.first?.title, "结构化结果")
+        XCTAssertTrue(json.first?.text.contains("\n") == true)
+        let response = ExecutionOutputSection.parse(#"{"status_code":200,"text":"line one\nline two"}"#)
+        XCTAssertEqual(response.map(\.title), ["响应信息", "文本内容"])
+        XCTAssertEqual(response.last?.text, "line one\nline two")
+        let source = "import Foundation\nlet x = 1\n"
+        XCTAssertEqual(ExecutionOutputSection.parse(source).first?.text, source)
+        XCTAssertEqual(observation(step: 1, success: false, content: "path_not_found\nretry hint").outputSummary, "路径不存在，需要调整路径")
+    }
+
     private func observation(step: Int, success: Bool = true, content: String = "结果未变化", progressKey: String? = nil) -> ToolObservation {
         ToolObservation(step: step, tool: "http_request", success: success, content: content, progress_key: progressKey)
     }

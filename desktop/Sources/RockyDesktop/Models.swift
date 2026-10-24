@@ -34,6 +34,8 @@ struct TaskLimits: Codable, Equatable {
 
 struct Deliverable: Codable, Equatable {
     var path: String
+    var min_bytes: Int? = nil
+    var contains: [String]? = nil
 }
 
 struct Artifact: Codable, Identifiable, Equatable {
@@ -337,29 +339,13 @@ struct ArtifactContent: Decodable {
     var truncated: Bool
 }
 
-struct TaskDraft {
-    var criteria = "结果完整回应目标，内容清晰且可核验"
-    var files = "report.md"
-    var maxSteps = 100
-    var maxModelCalls = 150
-    var maxTokens = 500_000
-    var timeoutMinutes = 60
-    var unlimited = false
+struct GoalDraft: Encodable, Equatable {
+    var objective: String
 
-    func contract(objective: String) throws -> GoalContract {
+    init(objective: String) throws {
         let objective = objective.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !objective.isEmpty, objective.count <= 8000 else { throw InputError.invalid("请填写目标，最多 8,000 个字符。") }
-        let criteriaList = criteria.lines
-        guard !criteriaList.isEmpty, criteriaList.count <= 20, criteriaList.allSatisfy({ $0.count <= 2000 }) else { throw InputError.invalid("请填写验收标准，每行一条，最多 20 条。") }
-        let paths = files.lines
-        guard !paths.isEmpty, paths.count <= 20, paths.allSatisfy(Self.isSafePath) else { throw InputError.invalid("请填写有效的相对产物路径，例如 report.md。") }
-        guard unlimited || (maxSteps > 0 && maxModelCalls > 0 && maxTokens > 0 && timeoutMinutes > 0 && timeoutMinutes <= Int.max / 60) else { throw InputError.invalid("执行预算必须大于零。") }
-        let limits = unlimited ? TaskLimits(max_steps: nil, max_model_calls: nil, max_tokens: nil, timeout_seconds: nil) : TaskLimits(max_steps: maxSteps, max_model_calls: maxModelCalls, max_tokens: maxTokens, timeout_seconds: timeoutMinutes * 60)
-        return GoalContract(objective: objective, acceptance_criteria: criteriaList, deliverables: paths.map { Deliverable(path: $0) }, limits: limits)
-    }
-
-    static func isSafePath(_ path: String) -> Bool {
-        !path.isEmpty && path.count <= 240 && !path.hasPrefix("/") && !path.contains("\\") && !path.contains(":") && !path.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) && path.split(separator: "/", omittingEmptySubsequences: false).allSatisfy { !$0.isEmpty && !$0.hasPrefix(".") }
+        self.objective = objective
     }
 }
 

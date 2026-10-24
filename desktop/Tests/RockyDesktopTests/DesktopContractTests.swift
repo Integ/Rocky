@@ -3,57 +3,25 @@ import XCTest
 @testable import RockyDesktop
 
 final class DesktopContractTests: XCTestCase {
-    func testContractIncludesFullToolAccessWithExplicitExecutionLimits() throws {
-        var draft = TaskDraft()
-        draft.criteria = "列出证据\n明确不确定性"
-        draft.files = "report.md\nnotes/sources.txt"
-        let contract = try draft.contract(objective: "  编写报告  ")
-        let data = try JSONEncoder().encode(contract)
-        let encoded = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-
+    func testSubmissionOnlyRequiresObjective() throws {
+        let draft = try GoalDraft(objective: "  编写报告  ")
+        let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(draft)) as! [String: Any]
         XCTAssertEqual(encoded["objective"] as? String, "编写报告")
-        XCTAssertEqual(encoded["acceptance_criteria"] as? [String], ["列出证据", "明确不确定性"])
-        XCTAssertEqual(encoded["allowed_domains"] as? [String], [])
-        XCTAssertEqual(encoded["allowed_tools"] as? [String], Self.fullTools)
-        XCTAssertEqual((encoded["limits"] as? [String: Int])?["max_steps"], 100)
-        for key in ["max_steps", "max_model_calls", "max_output_tokens", "deadline_seconds"] {
-            XCTAssertNil(encoded[key], "Legacy flat field \(key) must stay unused")
-        }
-        XCTAssertEqual(contract.deliverables.map(\.path), ["report.md", "notes/sources.txt"])
-        XCTAssertTrue(contract.allowed_tools.contains("fetch_url"))
-        XCTAssertFalse(encoded.keys.contains("api_key"))
-        XCTAssertFalse(encoded.keys.contains("credential_id"))
+        XCTAssertEqual(Set(encoded.keys), ["objective"])
     }
 
-    func testExplicitUnlimitedLimitsEncodeNullInsteadOfOmittingDefaults() throws {
-        var draft = TaskDraft()
-        draft.unlimited = true
-        let contract = try draft.contract(objective: "继续研究")
-        let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(contract)) as! [String: Any]
-        let limits = try XCTUnwrap(encoded["limits"] as? [String: Any])
+    func testExplicitUnlimitedLimitsRemainReadableForExistingContracts() throws {
+        let limits = TaskLimits(max_steps: nil, max_model_calls: nil, max_tokens: nil, timeout_seconds: nil)
+        let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(limits)) as! [String: Any]
         for key in ["max_steps", "max_model_calls", "max_tokens", "timeout_seconds"] {
-            XCTAssertTrue(limits[key] is NSNull)
+            XCTAssertTrue(encoded[key] is NSNull)
         }
-        draft.unlimited = false
-        draft.maxSteps = 0
-        XCTAssertThrowsError(try draft.contract(objective: "继续研究"))
     }
 
-    func testDefaultTaskIncludesNetworkSessionsAndShellWithoutDomainSetup() throws {
-        let contract = try TaskDraft().contract(objective: "整理材料")
-        XCTAssertEqual(contract.allowed_tools, Self.fullTools)
-        XCTAssertTrue(contract.allowed_domains.isEmpty)
-    }
-
-    func testImpossibleOrEscapingArtifactPathsAreRejectedBeforeSubmission() {
-        for path in ["../outside", "/tmp/outside", ".env", "notes/.secret", "a//b", "a/./b", "a/../b", "a\\b", "name:stream", "name\u{007f}", "name\u{0000}"] {
-            var draft = TaskDraft()
-            draft.files = path
-            XCTAssertThrowsError(try draft.contract(objective: "整理材料"), "Rejected path: \(path.debugDescription)")
+    func testInvalidObjectivesAreRejectedBeforeModelCall() {
+        for objective in ["   ", String(repeating: "字", count: 8001)] {
+            XCTAssertThrowsError(try GoalDraft(objective: objective))
         }
-        var draft = TaskDraft()
-        draft.files = "笔记/证据 & 结果.md"
-        XCTAssertNoThrow(try draft.contract(objective: "整理材料"))
     }
 
     func testDirectContractDefaultsIncludeAllTools() {

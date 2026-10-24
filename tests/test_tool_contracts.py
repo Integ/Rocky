@@ -202,3 +202,25 @@ def test_new_lifetime_policy_does_not_invalidate_an_existing_tool_receipt(tmp_pa
     (tmp_path / "tool-contract" / "report.txt").write_text("newer")
     assert tools.execute(value) == result
     assert (tmp_path / "tool-contract" / "report.txt").read_text() == "newer"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "{}",
+        "[]",
+        '{"start_line":0,"end_line":5}',
+        '{"start_line":5,"end_line":4}',
+        '{"start_line":true,"end_line":5}',
+        '{"start_line":1,"end_line":401}',
+        '{"start_line":"1","end_line":5}',
+        '{"start_line":1,"end_line":5,"extra":1}',
+        '{"start_line":1,"start_line":2,"end_line":5}',
+    ],
+)
+def test_invalid_line_ranges_are_rejected_before_file_dispatch(tmp_path, content):
+    tools = WorkspaceTools(Settings(workspace_root=tmp_path / "workspace"))
+    result = tools.execute(request(Action(tool="read_file", path="source.py", content=content)))
+    assert not result.success
+    assert result.error_code == "invalid_arguments"
+    assert "start_line" in result.retry_hint or "start_line" in result.content

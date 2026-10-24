@@ -402,3 +402,28 @@ def test_fetch_rejects_compressed_bodies(monkeypatch):
     )
     with pytest.raises(FetchError, match="Compressed"):
         fetch_public_text("http://example.com/report", ["example.com"])
+
+
+@pytest.mark.parametrize("access", ["full", "scoped"])
+def test_targeted_file_read_returns_only_requested_lines_and_replays_same_receipt(tmp_path, access):
+    tools = WorkspaceTools(Settings(workspace_root=tmp_path / access, tool_access=access))
+    root = tools.root / "test-goal"
+    root.mkdir(parents=True)
+    source = root / "source.py"
+    source.write_text("".join(f"第{i}行: value_{i}\n" for i in range(1, 501)))
+    action = Action(tool="read_file", path="source.py", content='{"start_line":245,"end_line":250}')
+    result = execute(tools, action)
+    assert result.success, result.content
+    assert "[Lines 245-250; other lines are not included]" in result.content
+    assert "第245行" in result.content and "第250行" in result.content
+    assert "第244行" not in result.content and "第251行" not in result.content
+    assert len(result.content.encode()) < 500
+    source.write_text("changed\n")
+    assert execute(tools, action) == result
+    missing = execute(
+        tools,
+        Action(tool="read_file", path="source.py", content='{"start_line":5,"end_line":8}'),
+        operation_id="past-eof",
+    )
+    assert not missing.success
+    assert "beyond the end" in missing.content

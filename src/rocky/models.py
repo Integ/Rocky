@@ -49,12 +49,31 @@ class Deliverable(Model):
 
 
 class ExecutionLimits(Model):
-    """Owner-controlled lifetime limits; None explicitly removes a limit."""
+    """Task lifetime limits; explicit API contracts may remove individual limits."""
 
     max_steps: int | None = Field(default=100, ge=1)
     max_model_calls: int | None = Field(default=150, ge=1)
     max_tokens: int | None = Field(default=500_000, ge=1)
     timeout_seconds: int | None = Field(default=3600, ge=1)
+
+
+class AutomaticExecutionLimits(Model):
+    """AI estimates are bounded; the planner adds context and review reserves."""
+
+    max_steps: int = Field(ge=1, le=100, strict=True)
+    max_model_calls: int = Field(ge=1, le=150, strict=True)
+    max_tokens: int = Field(ge=1, le=5_000_000, strict=True)
+    timeout_seconds: int = Field(ge=1, le=3600, strict=True)
+
+
+class DeliveryRequirements(Model):
+    acceptance_criteria: list[Criterion] = Field(min_length=1, max_length=20)
+    deliverables: list[Deliverable] = Field(min_length=1, max_length=20)
+    limits: AutomaticExecutionLimits
+
+
+class GoalDraft(Model):
+    objective: str = Field(min_length=1, max_length=8000)
 
 
 class GoalContract(Model):
