@@ -13,11 +13,16 @@ import re
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
+import unicodedata
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
+
+from sqlalchemy.engine import make_url
 
 from rocky.command_policy import command_class, matches_prefix
 from rocky.config import Settings
@@ -31,6 +36,7 @@ from rocky.models import (
     read_only_action,
 )
 from rocky.network import FetchError, fetch_public_text
+from rocky.seatbelt import SandboxUnavailable, prepare_sandbox
 from rocky.tool_contracts import (
     ActionValidationError,
     approval_fingerprint,
@@ -89,18 +95,26 @@ def _digest(content: bytes) -> str:
 # Dependency, VCS and cache trees are not task output and can be very large.
 _UNTRACKED_DIRECTORIES = frozenset(
     {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv", ".tox"}
-    | {".mypy_cache", ".pytest_cache", ".ruff_cache"}
+    | {".mypy_cache", ".pytest_cache", ".ruff_cache", ".rocky-sandbox"}
 )
 _SNAPSHOT_LIMIT = 5000
 
 
-def _snapshot(directory: Path) -> tuple[dict[str, tuple[int, int, int]], bool]:
+def _snapshot(
+    directory: Path, allowed: Callable[[Path], bool]
+) -> tuple[dict[str, tuple[int, int, int]], bool]:
     """Stat regular files below directory, in a stable order; report completeness."""
     entries: dict[str, tuple[int, int, int]] = {}
     for current, folders, files in os.walk(directory):
-        folders[:] = sorted(name for name in folders if name not in _UNTRACKED_DIRECTORIES)
+        folders[:] = sorted(
+            name
+            for name in folders
+            if name not in _UNTRACKED_DIRECTORIES and allowed(Path(current, name))
+        )
         for name in sorted(files):
             path = os.path.join(current, name)
+            if not allowed(Path(path)):
+                continue
             try:
                 info = os.stat(path, follow_symlinks=False)
             except OSError:
@@ -120,9 +134,13 @@ def _operation_fingerprint(request: ToolInput) -> str:
     # Keep the original v0.1 ToolInput serialization byte-for-byte. Inference
     # settings do not change tool semantics; including them would invalidate
     # durable receipts when old Activity inputs are decoded by newer workers.
+    exclude = {"run": {"contract": {"limits"}}}
+    if request.action.sandbox:
+        # Adding the default must not invalidate completed pre-sandbox receipts.
+        exclude["action"] = {"sandbox"}
     payload = request.model_dump_json(
         include={"run": {"goal_id", "contract"}, "operation_id": True, "action": True},
-        exclude={"run": {"contract": {"limits"}}},
+        exclude=exclude,
     )
     return _digest(payload.encode())
 
@@ -193,29 +211,14 @@ def _apply_edits(text: str, edits: list[tuple[str, str, bool]]) -> str:
     return text
 
 
-def _replace_text(path: Path, text: str) -> None:
-    """Atomically replace a full-access file while keeping its permission bits."""
-    mode = stat.S_IMODE(path.stat().st_mode)
-    descriptor, temporary = tempfile.mkstemp(prefix=".rocky-tmp-", dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, mode)
-        os.replace(temporary, path)
-    finally:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-
-
-def _atomic_write(parent: int, name: str, content: bytes) -> None:
+def _atomic_write(parent: int, name: str, content: bytes, *, preserve_mode: bool = False) -> None:
+    mode = 0o600
     try:
         existing = os.stat(name, dir_fd=parent, follow_symlinks=False)
         if not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1:
             raise ToolError("The destination must be a regular file without links")
+        if preserve_mode:
+            mode = stat.S_IMODE(existing.st_mode)
     except FileNotFoundError:
         pass
     temporary = ".rocky-tmp-" + uuid.uuid4().hex
@@ -226,6 +229,7 @@ def _atomic_write(parent: int, name: str, content: bytes) -> None:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(content)
             handle.flush()
+            os.fchmod(handle.fileno(), mode)
             os.fsync(handle.fileno())
         os.replace(temporary, name, src_dir_fd=parent, dst_dir_fd=parent)
         os.fsync(parent)
@@ -245,6 +249,31 @@ class WorkspaceTools:
         # The configured base holds default working directories and private receipts.
         self.root = settings.workspace_root.expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # The control plane cannot be used to approve a task's own opt-out.
+        temporal_address = settings.temporal_address.removeprefix("http://").removeprefix(
+            "https://"
+        )
+        temporal = urlsplit("//" + temporal_address)
+        self.control_ports = tuple(sorted({settings.port, temporal.port or 7233}))
+        protected = [settings.credential_path.expanduser().resolve()]
+        database = make_url(settings.database_url)
+        if database.get_backend_name() == "sqlite" and database.database not in {
+            None,
+            "",
+            ":memory:",
+        }:
+            filename = Path(database.database).expanduser().resolve()
+            protected.extend(
+                Path(str(filename) + suffix) for suffix in ("", "-wal", "-shm", "-journal")
+            )
+        self.protected_paths = tuple(protected)
+        self.protected_write_paths = tuple(
+            {
+                Path(__file__).resolve().parent,
+                Path(sys.prefix).resolve(),
+                Path(sys.base_prefix).resolve(),
+            }
+        )
 
     def read_artifact(self, goal_id: str, path: str) -> str:
         """Read a declared UI artifact inside its goal's export directory."""
@@ -328,7 +357,8 @@ class WorkspaceTools:
                 # A rejected request can be corrected safely without an unknown
                 # outcome or a permanently cached denial.
                 options = validate_action(request.action, full_access=self.full_access)
-                if (
+                unsandboxed = request.action.tool == "run_command" and not request.action.sandbox
+                if unsandboxed or (
                     self.approval_mode != "trusted"
                     and requires_approval(request.action, options)
                     and not self._prefix_approved(request)
@@ -337,13 +367,17 @@ class WorkspaceTools:
                     if approval not in request.approved_action_fingerprints:
                         return ToolResult(
                             success=False,
-                            content="Owner approval is required before running this shell command or potentially mutating HTTP request. The operation has not been dispatched.",
+                            content=(
+                                "Owner approval is required to run this command outside Seatbelt with the current user's privileges. The operation has not been dispatched."
+                                if unsandboxed
+                                else "Owner approval is required before running this shell command or potentially mutating HTTP request. The operation has not been dispatched."
+                            ),
                             error_code="approval_required",
                             retry_hint="Request owner approval for this exact action; keep its operation identifier and arguments unchanged after approval.",
                             approval_required=approval,
                             approval_command_prefix=(
                                 command_class(request.action.content) or []
-                                if request.action.tool == "run_command"
+                                if request.action.tool == "run_command" and not unsandboxed
                                 else []
                             ),
                         )
@@ -360,6 +394,12 @@ class WorkspaceTools:
                     )
                 try:
                     result = self._execute(request, goal_fd)
+                except SandboxUnavailable as exc:
+                    result = _failure(
+                        str(exc),
+                        code="sandbox_unavailable",
+                        hint="Run the worker on macOS with Seatbelt available, or request exact owner approval for run_command with sandbox=false.",
+                    )
                 except HTTPToolError as exc:
                     uncertain = requires_approval(request.action, options)
                     result = _failure(
@@ -403,9 +443,13 @@ class WorkspaceTools:
 
     def _prefix_approved(self, request: ToolInput) -> bool:
         """Owner allowlist or a task-scoped grant covers this simple command."""
-        return request.action.tool == "run_command" and matches_prefix(
-            request.action.content,
-            [*self.auto_approved_prefixes, *request.approved_command_prefixes],
+        return (
+            request.action.tool == "run_command"
+            and request.action.sandbox
+            and matches_prefix(
+                request.action.content,
+                [*self.auto_approved_prefixes, *request.approved_command_prefixes],
+            )
         )
 
     def _execute(self, request: ToolInput, goal_fd: int) -> ToolResult:
@@ -480,15 +524,98 @@ class WorkspaceTools:
             )
 
     def _path(self, request: ToolInput, path: str | None, *, default_root: bool = False) -> Path:
+        writes = request.action.tool in {
+            "write_file",
+            "append_file",
+            "edit_file",
+            "fetch_url",
+            "http_request",
+        }
+        return self._resolve_path(
+            request.run.goal_id, path, default_root=default_root, write=writes
+        )
+
+    def _resolve_path(
+        self, goal_id: str, path: str | None, *, default_root: bool = False, write: bool = False
+    ) -> Path:
         if not path and not default_root:
             raise ToolError("This tool requires a path")
         value = Path(path or ".").expanduser()
         if not value.is_absolute():
-            value = self.root / request.run.goal_id / value
+            value = self.root / goal_id / value
         try:
-            return value.resolve()
+            self._check_path(goal_id, Path(os.path.abspath(value)), write=write)
+            resolved = value.resolve()
+            self._check_path(goal_id, resolved, write=write)
+            return resolved
         except RuntimeError:
             raise ToolError("The path contains a symbolic link loop") from None
+
+    def _check_path(self, goal_id: str, path: Path, *, write: bool = False) -> None:
+        """Full access never includes another goal or the private control tree."""
+
+        def key(value: Path) -> str:
+            text = str(value)
+            return (
+                unicodedata.normalize("NFD", text).casefold() if sys.platform == "darwin" else text
+            )
+
+        def inside(value: Path, parent: Path) -> bool:
+            return key(value) == key(parent) or key(value).startswith(key(parent).rstrip("/") + "/")
+
+        if inside(path, self.root) and not inside(path, self.root / goal_id):
+            raise ToolError(
+                "Access to other task directories and private .rocky storage is forbidden"
+            )
+        if any(inside(path, protected) for protected in self.protected_paths):
+            raise ToolError("Access to Rocky's private control files is forbidden")
+        if write and any(inside(path, protected) for protected in self.protected_write_paths):
+            raise ToolError(
+                "File tools cannot modify Rocky's code or Python runtime; request approved unsandboxed execution"
+            )
+
+    def _visible_path(self, goal_id: str, path: Path) -> bool:
+        try:
+            self._check_path(goal_id, path)
+            self._check_path(goal_id, path.resolve())
+            return True
+        except (OSError, RuntimeError, ToolError):
+            return False
+
+    def _check_parent(self, goal_id: str, descriptor: int, name: str) -> None:
+        # Inode comparison also catches case/Unicode aliases of the workspace
+        # root on macOS. Never follow a newly swapped parent symlink.
+        root = self.root.stat()
+        parent = os.fstat(descriptor)
+        if (root.st_dev, root.st_ino) == (parent.st_dev, parent.st_ino) and name != goal_id:
+            raise ToolError(
+                "Access to other task directories and private .rocky storage is forbidden"
+            )
+
+    @contextmanager
+    def _full_parent(self, goal_id: str, path: Path, *, create: bool = False) -> Iterator[int]:
+        with ExitStack() as stack:
+            current = os.open(path.anchor, _DIRECTORY_FLAGS)
+            stack.callback(os.close, current)
+            for part in path.parts[1:-1]:
+                self._check_parent(goal_id, current, part)
+                current = _open_directory(current, part, create=create)
+                stack.callback(os.close, current)
+            self._check_parent(goal_id, current, path.name)
+            yield current
+
+    @contextmanager
+    def _full_file(self, goal_id: str, path: Path, *, append: bool = False) -> Iterator:
+        with self._full_parent(goal_id, path, create=append) as parent:
+            flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT if append else os.O_RDONLY
+            descriptor = os.open(
+                path.name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent
+            )
+            with os.fdopen(descriptor, "ab" if append else "rb") as handle:
+                info = os.fstat(handle.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise ToolError("Only regular files without hard links can be accessed")
+                yield handle
 
     def display_path(self, goal_id: str, path: str | Path) -> str:
         """Goal-relative inside the workspace, otherwise absolute, for change records."""
@@ -511,15 +638,14 @@ class WorkspaceTools:
             relative = path.relative_to(self.root / request.run.goal_id)
         except ValueError:
             return []
-        if any(part.startswith(".") for part in relative.parts) or not path.is_file():
+        if any(part.startswith(".") for part in relative.parts):
             return []
         digest = hashlib.sha256()
-        with path.open("rb") as handle:
+        with self._full_file(request.run.goal_id, path) as handle:
+            size = os.fstat(handle.fileno()).st_size
             for chunk in iter(lambda: handle.read(1_048_576), b""):
                 digest.update(chunk)
-        return [
-            Artifact(path=relative.as_posix(), size=path.stat().st_size, sha256=digest.hexdigest())
-        ]
+        return [Artifact(path=relative.as_posix(), size=size, sha256=digest.hexdigest())]
 
     def _execute_full(self, request: ToolInput) -> ToolResult:
         action = request.action
@@ -535,14 +661,27 @@ class WorkspaceTools:
             if not isinstance(options, dict):
                 raise ToolError("HTTP content must be a JSON object")
             destination = self._path(request, action.path) if action.path else None
-            if destination:
-                destination.parent.mkdir(parents=True, exist_ok=True)
-            response = request_http(
-                action.url,
-                options,
-                self.root / ".rocky" / request.run.goal_id / "sessions",
-                download_path=destination,
-            )
+            with ExitStack() as stack:
+                download_options = {}
+                if destination:
+                    parent = stack.enter_context(
+                        self._full_parent(request.run.goal_id, destination, create=True)
+                    )
+                    try:
+                        info = os.stat(destination.name, dir_fd=parent, follow_symlinks=False)
+                        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                            raise ToolError("The destination must be a regular file without links")
+                    except FileNotFoundError:
+                        pass
+                    download_options["download_directory_fd"] = parent
+                response = request_http(
+                    action.url,
+                    options,
+                    self.root / ".rocky" / request.run.goal_id / "sessions",
+                    download_path=destination,
+                    blocked_ports=self.control_ports,
+                    **download_options,
+                )
             content = json.dumps(response, ensure_ascii=False)
             return ToolResult(
                 success=200 <= response["status_code"] < 400,
@@ -564,18 +703,31 @@ class WorkspaceTools:
             if not directory.is_dir():
                 raise ToolError("The command working directory does not exist")
             shell = "/bin/zsh" if Path("/bin/zsh").exists() else "/bin/sh"
-            # Commands can write anywhere; record what changed under their
-            # working directory so review can attribute outputs to commands.
-            before, complete_before = _snapshot(directory)
+            command = [shell, "-c", action.content]
+            environment = None
+            if action.sandbox:
+                prefix, environment = prepare_sandbox(
+                    self.root,
+                    request.run.goal_id,
+                    self.root / request.run.goal_id,
+                    protected_paths=self.protected_paths,
+                    blocked_ports=self.control_ports,
+                )
+                command = [*prefix, *command]
+
+            def visible(path: Path) -> bool:
+                return self._visible_path(request.run.goal_id, path)
+
+            before, complete_before = _snapshot(directory, visible)
             with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
                 process = subprocess.Popen(
-                    action.content,
-                    shell=True,
-                    executable=shell,
+                    command,
                     cwd=directory,
+                    env=environment,
                     stdout=stdout,
                     stderr=stderr,
                     stdin=subprocess.DEVNULL,
+                    close_fds=True,
                     start_new_session=True,
                 )
                 timed_out = False
@@ -598,7 +750,7 @@ class WorkspaceTools:
                 description += (
                     "\nCommand timed out after 30 seconds; its process group was stopped."
                 )
-            after, complete_after = _snapshot(directory)
+            after, complete_after = _snapshot(directory, visible)
             changed = [
                 self.display_path(request.run.goal_id, path) for path in _changed(before, after)
             ]
@@ -627,23 +779,43 @@ class WorkspaceTools:
             )
         path = self._path(request, action.path, default_root=action.tool == "list_files")
         if action.tool == "list_files":
-            entries = []
-            for directory, folders, files in os.walk(path, followlinks=False):
-                folders.sort()
-                for name in sorted([*folders, *files]):
-                    item = Path(directory) / name
-                    display = item.relative_to(path).as_posix()
-                    suffix = "/" if item.is_dir() else ""
-                    if item.is_symlink():
-                        suffix += " -> " + os.readlink(item)
-                    entries.append(display + suffix)
+            entries: list[str] = []
+
+            def visit(descriptor: int, directory: Path) -> None:
+                for name in sorted(os.listdir(descriptor)):
                     if len(entries) >= 300:
-                        break
-                if len(entries) >= 300:
-                    entries.append("[listing truncated; use run_command for a complete listing]")
-                    break
-            if not path.is_dir():
-                raise ToolError("The directory does not exist")
+                        return
+                    item = directory / name
+                    if not self._visible_path(request.run.goal_id, item):
+                        continue
+                    try:
+                        self._check_parent(request.run.goal_id, descriptor, name)
+                        info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                        if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+                            continue
+                        suffix = "/" if stat.S_ISDIR(info.st_mode) else ""
+                        if stat.S_ISLNK(info.st_mode):
+                            suffix = " -> " + os.readlink(name, dir_fd=descriptor)
+                        entries.append(item.relative_to(path).as_posix() + suffix)
+                        if stat.S_ISDIR(info.st_mode):
+                            child = _open_directory(descriptor, name, create=False)
+                            try:
+                                visit(child, item)
+                            finally:
+                                os.close(child)
+                    except (OSError, ToolError):
+                        continue
+
+            with self._full_parent(request.run.goal_id, path) as parent:
+                descriptor = os.open(path.name or path.anchor, _DIRECTORY_FLAGS, dir_fd=parent)
+                try:
+                    # A differently spelled root must not expose sibling names.
+                    self._check_parent(request.run.goal_id, descriptor, "")
+                    visit(descriptor, path)
+                finally:
+                    os.close(descriptor)
+            if len(entries) >= 300:
+                entries.append("[listing truncated; use run_command for a complete listing]")
             content = "\n".join(entries) or "(empty directory)"
             return ToolResult(
                 success=True,
@@ -651,12 +823,8 @@ class WorkspaceTools:
                 progress_key="list:" + _digest(content.encode()),
             )
         if action.tool == "read_file":
-            if not path.is_file():
-                raise ToolError(
-                    "read_file requires a regular file; use run_command for other file types"
-                )
-            with path.open(encoding="utf-8", errors="replace") as handle:
-                content = handle.read(MAX_CONTENT + 1)
+            with self._full_file(request.run.goal_id, path) as handle:
+                content = handle.read(MAX_CONTENT * 4 + 1).decode("utf-8", errors="replace")
             return ToolResult(
                 success=True,
                 content=_clip(content),
@@ -665,8 +833,8 @@ class WorkspaceTools:
         if action.tool == "write_file":
             if action.content is None:
                 raise ToolError("write_file requires text content")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(action.content, encoding="utf-8")
+            with self._full_parent(request.run.goal_id, path, create=True) as parent:
+                _atomic_write(parent, path.name, action.content.encode("utf-8"), preserve_mode=True)
             return ToolResult(
                 success=True,
                 content=f"Wrote {path}",
@@ -677,12 +845,10 @@ class WorkspaceTools:
         if action.tool == "append_file":
             if not action.content:
                 raise ToolError("append_file requires nonempty text content")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if path.exists() and not path.is_file():
-                raise ToolError("append_file requires a regular file")
-            with path.open("a", encoding="utf-8", newline="") as handle:
-                handle.write(action.content)
-            size = path.stat().st_size
+            with self._full_file(request.run.goal_id, path, append=True) as handle:
+                handle.write(action.content.encode("utf-8"))
+                handle.flush()
+                size = os.fstat(handle.fileno()).st_size
             return ToolResult(
                 success=True,
                 content=f"Appended {len(action.content)} characters to {path} ({size} bytes total)",
@@ -691,20 +857,20 @@ class WorkspaceTools:
                 changed_paths=[self.display_path(request.run.goal_id, path)],
             )
         if action.tool == "edit_file":
-            if not path.is_file():
-                raise ToolError(
-                    "edit_file requires an existing regular file; use write_file to create it"
-                )
-            if path.stat().st_size > MAX_EDIT_BYTES:
-                raise ToolError("The file is too large to edit; use run_command instead")
             try:
-                with path.open(encoding="utf-8", newline="") as handle:
-                    text = handle.read()
+                with self._full_parent(request.run.goal_id, path) as parent:
+                    text = _read_regular(parent, path.name, max_bytes=MAX_EDIT_BYTES).decode(
+                        "utf-8"
+                    )
+                    edits = parse_edits(action.content)
+                    updated = _apply_edits(text, edits)
+                    _atomic_write(parent, path.name, updated.encode("utf-8"), preserve_mode=True)
             except UnicodeDecodeError:
                 raise ToolError("The file is not UTF-8 text") from None
-            edits = parse_edits(action.content)
-            updated = _apply_edits(text, edits)
-            _replace_text(path, updated)
+            except FileNotFoundError:
+                raise ToolError(
+                    "edit_file requires an existing regular file; use write_file to create it"
+                ) from None
             return ToolResult(
                 success=True,
                 content=f"Applied {len(edits)} edit(s) to {path} ({len(updated.encode())} bytes)",
@@ -798,12 +964,8 @@ class WorkspaceTools:
         display = self.display_path(run.goal_id, path)
         try:
             if self.full_access:
-                target = Path(display)
-                if not target.is_absolute():
-                    target = self.root / run.goal_id / target
-                with target.open("rb") as handle:
-                    if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                        return {"path": display, "missing": True}
+                target = self._resolve_path(run.goal_id, path)
+                with self._full_file(run.goal_id, target) as handle:
                     # Line counts stay exact for any plausible input; giant files
                     # report their size and an excerpt without a full scan.
                     content = handle.read(MAX_BYTES * 16 + 1)

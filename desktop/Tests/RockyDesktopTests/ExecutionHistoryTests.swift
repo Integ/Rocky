@@ -196,6 +196,51 @@ final class ExecutionHistoryTests: XCTestCase {
         XCTAssertEqual(entries.dropFirst().map(\.firstStep), [2, 2, 2])
     }
 
+    func testCompactEventProjectionPreservesBatchAndStateHistory() throws {
+        let old = observation(step: 1, content: "旧结果")
+        let batch = ["a.py", "b.py"].map {
+            ToolObservation(step: 2, tool: "read_file", success: true, content: $0, progress_key: $0)
+        }
+        let artifact = Artifact(path: "report.md", size: 20, sha256: "saved")
+        var batchEvent = event(2, reservedStep: 2, reason: "并行读取文件")
+        batchEvent.state.observations = [old] + batch
+        var reservation = event(3, reservedStep: 3, reason: "准备核验")
+        reservation.state.observations = [old] + batch
+        var completed = event(5, reservedStep: 3, status: "succeeded", reason: "核验完成", artifacts: [artifact])
+        completed.state.observations = [old] + batch
+        let original = [
+            event(1, reservedStep: 1, reason: "读取文件", observation: old), batchEvent, reservation,
+            event(4, reservedStep: 3, status: "waiting", reason: "等待更新", wakeAt: "2026-10-22T02:00:00Z"),
+            completed,
+        ]
+        let fields: Set<String> = [
+            "status", "reason", "steps", "model_calls", "input_tokens", "output_tokens",
+            "artifacts", "updated_at", "revision", "observations", "wake_at",
+        ]
+        let payload = try original.map { event -> [String: Any] in
+            var state = try JSONSerialization.jsonObject(with: JSONEncoder().encode(event.state)) as! [String: Any]
+            state = state.filter { fields.contains($0.key) }
+            let latestStep = event.state.observations?.last?.step
+            state["observations"] = try event.state.observations?.filter { $0.step == latestStep }.map {
+                try JSONSerialization.jsonObject(with: JSONEncoder().encode($0))
+            }
+            return ["event_id": event.id, "state": state]
+        }
+        let compact = try JSONDecoder().decode([GoalEvent].self, from: JSONSerialization.data(withJSONObject: payload))
+        let expected = ExecutionEntry.build(from: original)
+        let actual = ExecutionEntry.build(from: compact)
+
+        XCTAssertEqual(actual.map(\.id), expected.map(\.id))
+        XCTAssertEqual(actual.map(\.title), expected.map(\.title))
+        XCTAssertEqual(actual.map(\.status), expected.map(\.status))
+        XCTAssertEqual(actual.map(\.observation), expected.map(\.observation))
+        XCTAssertEqual(actual.map(\.artifacts), expected.map(\.artifacts))
+        XCTAssertEqual(actual.map(\.artifactsChanged), expected.map(\.artifactsChanged))
+        XCTAssertEqual(actual.map(\.wakeAt), expected.map(\.wakeAt))
+        XCTAssertEqual(actual.map(\.stepLabel), expected.map(\.stepLabel))
+        XCTAssertEqual(actual.map(\.lastTimestamp), expected.map(\.lastTimestamp))
+    }
+
     private func observation(step: Int, success: Bool = true, content: String = "结果未变化", progressKey: String? = nil) -> ToolObservation {
         ToolObservation(step: step, tool: "http_request", success: success, content: content, progress_key: progressKey)
     }

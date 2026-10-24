@@ -49,9 +49,9 @@ struct APIClient {
     func deleteGoal(_ id: String) async throws {
         _ = try await rawRequest("/goals/\(id)", method: "DELETE")
     }
-    func events(_ id: String) async throws -> [GoalEvent] {
+    func events(_ id: String, after: Int = 0) async throws -> [GoalEvent] {
         var all: [GoalEvent] = []
-        var cursor = 0
+        var cursor = after
         while true {
             let page: [GoalEvent] = try await request("/goals/\(id)/events?after=\(cursor)")
             guard let last = page.last, last.event_id > cursor else { return all }

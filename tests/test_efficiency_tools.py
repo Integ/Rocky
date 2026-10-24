@@ -1,6 +1,7 @@
 """Parallel reads, incremental file edits and command prefix approvals."""
 
 import json
+import sys
 import threading
 
 import pytest
@@ -118,6 +119,7 @@ def approval_tools(tmp_path, **settings):
     )
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt execution requires macOS")
 def test_allowlisted_simple_command_runs_without_approval(tmp_path):
     tools = approval_tools(tmp_path, auto_approve_commands=["printf"])
     allowed = execute(tools, Action(tool="run_command", content="printf allowed"), "allowed")
@@ -133,6 +135,7 @@ def test_allowlisted_simple_command_runs_without_approval(tmp_path):
     assert other.error_code == "approval_required"
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt execution requires macOS")
 def test_pending_command_offers_its_class_and_a_task_grant_covers_similar_commands(tmp_path):
     tools = approval_tools(tmp_path)
     pending = execute(tools, Action(tool="run_command", content="printf -- first"), "first")

@@ -3,6 +3,7 @@
 import json
 import re
 import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -368,6 +369,7 @@ async def run(temporal_env, tmp_path, task_id, planner, approvals="auto") -> dic
 
 @pytest.mark.integration
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt execution requires macOS")
 async def test_runner_approves_counts_and_grades_independently(temporal_env, tmp_path):
     planner = ScriptedPlanner([compute_summary(), finish()])
     record = await run(temporal_env, tmp_path, "csv-summary", planner)
@@ -408,6 +410,7 @@ async def test_hand_written_figures_fail_rockys_claim_audit(temporal_env, tmp_pa
 
 @pytest.mark.integration
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt execution requires macOS")
 async def test_runner_flags_a_success_the_checks_reject(temporal_env, tmp_path):
     # A real but buggy computation: provenance holds, so only the grader can tell.
     planner = ScriptedPlanner([compute_summary("[:10]"), finish()])
@@ -440,6 +443,7 @@ async def test_request_for_missing_information_is_the_expected_outcome(temporal_
 
 @pytest.mark.integration
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt execution requires macOS")
 async def test_local_api_task_logs_in_and_pages_through_rocky_http_tools(temporal_env, tmp_path):
     def base_url(request) -> str:
         return re.search(r"http://127\.0\.0\.1:\d+", request.run.contract.objective).group()

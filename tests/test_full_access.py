@@ -1,6 +1,7 @@
 """Exercise broad tools with real local files, shell processes and HTTP sessions."""
 
 import json
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
@@ -8,6 +9,7 @@ import pytest
 
 from rocky.config import Settings
 from rocky.models import Action, Deliverable, GoalContract, RunInput, ToolInput
+from rocky.tool_contracts import approval_fingerprint
 from rocky.tools import WorkspaceTools
 
 
@@ -87,6 +89,7 @@ def test_full_access_reports_a_symlink_loop_without_aborting_the_activity(tools,
     assert result.content
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt execution requires macOS")
 def test_full_access_shell_uses_goal_directory_and_receipts_prevent_duplicate_work(tools):
     action = Action(
         tool="run_command",
@@ -110,18 +113,27 @@ def test_full_access_shell_uses_goal_directory_and_receipts_prevent_duplicate_wo
     assert invocations.read_text() == "once\n"
 
 
-def test_full_access_shell_accepts_an_explicit_external_working_directory(tools, tmp_path):
+def test_external_working_directory_write_requires_approved_sandbox_opt_out(tools, tmp_path):
     cwd = tmp_path / "project"
     cwd.mkdir()
-    result = execute(
-        tools,
-        Action(tool="run_command", path=str(cwd), content="printf 'prepared' > .build-result"),
-        "shell-external-cwd",
+    action = Action(tool="run_command", path=str(cwd), content="printf 'prepared' > .build-result")
+    confined = execute(tools, action, "shell-external-cwd")
+    assert not confined.success
+    assert not (cwd / ".build-result").exists()
+    request = ToolInput(
+        run=legacy_run(),
+        operation_id="shell-external-cwd-approved",
+        action=action.model_copy(update={"sandbox": False}),
     )
+    pending = tools.execute(request)
+    assert pending.error_code == "approval_required"
+    request.approved_action_fingerprints = [approval_fingerprint(request)]
+    result = tools.execute(request)
     assert result.success, result.content
     assert (cwd / ".build-result").read_text() == "prepared"
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt execution requires macOS")
 def test_distinct_silent_shell_commands_have_distinct_progress_keys(tools):
     first = execute(
         tools,
@@ -243,7 +255,18 @@ def test_full_access_http_login_session_survives_tool_restart_and_post_retry(too
     assert state["report_reads"] == 1
 
 
-@pytest.mark.parametrize("tool", ["run_command", "http_request"])
+@pytest.mark.parametrize(
+    "tool",
+    [
+        pytest.param(
+            "run_command",
+            marks=pytest.mark.skipif(
+                sys.platform != "darwin", reason="Seatbelt execution requires macOS"
+            ),
+        ),
+        "http_request",
+    ],
+)
 def test_interrupted_external_operation_is_not_repeated_automatically(
     tools, account_server, monkeypatch, tool
 ):

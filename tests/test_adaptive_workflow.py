@@ -1,6 +1,7 @@
 """Exercise the production decision loop, approvals and replay with Temporal."""
 
 import asyncio
+import sys
 from dataclasses import dataclass, field
 
 import pytest
@@ -258,6 +259,7 @@ async def test_blocked_task_obeys_the_absolute_timeout_without_replanning(tempor
     assert activities.verifications == 0
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt execution requires macOS")
 async def test_exact_owner_approval_survives_worker_replacement_and_wake_cannot_grant_it(
     temporal_env, tmp_path
 ):
@@ -441,6 +443,7 @@ async def test_batches_with_mutations_are_rejected_before_any_dispatch(temporal_
     assert "action" in activities.plans[1].feedback
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt execution requires macOS")
 async def test_task_scoped_approval_covers_later_similar_commands_only(temporal_env, tmp_path):
     settings = Settings(workspace_root=tmp_path / "task-approval")
     run = request()

@@ -27,10 +27,15 @@ def approval_fingerprint(request: ToolInput) -> str:
     with identical arguments. Inference settings and unrelated task metadata do
     not affect the action being reviewed.
     """
+    action = request.action.model_dump(include={"tool", "path", "url", "content"})
+    # Default isolation preserves identities from durable histories written
+    # before sandbox was an Action field. An opt-out changes the reviewed act.
+    if not request.action.sandbox:
+        action["sandbox"] = False
     payload = {
         "goal_id": request.run.goal_id,
         "operation_id": request.operation_id,
-        "action": request.action.model_dump(include={"tool", "path", "url", "content"}),
+        "action": action,
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode()).hexdigest()
@@ -106,6 +111,10 @@ def parse_edits(content: str | None) -> list[tuple[str, str, bool]]:
 
 def validate_action(action: Action, *, full_access: bool) -> dict | None:
     """Validate required/unused fields; return parsed HTTP options when relevant."""
+    if not action.sandbox and action.tool != "run_command":
+        raise ActionValidationError(
+            "sandbox=false is only supported by run_command; use sandbox=true for other tools."
+        )
     if action.path is not None and (not isinstance(action.path, str) or "\x00" in action.path):
         raise ActionValidationError(
             "path must be text without NUL characters; choose a valid path."

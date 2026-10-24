@@ -164,7 +164,7 @@ class GoalWorkflow:
         if pending is None or fingerprint != pending.fingerprint or scope not in {"", "task"}:
             return
         if scope == "task":
-            if not pending.command_prefix:
+            if not pending.action.sandbox or not pending.command_prefix:
                 return
             if pending.command_prefix not in self._state.approved_command_prefixes:
                 self._state.approved_command_prefixes.append(list(pending.command_prefix))

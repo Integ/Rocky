@@ -393,7 +393,12 @@ struct WorkspaceView: View {
             }
             if let text = model.artifactContents[artifact.path] {
                 Divider()
-                Text(.init(String(text.prefix(30000)))).font(.system(size: 13)).lineSpacing(5).textSelection(.enabled)
+                if ["md", "markdown"].contains((artifact.path as NSString).pathExtension.lowercased()) {
+                    MarkdownReportView(String(text.prefix(30000)))
+                } else {
+                    Text(String(text.prefix(30000))).font(.system(size: 13, design: .monospaced))
+                        .lineSpacing(5).textSelection(.enabled)
+                }
                 if text.count > 30000 || model.truncatedArtifacts.contains(artifact.path) {
                     Text("仅预览部分内容，另存为可获取完整文件。").font(.system(size: 10)).foregroundStyle(.secondary)
                 }

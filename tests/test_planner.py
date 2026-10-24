@@ -107,6 +107,10 @@ async def test_full_access_planner_can_login_and_execute_even_for_a_legacy_task(
     assert "POST login" in instructions["content"]
     assert "Propose a concrete" in instructions["content"]
     assert "owner review" in instructions["content"]
+    assert "sandbox=true" in instructions["content"]
+    assert "sandbox=false always needs owner approval" in instructions["content"]
+    assert "Other tasks' directories" in instructions["content"]
+    assert "child processes and background jobs inherit that sandbox" in instructions["content"]
     assert "Ignore legacy run.contract.allowed_tools" in instructions["content"]
     assert "Do not use shell" not in instructions["content"]
     assert json.loads(data["content"])["execution"]["tool_access"] == "full"

@@ -1,6 +1,7 @@
 """Tool validation and owner approval must run before any dispatch side effect."""
 
 import json
+import sys
 
 import pytest
 
@@ -160,6 +161,7 @@ def test_missing_path_reports_actionable_error(tmp_path):
     assert result.retry_hint
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt execution requires macOS")
 def test_shell_failure_retains_exit_evidence_and_repair_hint(tmp_path):
     tools = WorkspaceTools(Settings(workspace_root=tmp_path, approval_mode="trusted"))
     result = tools.execute(

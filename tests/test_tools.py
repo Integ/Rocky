@@ -136,10 +136,16 @@ def test_legacy_receipt_accepts_model_settings_without_repeating_the_operation(t
         goal_id: str
         contract: GoalContract
 
+    class LegacyAction(BaseModel):
+        tool: str
+        path: str | None = None
+        url: str | None = None
+        content: str | None = None
+
     class LegacyToolInput(BaseModel):
         run: LegacyRunInput
         operation_id: str
-        action: Action
+        action: LegacyAction
 
     original_run = run()
     action = Action(tool="write_file", path="report.txt", content="原始 conclusion\n")
@@ -149,7 +155,7 @@ def test_legacy_receipt_accepts_model_settings_without_repeating_the_operation(t
     legacy_input = LegacyToolInput(
         run=LegacyRunInput(goal_id=original_run.goal_id, contract=original_run.contract),
         operation_id=operation_id,
-        action=action,
+        action=LegacyAction.model_validate(action.model_dump(exclude={"sandbox"})),
     )
     receipt_path = (
         tools.root

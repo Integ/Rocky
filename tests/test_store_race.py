@@ -155,4 +155,4 @@ def test_concurrent_sqlite_persists_keep_projection_and_events_monotonic(store):
     assert recorded == sorted(set(recorded))
     assert recorded[-1] == highest_revision
     assert all(1 <= revision <= highest_revision for revision in recorded)
-    assert store.events("goal-race")[-1]["state"] == state.model_dump(mode="json")
+    assert RunState.model_validate(store.events("goal-race")[-1]["state"]) == state

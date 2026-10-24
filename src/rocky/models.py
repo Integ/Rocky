@@ -92,6 +92,9 @@ class Action(Model):
     path: str | None = None
     url: str | None = None
     content: str | None = None
+    # Only run_command may opt out, after exact owner approval. Decode older
+    # actions with isolation enabled; strings and integers cannot disable it.
+    sandbox: bool = Field(default=True, strict=True)
 
 
 def read_only_action(action: Action) -> bool:

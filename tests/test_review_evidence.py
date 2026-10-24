@@ -1,6 +1,7 @@
 """Independent review sees what actually happened, not only the deliverables."""
 
 import json
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -25,6 +26,7 @@ from rocky.models import (
     VerifyInput,
 )
 from rocky.planner import OpenAIPlanner, _fit_evidence
+from rocky.tool_contracts import approval_fingerprint
 from rocky.tools import WorkspaceTools
 
 RUN = RunInput(
@@ -52,6 +54,7 @@ def execute(tools, action, operation_id):
     return tools.execute(ToolInput(run=RUN, action=action, operation_id=operation_id))
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt execution requires macOS")
 def test_commands_report_the_files_they_create_or_modify(tools, tmp_path):
     root = workspace(tools)
     (root / "existing.txt").write_text("old")
@@ -71,9 +74,16 @@ def test_commands_report_the_files_they_create_or_modify(tools, tmp_path):
 
     outside = tmp_path / "project"
     outside.mkdir()
-    elsewhere = execute(
-        tools, Action(tool="run_command", content="printf x > a.txt", path=str(outside)), "outside"
+    request = ToolInput(
+        run=RUN,
+        action=Action(
+            tool="run_command", content="printf x > a.txt", path=str(outside), sandbox=False
+        ),
+        operation_id="outside",
     )
+    request.approved_action_fingerprints = [approval_fingerprint(request)]
+    elsewhere = tools.execute(request)
+    assert elsewhere.success, elsewhere.content
     assert elsewhere.changed_paths == [str((outside / "a.txt").resolve())]
 
 

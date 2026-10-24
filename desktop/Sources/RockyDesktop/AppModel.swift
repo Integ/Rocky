@@ -29,6 +29,7 @@ final class AppModel: ObservableObject {
     private var pendingContract: GoalContract?
     private var selectionGeneration = 0
     private var selectionLoadGeneration = 0
+    private var eventCursor = 0
     private var isRefreshing = false
     private var hadConnectionError = false
     private var historyGeneration = 0
@@ -83,6 +84,7 @@ final class AppModel: ObservableObject {
         selectionGeneration += 1
         input = ""
         events = []
+        eventCursor = 0
         messages = []
         truncatedArtifacts = []
         artifactContents = [:]
@@ -140,11 +142,18 @@ final class AppModel: ObservableObject {
         selectionLoadGeneration += 1
         let loadGeneration = selectionLoadGeneration
         do {
-            let freshEvents = try await api.events(goal.id)
+            let freshEvents = try await api.events(goal.id, after: eventCursor)
             let freshMessages = try await api.messages(goal.id)
             guard generation == selectionGeneration, loadGeneration == selectionLoadGeneration, selectedID == goal.id else { return }
-            if events.last?.state.revision != freshEvents.last?.state.revision || goal.state.isTerminal { pendingCommand = nil }
-            events = freshEvents
+            let newEvents = freshEvents.filter { $0.event_id > eventCursor }
+            if let latest = newEvents.last, events.last?.state.revision != latest.state.revision {
+                pendingCommand = nil
+            }
+            if goal.state.isTerminal { pendingCommand = nil }
+            if let latest = newEvents.last {
+                events.append(contentsOf: newEvents)
+                eventCursor = latest.event_id
+            }
             messages = freshMessages
             // Only finished artifacts are presented as final output. Each file is
             // read from the service, never synthesized from planner explanations.

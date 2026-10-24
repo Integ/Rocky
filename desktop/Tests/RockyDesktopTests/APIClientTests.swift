@@ -187,6 +187,40 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(events.last?.event_id, 154)
     }
 
+    func testEventsStartAtSuppliedCursorAndPaginateOnlyNewHistory() async throws {
+        let goal = try JSONSerialization.jsonObject(with: Data(DesktopContractTests.goalJSON.utf8)) as! [String: Any]
+        let state = goal["state"]!
+        var requestedCursors: [Int] = []
+        InterceptingProtocol.handle = { request in
+            let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
+            let cursor = try XCTUnwrap(Int(try XCTUnwrap(items.first { $0.name == "after" }?.value)))
+            requestedCursors.append(cursor)
+            let ids: [Int]
+            switch cursor {
+            case 154: ids = Array(200...299)
+            case 299: ids = [410]
+            default: XCTFail("Unexpected cursor: \(cursor)"); ids = []
+            }
+            return (200, try JSONSerialization.data(withJSONObject: ids.map { ["event_id": $0, "state": state] }))
+        }
+
+        let events = try await api.events("goal-1", after: 154)
+
+        XCTAssertEqual(requestedCursors, [154, 299])
+        XCTAssertEqual(events.map(\.id), Array(200...299) + [410])
+    }
+
+    func testEventsWithNoDeltaStopAtSuppliedCursor() async throws {
+        InterceptingProtocol.handle = { request in
+            XCTAssertEqual(request.url?.query, "after=154")
+            return (200, Data("[]".utf8))
+        }
+
+        let events = try await api.events("goal-1", after: 154)
+
+        XCTAssertTrue(events.isEmpty)
+    }
+
     private static let providerJSON = #"""
     {
       "provider":"openai-compatible", "base_url":"https://openrouter.ai/api/v1",

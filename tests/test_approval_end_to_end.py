@@ -1,6 +1,7 @@
 """Exact-action approval through API/outbox, real tools and durable execution."""
 
 import asyncio
+import sys
 from uuid import uuid4
 
 import pytest
@@ -73,19 +74,35 @@ class ApprovalPlanner:
         )
 
 
-async def test_approved_shell_runs_once_and_persists_actual_results(temporal_env, tmp_path):
+@pytest.mark.parametrize(
+    ("sandbox", "approval_mode"),
+    [
+        pytest.param(
+            True,
+            "required",
+            marks=pytest.mark.skipif(
+                sys.platform != "darwin", reason="Seatbelt execution requires macOS"
+            ),
+        ),
+        (False, "trusted"),
+    ],
+)
+async def test_approved_shell_runs_once_and_persists_actual_results(
+    temporal_env, tmp_path, sandbox, approval_mode
+):
     settings = Settings(
         auth_mode="token",
         api_token="approval-owner-token",
         database_url=f"sqlite:///{tmp_path}/approval.db",
         workspace_root=tmp_path / "workspaces",
         task_queue="approval-end-to-end-" + uuid4().hex,
-        approval_mode="required",
+        approval_mode=approval_mode,
     )
     store = Store(settings.database_url)
     tools = WorkspaceTools(settings)
     command = Action(
         tool="run_command",
+        sandbox=sandbox,
         content="printf 'once\\n' >> invocations.txt; printf 'verified report\\n' > report.md; cat invocations.txt",
     )
     planner = ApprovalPlanner(command)
@@ -130,6 +147,10 @@ async def test_approved_shell_runs_once_and_persists_actual_results(temporal_env
                 assert not counter.exists()
                 assert len(planner.plans) == 1
                 assert pending["action"]["content"] == command.content
+                assert pending["action"]["sandbox"] is sandbox
+                if not sandbox:
+                    assert "outside Seatbelt" in pending["reason"]
+                    assert pending["command_prefix"] is None
                 assert (
                     api.post(
                         f"/goals/{goal_id}/approve", json={"fingerprint": pending["fingerprint"]}

@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import tempfile
+import uuid
 from contextlib import contextmanager
 from http.cookiejar import Cookie, CookieJar
 from pathlib import Path
@@ -49,6 +50,12 @@ _METHOD = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+\Z")
 
 class HTTPToolError(ValueError):
     """A user-facing failure which never includes credentials or request bodies."""
+
+
+def _check_control_port(url: httpx.URL, blocked_ports: tuple[int, ...]) -> None:
+    port = url.port if url.port is not None else {"http": 80, "https": 443}.get(url.scheme)
+    if port in blocked_ports:
+        raise HTTPToolError("HTTP access to Rocky's control service ports is forbidden")
 
 
 def _regular_private(descriptor: int) -> None:
@@ -237,6 +244,8 @@ def request_http(
     session_directory: Path,
     *,
     download_path: Path | None = None,
+    download_directory_fd: int | None = None,
+    blocked_ports: tuple[int, ...] = (),
 ) -> dict:
     """Send HTTP(S), retaining named cookies privately across worker restarts.
 
@@ -245,6 +254,11 @@ def request_http(
     Inline bodies stop at 1 MB and previews stop at 16,000 characters. Downloads
     stream the complete body to an atomic file without that inline size limit.
     `sha256` and `bytes_received` cover the bytes actually retrieved.
+    An open download_directory_fd pins the validated destination directory;
+    downloads then use only the filename from download_path and descriptor-
+    relative filesystem operations. The caller retains ownership of the fd.
+    blocked_ports protects worker control services before opening a session,
+    and is also enforced before dispatching every redirect request.
     """
     method, session_name, timeout, redirects, request = _request_options(options)
     if (
@@ -257,9 +271,20 @@ def request_http(
         parsed = httpx.URL(url)
         if parsed.scheme not in {"http", "https"} or not parsed.host:
             raise HTTPToolError("HTTP requests require an http:// or https:// URL")
+        _check_control_port(parsed, blocked_ports)
         with _session(Path(session_directory), session_name) as jar:
             return asyncio.run(
-                _send_http(parsed, method, request, jar, timeout, redirects, download_path)
+                _send_http(
+                    parsed,
+                    method,
+                    request,
+                    jar,
+                    timeout,
+                    redirects,
+                    download_path,
+                    download_directory_fd,
+                    blocked_ports,
+                )
             )
     except HTTPToolError:
         raise
@@ -273,8 +298,19 @@ def request_http(
         raise HTTPToolError("HTTP request options or private session storage are invalid") from None
 
 
-async def _send_http(parsed, method, request, jar, timeout, redirects, download_path):
+async def _send_http(
+    parsed,
+    method,
+    request,
+    jar,
+    timeout,
+    redirects,
+    download_path,
+    download_directory_fd=None,
+    blocked_ports=(),
+):
     async def strip_redirect_credentials(outgoing):
+        _check_control_port(outgoing.url, blocked_ports)
         if (outgoing.url.scheme, outgoing.url.host, outgoing.url.port) != (
             parsed.scheme,
             parsed.host,
@@ -313,11 +349,25 @@ async def _send_http(parsed, method, request, jar, timeout, redirects, download_
                 try:
                     if download_path is not None:
                         download_path = Path(download_path)
-                        download_path.parent.mkdir(parents=True, exist_ok=True)
-                        descriptor, temporary = tempfile.mkstemp(
-                            prefix=".rocky-http-", dir=download_path.parent
-                        )
-                        output = os.fdopen(descriptor, "wb")
+                        if download_directory_fd is None:
+                            download_path.parent.mkdir(parents=True, exist_ok=True)
+                            descriptor, temporary = tempfile.mkstemp(
+                                prefix=".rocky-http-", dir=download_path.parent
+                            )
+                        else:
+                            temporary_name = ".rocky-http-" + uuid.uuid4().hex
+                            descriptor = os.open(
+                                temporary_name,
+                                os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_WRONLY,
+                                0o600,
+                                dir_fd=download_directory_fd,
+                            )
+                            temporary = temporary_name
+                        try:
+                            output = os.fdopen(descriptor, "wb")
+                        except BaseException:
+                            os.close(descriptor)
+                            raise
                     async for chunk in response.aiter_bytes():
                         if output is None and size + len(chunk) > MAX_INLINE_BYTES:
                             chunk = chunk[: MAX_INLINE_BYTES - size]
@@ -358,12 +408,26 @@ async def _send_http(parsed, method, request, jar, timeout, redirects, download_
                         os.fsync(output.fileno())
                         output.close()
                         output = None
-                        os.replace(temporary, download_path)
+                        if download_directory_fd is None:
+                            os.replace(temporary, download_path)
+                        else:
+                            os.replace(
+                                temporary,
+                                download_path.name,
+                                src_dir_fd=download_directory_fd,
+                                dst_dir_fd=download_directory_fd,
+                            )
+                            os.fsync(download_directory_fd)
                         temporary = None
                         result["downloaded"] = True
                     return result
                 finally:
-                    if output is not None:
-                        output.close()
-                    if temporary is not None:
-                        os.unlink(temporary)
+                    try:
+                        if output is not None:
+                            output.close()
+                    finally:
+                        if temporary is not None:
+                            try:
+                                os.unlink(temporary, dir_fd=download_directory_fd)
+                            except FileNotFoundError:
+                                pass

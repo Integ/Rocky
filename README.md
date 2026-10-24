@@ -126,13 +126,19 @@ Compose 显式使用 `ROCKY_AUTH_MODE=token`，因为容器内请求来自容器
 }
 ```
 
-默认 `ROCKY_TOOL_ACCESS=full`。完整权限模式提供 `read_file`、`write_file`、`append_file`、`edit_file`、`list_files`、`fetch_url`、`http_request` 和 `run_command`；允许任意 HTTP/HTTPS 地址、私网、本机端口、重定向、POST 表单/JSON、认证请求及登录 Cookie 会话。旧任务中保存的 `allowed_tools` / `allowed_domains` 不再限制执行。
+默认 `ROCKY_TOOL_ACCESS=full`。完整权限模式提供 `read_file`、`write_file`、`append_file`、`edit_file`、`list_files`、`fetch_url`、`http_request` 和 `run_command`；支持 HTTP/HTTPS 地址、私网、本机服务、重定向、POST 表单/JSON、认证请求及登录 Cookie 会话，下述 Rocky 控制端口除外。旧任务中保存的 `allowed_tools` / `allowed_domains` 不再限制执行。
 
-工具以当前系统用户身份运行，可使用绝对路径、隐藏文件和 Shell。操作系统的文件权限、macOS 隐私授权及网站的验证码/MFA 仍按各自机制处理。产物相对路径仅用于结果核验和导出，不限制其他文件访问。
+Python 文件工具可使用绝对路径和隐藏文件，但包括 `full` 模式在内，一律禁止访问工作区根目录中的其他任务和私有 `.rocky/` 控制目录；路径遍历、符号链接和硬链接也不能绕过限制。读取、写入、追加、编辑、目录列表、HTTP 下载目标及验收文件读取都遵守此边界。工作区之外的普通文件仍按当前用户的操作系统权限访问。产物相对路径用于结果核验和导出。
+
+macOS 上的 `run_command` 默认通过 `/usr/bin/sandbox-exec -p <按 goal 生成的 SBPL profile>` 执行。命令只能写当前任务目录，不能读写其他任务或 `.rocky/`；临时文件、Python/uv/pip/npm 缓存位于任务内的 `.rocky-sandbox/`，因此 `uv`、`git`、`python` 可正常创建项目、虚拟环境及缓存。子进程和脱离原进程组的后台作业继承同一 Seatbelt 限制。其他普通文件可读，网络访问继续开放；此机制提供文件及进程隔离，不提供网络隔离或资源配额。非 macOS、缺少 Seatbelt 或系统拒绝加载 profile 时，命令执行失败，不会自动降级为无沙箱执行。
+
+后台服务的 Rocky/Temporal 及常见 API 凭据环境变量不会传给沙箱命令，Python/uv 也不会继承后台服务的虚拟环境配置。配置中的凭据文件、SQLite 数据库及其 WAL/SHM/回滚日志受到文件边界保护；文件工具也不能改写正在运行的 Rocky 代码或 Python 环境。命令和 HTTP 工具（包括重定向）不能连接配置的 Rocky API、Temporal 目标端口，防止任务调用控制接口自行审批。这些端口在所有目标地址上保留，普通外部服务若使用相同端口也会被阻止。
 
 `http_request` 的 `content` 为 JSON 配置，例如 `{"method":"POST","data":{"username":"…","password":"…"},"session":"platform"}`；后续请求使用相同 `session` 自动携带 Cookie。可用 `headers` / `json` / `body` / `auth` 配置其他认证方式，`path` 保存完整响应文件。会话按任务和名称隔离，私有持久存储，重启后可复用。`run_command` 的 `content` 为 Shell 命令，`path` 可指定工作目录。单次请求或命令最多 30 秒，较长计算可作为后台作业运行并在后续步骤查看文件结果。
 
 `ROCKY_APPROVAL_MODE=required` 是默认值：每条 Shell 命令，以及 GET/HEAD/OPTIONS 以外的 HTTP 请求，在执行前保存具体操作并等待用户批准。审批绑定任务、操作 ID 和完整参数，普通唤醒消息或网页中的“已批准”不会授权。原生客户端提供审批按钮；API 使用 `POST /goals/{id}/approve` 和 `{"fingerprint":"当前 pending_approval.fingerprint"}`。待批准的简单命令会附带同类前缀（如 `uv run pytest`），客户端的“本任务内批准同类命令”或 API 的 `{"fingerprint":"…","scope":"task"}` 会让本任务后续以该前缀开头的简单命令直接执行。`ROCKY_AUTO_APPROVE_COMMANDS=ls,git status,uv run pytest` 可配置对所有任务生效的前缀白名单。含 `;`、`&&`、`|`、重定向、`$`、反引号或换行的命令永远需要逐条批准，`sudo`/`env`/`xargs` 等包装命令和 `python -c` 这类内联代码不会提供同类批准。明确接受命令自行执行的单机所有者可配置 `ROCKY_APPROVAL_MODE=trusted`；完整工具权限本身不会关闭审批。此门禁按工具/方法分类，不能识别具有副作用的 GET 接口，文件写入仍按完整文件权限执行。
+
+浏览器自动化或需要写工作区外部文件的特殊命令可设置 `{"tool":"run_command","content":"…","path":"…","sandbox":false}`。这一出口始终需要用户逐次批准完整操作，即使使用 `trusted`、全局前缀白名单或本任务同类授权也不能跳过；审批界面会明确提示以当前用户权限在 Seatbelt 外运行。无沙箱命令不再具有任务文件隔离保证。更改命令、工作目录或 `sandbox` 值都会使原审批失效。
 
 需要复用旧版受限部署时，可显式设置 `ROCKY_TOOL_ACCESS=scoped`；仅在该模式下恢复原工具/域名白名单和工作目录约束。macOS 应用固定使用完整权限。
 
@@ -160,9 +166,11 @@ Compose 显式使用 `ROCKY_AUTH_MODE=token`，因为容器内请求来自容器
 
 `GET /goals/{id}/conversation` 查看完整对话，`GET /goals/{id}/steps?after=0&limit=100` 查看阶段投影，`GET /goals/{id}/execution-events?after=0&limit=100` 查看追加式执行事件（输入、输出、时间和耗时）。`steps` 的进行中记录会更新；`execution-events` 保留每次状态转换，重复投递不会重复追加。任务知识仍通过 `GET /goals/{id}/knowledge`、`PUT /goals/{id}/knowledge` 管理。
 
+`GET /goals/{id}/events?after=0` 返回界面时间线投影，每页最多 100 条；后续请求将 `after` 设为上一页最后的 `event_id`。桌面端在当前选择的任务内保留事件和游标，每 3 秒仅追加新事件，切换任务时重新加载。新阶段的时间线事件仅保存状态、用量、产物、阶段元数据和最新一步的观察摘要（并行批次保留该步所有观察），不重复保存阶段输入/输出或交接摘要；完整状态仍保存在目标记录中，完整工具结果仍在执行记录和消息表中。读取旧事件时也会生成相同的精简投影，但不会重写历史数据；旧版无阶段记录的事件仍保留原始观察供对话和记忆检索。
+
 旧数据库启动时自动创建新表，已保存的任务记录仍可读取。此 v0.1 版本不再支持回放改造前尚未完成的 Temporal 执行历史；升级前应结束旧 worker 中仍在运行、休眠或阻塞的任务，升级后按原目标重新提交。不提供旧执行历史的自动迁移，已有记录与工作区文件会保留。架构与参考资料见 [执行架构](docs/architecture.md)。
 
-长期任务会在完整一轮之后自动滚动执行历史：最多每 8 轮一次，或历史达到 8 MB / 1500 个事件时提前滚动。任务 ID、累计用量、产物、取消/唤醒和去重状态会带入后续执行。工具完整输出保留在 SQL 中，重复快照只携带最近 6 条、每条最多 2000 字符的观察摘要。worker 另每 30 秒核对引擎终态，避免任务已失败但界面仍显示“正在工作”。引擎已经强制终止的旧任务不会因升级而自动重启。
+长期任务会在完整一轮之后自动滚动执行历史：最多每 8 轮一次，或历史达到 8 MB / 1500 个事件时提前滚动。任务 ID、累计用量、产物、取消/唤醒和去重状态会带入后续执行。工具完整输出保留在 SQL 中，工作流检查点只携带最近 6 条、每条最多 2000 字符的观察摘要；SQL 时间线投影进一步仅保留最新一步。worker 另每 30 秒核对引擎终态，避免任务已失败但界面仍显示“正在工作”。引擎已经强制终止的旧任务不会因升级而自动重启。
 
 ## 开发与验证
 

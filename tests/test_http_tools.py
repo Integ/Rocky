@@ -7,6 +7,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
+import httpx
 import pytest
 
 from rocky.http_tools import HTTPToolError, request_http
@@ -306,3 +307,81 @@ def test_session_file_rejects_unsafe_permissions(http_server, tmp_path):
     next(directory.glob("*.json")).chmod(0o644)
     with pytest.raises(HTTPToolError, match="private regular"):
         request_http(http_server + "/protected", {}, directory)
+
+
+@pytest.mark.parametrize(
+    "url,blocked_ports",
+    [
+        ("http://127.0.0.1:18741/goals", (18741,)),
+        ("http://localhost:7233/temporal", (7233,)),
+        ("http://[::1]:18741/goals", (18741,)),
+        ("http://external.example:18741/goals", (18741,)),
+        ("http://127.0.0.1/goals", (80,)),
+        ("https://localhost/goals", (443,)),
+    ],
+)
+def test_control_service_ports_are_blocked_before_session_or_dispatch(
+    tmp_path, monkeypatch, url, blocked_ports
+):
+    def must_not_open_session(*_args):
+        pytest.fail("A blocked URL cannot open cookie storage or reach the network")
+
+    monkeypatch.setattr("rocky.http_tools._session", must_not_open_session)
+    with pytest.raises(HTTPToolError, match="control service ports") as error:
+        request_http(
+            url + "?secret-query",
+            {"method": "POST", "body": "secret-body"},
+            tmp_path / "sessions",
+            blocked_ports=blocked_ports,
+        )
+    assert "secret" not in str(error.value)
+    assert not (tmp_path / "sessions").exists()
+
+
+@pytest.mark.parametrize("with_credentials", [False, True])
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_every_redirect_blocks_control_ports_before_target_dispatch(
+    tmp_path, monkeypatch, with_credentials, scheme
+):
+    seen = []
+    client_class = httpx.AsyncClient
+
+    def respond(request):
+        seen.append(str(request.url))
+        if request.url.path == "/start":
+            return httpx.Response(302, headers={"Location": "/second-hop"})
+        if request.url.path == "/second-hop":
+            return httpx.Response(
+                302,
+                headers={"Location": f"{scheme}://127.0.0.1:18741/approve?secret-query"},
+            )
+        pytest.fail("A blocked redirect target must never receive a request")
+
+    def mocked_client(**kwargs):
+        return client_class(transport=httpx.MockTransport(respond), **kwargs)
+
+    monkeypatch.setattr("rocky.http_tools.httpx.AsyncClient", mocked_client)
+    options = {"headers": {"Authorization": "Bearer secret-token"}} if with_credentials else {}
+    with pytest.raises(HTTPToolError, match="control service ports") as error:
+        request_http(
+            "http://ordinary.example:23456/start",
+            options,
+            tmp_path / "sessions",
+            blocked_ports=(18741, 7233),
+        )
+    assert seen == [
+        "http://ordinary.example:23456/start",
+        "http://ordinary.example:23456/second-hop",
+    ]
+    assert "secret" not in str(error.value)
+
+
+def test_unrelated_http_custom_ports_remain_available(http_server, tmp_path):
+    result = request_http(
+        http_server + "/echo",
+        {},
+        tmp_path / "sessions",
+        blocked_ports=(18741, 7233),
+    )
+    assert result["status_code"] == 200
+    assert json.loads(result["text"])["method"] == "GET"

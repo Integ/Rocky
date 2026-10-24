@@ -31,6 +31,41 @@ from rocky.models import GoalContract, GoalView, RunState
 
 TERMINAL_STATUSES = ("succeeded", "failed", "cancelled", "budget_exhausted", "deadline_exceeded")
 LEGACY_BUDGET_FIELDS = {"max_steps", "max_model_calls", "max_output_tokens", "deadline_seconds"}
+EVENT_STATE_FIELDS = (
+    "goal_id",
+    "revision",
+    "status",
+    "reason",
+    "steps",
+    "model_calls",
+    "input_tokens",
+    "output_tokens",
+    "artifacts",
+    "wake_at",
+    "updated_at",
+    "cycle",
+    "phase",
+)
+EVENT_STEP_FIELDS = ("step_id", "cycle", "phase", "status", "started_at", "completed_at")
+
+
+def _event_state(data: dict, *, preserve_legacy_observations: bool = False) -> dict:
+    """Project the UI timeline without duplicating phase payloads or working memory."""
+    projected = {key: data[key] for key in EVENT_STATE_FIELDS if key in data}
+    step = data.get("execution_step")
+    projected["execution_step"] = (
+        {key: step[key] for key in EVENT_STEP_FIELDS if key in step} if step else None
+    )
+    observations = data.get("observations", [])
+    # Pre-harness state has no separate phase messages. Keep its evidence on
+    # disk for conversation/recall, but serve the same compact UI projection.
+    if observations and not (preserve_legacy_observations and not step):
+        latest_step = observations[-1]["step"]
+        # A parallel batch produces several results at the same step. The UI
+        # needs every member, not only the final observation in the batch.
+        observations = [item for item in observations if item["step"] == latest_step]
+    projected["observations"] = observations
+    return projected
 
 
 class MemoryConflictError(ValueError):
@@ -92,6 +127,8 @@ class CommandRow(Base):
 
 
 class EventRow(Base):
+    """Compact timeline projections; full state and phase records live separately."""
+
     __tablename__ = "events"
     event_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     goal_id: Mapped[str] = mapped_column(String(128), index=True)
@@ -369,7 +406,12 @@ class Store:
             )
             if not changed.rowcount:
                 return False
-            session.add(EventRow(goal_id=goal_id, state=data))
+            session.add(
+                EventRow(
+                    goal_id=goal_id,
+                    state=_event_state(data, preserve_legacy_observations=True),
+                )
+            )
             if state.execution_step:
                 self._save_execution_step(session, goal_id, data["execution_step"], state.revision)
             return True
@@ -393,7 +435,12 @@ class Store:
                 .values(state=data, revision=state.revision)
             )
             if changed.rowcount:
-                session.add(EventRow(goal_id=state.goal_id, state=data))
+                session.add(
+                    EventRow(
+                        goal_id=state.goal_id,
+                        state=_event_state(data, preserve_legacy_observations=True),
+                    )
+                )
                 if record := data.get("execution_step"):
                     self._save_execution_step(session, state.goal_id, record, state.revision)
             elif session.get(GoalRow, state.goal_id) is None:
@@ -582,7 +629,10 @@ class Store:
                     or scope not in {"", "task"}
                 ):
                     raise ValueError("Approval must match the task's current pending action")
-                if scope == "task" and not pending.get("command_prefix"):
+                if scope == "task" and (
+                    not pending.get("command_prefix")
+                    or not pending.get("action", {}).get("sandbox", True)
+                ):
                     raise ValueError(
                         "This action can only be approved once; it has no reusable command prefix"
                     )
@@ -1134,7 +1184,9 @@ class Store:
     def events(self, goal_id: str, after: int = 0, limit: int = 100) -> list[dict]:
         with self.sessions() as session:
             return [
-                dict(event_id=row.event_id, state=json.loads(json.dumps(row.state)))
+                # Also compact historical full snapshots without rewriting
+                # evidence that legacy conversation/recall may still need.
+                dict(event_id=row.event_id, state=_event_state(row.state))
                 for row in session.scalars(
                     select(EventRow)
                     .where(EventRow.goal_id == goal_id, EventRow.event_id > after)
