@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from openai_stream import with_stream
 from pydantic import BaseModel
 
 from rocky import planner as planner_module
@@ -65,7 +66,9 @@ def completed(parsed, *, input_tokens=123, output_tokens=45):
 
 
 def fake_client(response):
-    return SimpleNamespace(responses=SimpleNamespace(parse=AsyncMock(return_value=response)))
+    return SimpleNamespace(
+        responses=with_stream(SimpleNamespace(parse=AsyncMock(return_value=response)))
+    )
 
 
 async def test_plan_separates_untrusted_data_and_returns_usage():
@@ -254,7 +257,7 @@ async def test_plan_receives_actual_remaining_budget_for_delivery_and_review(unl
     client = fake_client(completed(Decision(kind="blocked", reason="Need source material")))
     await OpenAIPlanner(Settings(), client=client).plan(request)
     payload = json.loads(client.responses.parse.await_args.kwargs["input"][1]["content"])
-    assert payload["execution"]["budget_remaining"] == (
+    assert payload["budget_remaining"] == (
         {"steps": None, "model_calls": None, "tokens": None, "seconds": None}
         if unlimited
         else {"steps": 12, "model_calls": 22, "tokens": 894923, "seconds": None}
@@ -269,7 +272,7 @@ async def test_plan_receives_remaining_wall_clock_seconds(offset, expected):
     await OpenAIPlanner(Settings(), client=client).plan(request)
     payload = json.loads(client.responses.parse.await_args.kwargs["input"][1]["content"])
     low, high = expected
-    assert low <= payload["execution"]["budget_remaining"]["seconds"] <= high
+    assert low <= payload["budget_remaining"]["seconds"] <= high
 
 
 def test_response_schema_is_serialized_once_per_class(monkeypatch):

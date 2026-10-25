@@ -224,6 +224,8 @@ class RunState(Model):
     model_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    # Part of input_tokens served from the provider's prompt cache.
+    cached_input_tokens: int = 0
     observations: list[Observation] = Field(default_factory=list)
     artifacts: list[Artifact] = Field(default_factory=list)
     wake_at: str | None = None
@@ -251,6 +253,8 @@ class PlanResult(Model):
     decision: Decision
     input_tokens: int = 0
     output_tokens: int = 0
+    # Part of input_tokens served from the provider's prompt cache.
+    cached_input_tokens: int = 0
 
 
 class ToolInput(Model):
@@ -290,6 +294,8 @@ class VerificationResult(Model):
     claims: list[dict[str, Any]] = Field(default_factory=list, max_length=90)
     input_tokens: int = 0
     output_tokens: int = 0
+    # Part of input_tokens served from the provider's prompt cache.
+    cached_input_tokens: int = 0
 
 
 class PhaseInput(Model):

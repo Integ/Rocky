@@ -692,6 +692,7 @@ async def _run_task(
         "model_calls": state.model_calls,
         "input_tokens": state.input_tokens,
         "output_tokens": state.output_tokens,
+        "cached_input_tokens": state.cached_input_tokens,
         "tokens": state.input_tokens + state.output_tokens,
         "wall_seconds": round(wall_seconds, 2),
         "approvals": result.approvals,
@@ -783,6 +784,7 @@ METRICS = (
     "steps",
     "model_calls",
     "tokens",
+    "cached_input_tokens",
     "wall_seconds",
     "approvals",
     "tool_calls",
@@ -802,7 +804,8 @@ def _aggregate(runs: list[dict]) -> dict:
     }
     measured = [run for run in runs if "steps" in run]
     for name in METRICS:
-        values = [run[name] for run in measured]
+        # Records from older versions may lack metrics added since.
+        values = [run[name] for run in measured if name in run]
         summary[name] = round(statistics.fmean(values), 2) if values else None
     return summary
 
@@ -871,10 +874,21 @@ def _change(before: Any, after: Any) -> str:
     return text
 
 
+def _model_identity(report: dict) -> tuple:
+    model = report.get("model") or {}
+    return tuple(model.get(key) for key in ("provider", "base_url", "model", "reasoning_effort"))
+
+
 def compare_reports(baseline: dict, current: dict) -> str:
     """Per-task change in success rate and mean cost between two reports."""
     columns = ("success_rate", "steps", "tokens", "wall_seconds", "approvals")
-    lines = [
+    lines = []
+    if _model_identity(baseline) != _model_identity(current):
+        lines += [
+            "Warning: the reports used different models; differences are not comparable.",
+            "",
+        ]
+    lines += [
         "| Task | " + " | ".join(columns) + " |",
         "|---|" + "---|" * len(columns),
     ]
@@ -893,3 +907,72 @@ def compare_reports(baseline: dict, current: dict) -> str:
             + " |"
         )
     return "\n".join(lines)
+
+
+def baseline_summary(report: dict) -> dict:
+    """What a committed baseline keeps: run metadata and the summary, without
+    per-run records, check output or workspace paths."""
+    return {key: value for key, value in report.items() if key != "runs"}
+
+
+def find_regressions(
+    baseline: dict,
+    current: dict,
+    *,
+    max_success_drop: float = 0.15,
+    max_token_increase: float = 0.25,
+) -> list[str]:
+    """Reasons the current report is worse than the baseline; empty when it is not.
+
+    Success may fall by up to max_success_drop (absolute) and mean tokens per
+    passed run may grow by up to max_token_increase (relative) before failing,
+    because single runs of a live model vary. Any rise in the false-success
+    rate fails: Rocky claiming unverified work is never noise to tolerate.
+    """
+    problems = []
+    if _model_identity(baseline) != _model_identity(current):
+        problems.append("The baseline was recorded with a different model or provider.")
+    before_tasks = set(baseline["summary"]["by_task"])
+    after_tasks = set(current["summary"]["by_task"])
+    if before_tasks != after_tasks:
+        problems.append(
+            "The task sets differ: "
+            + ", ".join(
+                f"{label} {', '.join(sorted(names))}"
+                for label, names in (
+                    ("missing", before_tasks - after_tasks),
+                    ("new", after_tasks - before_tasks),
+                )
+                if names
+            )
+            + "."
+        )
+    before, after = baseline["summary"]["overall"], current["summary"]["overall"]
+    if after.get("errors"):
+        problems.append(f"{after['errors']} runs ended in a runner error.")
+    if before.get("success_rate") is not None and after.get("success_rate") is not None:
+        drop = before["success_rate"] - after["success_rate"]
+        if drop > max_success_drop + 1e-9:
+            problems.append(
+                f"Success rate fell from {_number(before['success_rate'])} "
+                f"to {_number(after['success_rate'])}."
+            )
+
+    def false_rate(summary: dict) -> float:
+        return summary.get("false_successes", 0) / summary["runs"] if summary.get("runs") else 0.0
+
+    if false_rate(after) > false_rate(before) + 1e-9:
+        problems.append(
+            f"False successes rose from {before.get('false_successes', 0)}/{before.get('runs', 0)} "
+            f"to {after.get('false_successes', 0)}/{after.get('runs', 0)}."
+        )
+    before_tokens = baseline["summary"]["passed_runs"].get("tokens")
+    after_tokens = current["summary"]["passed_runs"].get("tokens")
+    if before_tokens and after_tokens is not None:
+        growth = (after_tokens - before_tokens) / before_tokens
+        if growth > max_token_increase + 1e-9:
+            problems.append(
+                f"Mean tokens per passed run rose {growth:+.0%} "
+                f"({_number(before_tokens)} → {_number(after_tokens)})."
+            )
+    return problems

@@ -187,6 +187,61 @@ final class TaskHistoryTests: XCTestCase {
     }
 
     @MainActor
+    func testUnchangedPollKeepsHistoryAndOnlyAppliedListsAreRevalidated() async throws {
+        let (model, session) = connectedModel()
+        defer { session.invalidateAndCancel(); HistoryProtocol.handle = nil }
+        let completed = try goal("completed", status: "succeeded")
+        let payload = try JSONEncoder().encode([completed])
+        var validators: [String?] = []
+        HistoryProtocol.handle = { request, reply in
+            guard request.url?.path == "/goals" else { return reply(200, Self.settingsJSON) }
+            let archived = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!.first { $0.name == "archived" }?.value == "true"
+            let validator = request.value(forHTTPHeaderField: "If-None-Match")
+            if !archived { validators.append(validator) }
+            if validator == HistoryProtocol.tag(archived) { reply(304, Data()) }
+            else { reply(200, archived ? Data("[]".utf8) : payload) }
+        }
+        await model.refresh()
+        XCTAssertEqual(model.goals, [completed])
+        await model.refresh()
+        XCTAssertEqual(model.goals, [completed])
+        XCTAssertTrue(model.isConnected)
+        XCTAssertEqual(validators, [nil, HistoryProtocol.tag(false)])
+    }
+
+    @MainActor
+    func testDiscardedRefreshDoesNotCommitItsTag() async throws {
+        let (model, session) = connectedModel()
+        defer { session.invalidateAndCancel(); HistoryProtocol.handle = nil }
+        let completed = try goal("completed", status: "succeeded")
+        model.goals = [completed]
+        let started = expectation(description: "Archive is pending")
+        var respond: ((Int, Data) -> Void)?
+        var validators: [String?] = []
+        HistoryProtocol.handle = { request, reply in
+            if request.url?.path.hasSuffix("/archive") == true { respond = reply; started.fulfill() }
+            else if request.url?.path == "/provider-settings" { reply(200, Self.settingsJSON) }
+            else {
+                if request.url?.query?.contains("archived=false") == true {
+                    validators.append(request.value(forHTTPHeaderField: "If-None-Match"))
+                }
+                reply(200, Data("[]".utf8))
+            }
+        }
+        let action = Task { await model.archive(completed, archived: true) }
+        await fulfillment(of: [started], timeout: 2)
+        await model.refresh()
+        var archived = completed
+        archived.archived = true
+        try XCTUnwrap(respond)(200, JSONEncoder().encode(archived))
+        await action.value
+        await model.refresh()
+        // The first response was discarded, so the next poll must fetch the list again.
+        XCTAssertEqual(validators, [nil, nil])
+        XCTAssertTrue(model.goals.isEmpty)
+    }
+
+    @MainActor
     private func connectedModel() -> (AppModel, URLSession) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [HistoryProtocol.self]
@@ -219,11 +274,18 @@ private final class HistoryProtocol: URLProtocol {
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    /// Every goal list is served under a fixed per-filter validator.
+    static func tag(_ archived: Bool) -> String { #""list-\#(archived)""# }
+
     override func startLoading() {
         guard let handler = Self.handle else { return }
         handler(request) { [weak self] status, data in
             guard let self else { return }
-            let response = HTTPURLResponse(url: self.request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            var headers = ["Content-Type": "application/json"]
+            if self.request.url?.path == "/goals" {
+                headers["ETag"] = Self.tag(self.request.url?.query?.contains("archived=true") == true)
+            }
+            let response = HTTPURLResponse(url: self.request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!
             self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             self.client?.urlProtocol(self, didLoad: data)
             self.client?.urlProtocolDidFinishLoading(self)

@@ -54,6 +54,54 @@ uv run python scripts/run_evals.py compare 基线/report.json 新的/report.json
 
 `uv run python scripts/run_evals.py list` 列出全部任务。
 
+### 基线与回归门槛
+
+把一次满意的运行缩减为可提交的基线（只保留元数据和汇总，不含逐条记录与工作区路径）：
+
+```bash
+uv run python scripts/run_evals.py baseline 某次运行/report.json -o evals/baselines/gpt-4.1-mini.json
+```
+
+`run --baseline` 或 `compare` 加上 `--fail-on-regression` 后，出现以下任一情况即以退出码 1 结束：
+
+- 基线与本次使用的模型、提供方、API 地址或推理强度不同，或任务集合不同（此时差异没有可比性）；
+- 有运行以评测程序错误结束；
+- 总体成功率下降超过 `--max-success-drop`（默认 0.15，绝对值）；
+- 虚假成功的比例有任何上升；
+- 通过运行的平均 token 增加超过 `--max-token-increase`（默认 0.25，相对值）。
+
+成功率和 token 设有容差，是因为真实模型单次运行波动较大；虚假成功不设容差。
+
+仓库中的基线：
+
+| 文件 | 模型 | 结果 | 说明 |
+|---|---|---|---|
+| `evals/baselines/auto-beam-free.json` | `auto/beam-free`，经本机 OpenAI 兼容网关 `http://127.0.0.1:3425/v1` | 7/10 通过，虚假成功 0 | 每个任务 1 次，`--approvals auto`，2026-10-25 |
+
+该基线只记录单次运行，波动较大：重复运行时个别任务会在通过与 token 用尽之间变化。
+它依赖本机网关，因此只能在本机作为门槛使用，不能用于 GitHub Actions；在 CI 中做门槛需要另外录制使用公开 API 地址的基线。
+在本机对比：
+
+```bash
+ROCKY_EVAL_API_KEY=not-required uv run python scripts/run_evals.py run --approvals auto \
+  --provider openai-compatible --base-url http://127.0.0.1:3425/v1 --model auto/beam-free \
+  --baseline evals/baselines/auto-beam-free.json --fail-on-regression
+```
+
+### 在 GitHub Actions 中运行
+
+`.github/workflows/evals.yml` 只能手动触发（Actions → Evals → Run workflow），不会定时运行，
+因为每次运行都会调用真实模型并产生费用。它在 macOS 运行器上执行，使 Shell 命令与应用一样运行在
+Seatbelt 沙箱中，并且自动批准审批（`--approvals auto`）。
+
+- 在仓库 Secrets 中配置 `OPENAI_API_KEY`，或配合 `provider` 输入配置 `ROCKY_EVAL_API_KEY`。
+- 可选输入：`provider`、`model`、`base_url`、`repeat`（默认 3）、`tasks`、`baseline`。
+  填写 `baseline` 时会按上面的门槛判定，回归则工作流失败。
+- 结果表格写入运行摘要；`report.json` 与 `runs.jsonl` 作为构件保留 30 天。
+
+评测程序在规划器取得密钥后，立即将 `OPENAI_API_KEY` 与 `ROCKY_EVAL_API_KEY` 从自身进程环境中移除。
+自动批准的命令（包括不经沙箱的命令）继承的是进程环境，因此看不到密钥。
+
 ### 审批策略（必选）
 
 `--approvals` 没有默认值，需要明确选择：
@@ -82,7 +130,7 @@ uv run python scripts/run_evals.py compare 基线/report.json 新的/report.json
 每次运行记录：
 
 - **结果**：`outcome`（终态，或 `blocked` / `approval_required` / `runner_timeout`），以及 `passed`、`false_success` 和每项检查的明细。
-- **用量**：步数 `steps`、模型调用 `model_calls`、输入/输出 `tokens`、墙钟时间 `wall_seconds`、审批次数 `approvals`。
+- **用量**：步数 `steps`、模型调用 `model_calls`、输入/输出 `tokens`（其中命中提示缓存的输入为 `cached_input_tokens`）、墙钟时间 `wall_seconds`、审批次数 `approvals`。
 - **执行过程**：工具调用次数及各工具分布、工具失败数、重复动作 `duplicate_actions`（与之前完全相同的动作）、
   等待次数、核验次数与失败数、规划错误、策略恢复次数 `recoveries`，以及规划、执行、核验各阶段耗时。
 

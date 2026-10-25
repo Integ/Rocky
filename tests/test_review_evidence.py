@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from openai_stream import with_stream
 
 from rocky.config import Settings
 from rocky.evidence import (
@@ -161,7 +162,9 @@ def fake_client():
         output=[],
         usage=SimpleNamespace(input_tokens=10, output_tokens=5),
     )
-    return SimpleNamespace(responses=SimpleNamespace(parse=AsyncMock(return_value=response)))
+    return SimpleNamespace(
+        responses=with_stream(SimpleNamespace(parse=AsyncMock(return_value=response)))
+    )
 
 
 def large_evidence():

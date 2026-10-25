@@ -5,7 +5,17 @@ struct APIClient {
     let token: String
     var session: URLSession = .shared
 
+    /// A server page and its validator. `nil` from a revalidated request means unchanged.
+    struct GoalList: Equatable {
+        var goals: [Goal]
+        var tag: String?
+    }
+
     private func rawRequest(_ path: String, method: String = "GET", body: Data? = nil, idempotencyKey: String? = nil, timeout: TimeInterval = 20) async throws -> Data {
+        try await send(path, method: method, body: body, idempotencyKey: idempotencyKey, timeout: timeout).0
+    }
+
+    private func send(_ path: String, method: String = "GET", body: Data? = nil, idempotencyKey: String? = nil, ifNoneMatch: String? = nil, timeout: TimeInterval = 20) async throws -> (Data, HTTPURLResponse) {
         guard let url = URL(string: path, relativeTo: baseURL) else { throw InputError.invalid("请求地址无效。") }
         var request = URLRequest(url: url)
         request.httpMethod = method
@@ -15,9 +25,10 @@ struct APIClient {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         if let idempotencyKey { request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key") }
+        if let ifNoneMatch { request.setValue(ifNoneMatch, forHTTPHeaderField: "If-None-Match") }
         let (data, response) = try await session.data(for: request)
         guard let response = response as? HTTPURLResponse else { throw InputError.invalid("本地服务未响应。") }
-        guard (200...299).contains(response.statusCode) else {
+        guard (200...299).contains(response.statusCode) || (response.statusCode == 304 && ifNoneMatch != nil) else {
             // Validation responses may contain submitted values, including credentials.
             // Never surface their body in the native UI or logs.
             let message: String
@@ -32,17 +43,23 @@ struct APIClient {
             }
             throw InputError.invalid(message)
         }
-        return data
+        return (data, response)
     }
 
-    func request<T: Decodable>(_ path: String, method: String = "GET", body: Data? = nil, idempotencyKey: String? = nil, timeout: TimeInterval = 20) async throws -> T {
-        let data = try await rawRequest(path, method: method, body: body, idempotencyKey: idempotencyKey, timeout: timeout)
+    private func decode<T: Decodable>(_ data: Data) throws -> T {
         do { return try JSONDecoder().decode(T.self, from: data) }
         catch { throw InputError.invalid("无法读取服务返回的数据，请更新应用后重试。") }
     }
 
-    func goals(archived: Bool = false) async throws -> [Goal] {
-        try await request("/goals?limit=100&archived=\(archived)")
+    func request<T: Decodable>(_ path: String, method: String = "GET", body: Data? = nil, idempotencyKey: String? = nil, timeout: TimeInterval = 20) async throws -> T {
+        try decode(try await rawRequest(path, method: method, body: body, idempotencyKey: idempotencyKey, timeout: timeout))
+    }
+
+    /// Polls send the previous tag; an unchanged list costs a bodiless 304 and returns nil.
+    func goalList(archived: Bool = false, ifNoneMatch tag: String? = nil) async throws -> GoalList? {
+        let (data, response) = try await send("/goals?limit=100&archived=\(archived)", ifNoneMatch: tag)
+        if response.statusCode == 304 { return nil }
+        return GoalList(goals: try decode(data), tag: response.value(forHTTPHeaderField: "ETag"))
     }
     func setArchived(_ id: String, archived: Bool) async throws -> Goal {
         try await request("/goals/\(id)/\(archived ? "archive" : "restore")", method: "POST")

@@ -1,6 +1,8 @@
 """The evaluation suite: task definitions, independent grading, metrics and the runner."""
 
+import importlib.util
 import json
+import os
 import re
 import shutil
 import sys
@@ -262,6 +264,129 @@ def test_reports_summarize_flag_false_successes_and_compare_runs():
     comparison = evaluation.compare_reports(baseline, current)
     assert "| fix-bug | 0.5 → 1 (+100%) | 15 → 6 (-60%) | 3000 → 1500 (-50%)" in comparison
     assert comparison.splitlines()[-1].startswith("| overall |")
+
+
+def gate_report(runs, model="gpt-4.1-mini"):
+    return evaluation.build_report(runs, {"model": {"model": model, "provider": None}})
+
+
+def test_baseline_keeps_summary_and_metadata_without_run_records():
+    report = gate_report([run_record("fix-bug", True, steps=10, tokens=2000)])
+    baseline = evaluation.baseline_summary(report)
+    assert "runs" not in baseline
+    assert baseline["summary"] == report["summary"] and baseline["model"] == report["model"]
+    # A trimmed baseline compares and gates exactly like the full report.
+    assert evaluation.compare_reports(baseline, report) == evaluation.compare_reports(
+        report, report
+    )
+    assert evaluation.find_regressions(baseline, report) == []
+
+
+def test_regressions_tolerate_noise_but_flag_real_losses():
+    baseline = gate_report(
+        [run_record(task, True, steps=10, tokens=2000) for task in ("a", "b", "c", "d")] * 2
+    )
+    # One failure in eight runs (-0.125) and +20% tokens are within tolerance.
+    noisy = gate_report(
+        [run_record(task, True, steps=10, tokens=2400) for task in ("a", "b", "c", "d")]
+        + [run_record(task, True, steps=10, tokens=2400) for task in ("a", "b", "c")]
+        + [run_record("d", False, status="failed", steps=10, tokens=2400)]
+    )
+    assert evaluation.find_regressions(baseline, noisy) == []
+
+    worse = gate_report(
+        [run_record(task, True, steps=10, tokens=3000) for task in ("a", "b")] * 2
+        + [run_record(task, False, status="failed", steps=10, tokens=3000) for task in ("c", "d")]
+        * 2
+    )
+    problems = evaluation.find_regressions(baseline, worse)
+    assert any("Success rate fell from 1 to 0.5" in item for item in problems)
+    assert any("Mean tokens per passed run rose +50%" in item for item in problems)
+    assert (
+        evaluation.find_regressions(baseline, worse, max_success_drop=0.6, max_token_increase=1)
+        == []
+    )
+
+
+def test_any_new_false_success_or_runner_error_fails_the_gate():
+    baseline = gate_report([run_record("a", True, steps=5, tokens=100)] * 4)
+    claimed = run_record("a", False, steps=5, tokens=100)  # status succeeded: a false success
+    broken = {
+        "task": "a",
+        "category": "data",
+        "attempt": 4,
+        "outcome": "error",
+        "passed": False,
+        "false_success": False,
+    }
+    current = gate_report([run_record("a", True, steps=5, tokens=100)] * 3 + [claimed])
+    assert any(
+        "False successes rose from 0/4 to 1/4" in item
+        for item in evaluation.find_regressions(baseline, current, max_success_drop=1)
+    )
+    current = gate_report([run_record("a", True, steps=5, tokens=100)] * 3 + [broken])
+    assert any(
+        "runner error" in item
+        for item in evaluation.find_regressions(baseline, current, max_success_drop=1)
+    )
+
+
+def test_gate_refuses_a_different_model_or_task_set():
+    baseline = gate_report([run_record("a", True, steps=5, tokens=100)])
+    other_model = gate_report([run_record("a", True, steps=5, tokens=100)], model="other")
+    subset = gate_report([run_record("b", True, steps=5, tokens=100)])
+    assert any(
+        "different model" in item for item in evaluation.find_regressions(baseline, other_model)
+    )
+    assert evaluation.compare_reports(baseline, other_model).startswith("Warning:")
+    assert any("missing a, new b" in item for item in evaluation.find_regressions(baseline, subset))
+
+
+def test_reports_from_before_cached_tokens_still_summarize():
+    record = run_record("a", True, steps=5, tokens=100)
+    assert "cached_input_tokens" not in record
+    summary = evaluation.build_report([record], {})["summary"]["overall"]
+    assert summary["cached_input_tokens"] is None and summary["tokens"] == 100
+
+
+def _eval_script():
+    path = Path(__file__).resolve().parents[1] / "scripts" / "run_evals.py"
+    spec = importlib.util.spec_from_file_location("run_evals_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_compare_command_exits_nonzero_only_when_gating_finds_a_regression(
+    tmp_path, monkeypatch, capsys
+):
+    script = _eval_script()
+    baseline = gate_report([run_record("a", True, steps=5, tokens=100)] * 2)
+    worse = gate_report([run_record("a", False, status="failed", steps=5, tokens=100)] * 2)
+    paths = {}
+    for name, report in (("baseline", baseline), ("worse", worse)):
+        paths[name] = tmp_path / f"{name}.json"
+        paths[name].write_text(json.dumps(report))
+    trimmed = tmp_path / "committed" / "baseline.json"
+
+    def main(*arguments):
+        monkeypatch.setattr(sys, "argv", ["run_evals.py", *arguments])
+        return script.main()
+
+    assert main("baseline", str(paths["baseline"]), "-o", str(trimmed)) == 0
+    assert "runs" not in json.loads(trimmed.read_text())
+    assert main("compare", str(trimmed), str(paths["worse"])) == 0
+    assert main("compare", str(trimmed), str(paths["worse"]), "--fail-on-regression") == 1
+    assert "Success rate fell from 1 to 0" in capsys.readouterr().out
+    assert main("compare", str(trimmed), str(paths["baseline"]), "--fail-on-regression") == 0
+
+
+def test_eval_runner_withholds_api_keys_from_commands(monkeypatch):
+    script = _eval_script()
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-only")
+    monkeypatch.setenv("ROCKY_EVAL_API_KEY", "eval-test-only")
+    script._withhold_keys()
+    assert "OPENAI_API_KEY" not in os.environ and "ROCKY_EVAL_API_KEY" not in os.environ
 
 
 # --- The runner against the real workflow, tools and a scripted planner -----

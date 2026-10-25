@@ -157,7 +157,7 @@ async def test_connection_failures_retry_but_read_timeouts_do_not(failure, trans
             await planner.plan(request_with_settings(provider("ollama")))
     assert isinstance(error.value, TransientModelError) is transient
     if not transient:
-        assert "timed out after 300 seconds" in str(error.value)
+        assert "sent nothing for 300 seconds" in str(error.value)
 
 
 async def test_client_errors_are_not_retried():

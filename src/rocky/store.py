@@ -1,6 +1,8 @@
 """SQL-backed goals, state projections, and an outbox for durable submission/signals."""
 
+import hashlib
 import json
+import math
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,6 +17,7 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     delete,
+    event,
     exists,
     func,
     or_,
@@ -29,6 +32,10 @@ from sqlalchemy.pool import StaticPool
 from rocky.inference import ModelSettings
 from rocky.models import GoalContract, GoalView, RunState
 
+# Query terms and candidate rows bound the work of one memory search.
+_MEMORY_QUERY_TERMS = 64
+_MEMORY_CANDIDATES = 500
+_MEMORY_FIELD_WEIGHTS = (("keywords", 3), ("key", 2), ("content", 1))
 TERMINAL_STATUSES = ("succeeded", "failed", "cancelled", "budget_exhausted", "deadline_exceeded")
 LEGACY_BUDGET_FIELDS = {"max_steps", "max_model_calls", "max_output_tokens", "deadline_seconds"}
 EVENT_STATE_FIELDS = (
@@ -202,13 +209,26 @@ class Store:
     def __init__(self, database_url: str):
         url = make_url(database_url)
         kwargs = {}
+        file_backed = False
         if url.get_backend_name() == "sqlite":
             kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
             if url.database in (None, "", ":memory:"):
                 kwargs["poolclass"] = StaticPool
             else:
+                file_backed = True
                 Path(url.database).parent.mkdir(parents=True, exist_ok=True)
         self.engine = create_engine(database_url, **kwargs)
+        if file_backed:
+            # API and worker processes share one file. WAL lets readers proceed
+            # while a writer commits instead of waiting on the whole database.
+            # The mode persists in the file; synchronous stays at FULL so an
+            # accepted goal or command survives power loss.
+            @event.listens_for(self.engine, "connect")
+            def _write_ahead_log(connection, _record) -> None:
+                cursor = connection.cursor()
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.close()
+
         self.sessions = sessionmaker(self.engine, expire_on_commit=False)
 
     def initialize(self) -> None:
@@ -229,6 +249,29 @@ class Store:
             model_settings=ModelSettings.model_validate(snapshot.settings) if snapshot else None,
             archived=bool(lifecycle and lifecycle.archived),
         )
+
+    @staticmethod
+    def _views(session: Session, *where, order_by, limit: int) -> list[GoalView]:
+        """Load goals with their settings and lifecycle in one query, not 1 + 2N."""
+        rows = session.execute(
+            select(GoalRow, GoalModelSettingsRow.settings, GoalLifecycleRow.archived)
+            .outerjoin(GoalModelSettingsRow, GoalModelSettingsRow.goal_id == GoalRow.goal_id)
+            .outerjoin(GoalLifecycleRow, GoalLifecycleRow.goal_id == GoalRow.goal_id)
+            .where(*where)
+            .order_by(order_by)
+            .limit(limit)
+        )
+        return [
+            GoalView(
+                goal_id=row.goal_id,
+                contract=row.contract,
+                state=row.state,
+                created_at=row.created_at,
+                model_settings=ModelSettings.model_validate(settings) if settings else None,
+                archived=bool(archived),
+            )
+            for row, settings, archived in rows
+        ]
 
     def get_model_settings(self, fallback: ModelSettings) -> ModelSettings:
         with self.sessions() as session:
@@ -311,39 +354,54 @@ class Store:
                 return None
             return self._view(row, session) if row else None
 
+    @staticmethod
+    def _listed(archived: bool) -> tuple:
+        """Visibility filters over the outer-joined lifecycle row (absent = active)."""
+        return (
+            GoalLifecycleRow.deleted.is_not(True),
+            GoalLifecycleRow.archived.is_(True)
+            if archived
+            else GoalLifecycleRow.archived.is_not(True),
+        )
+
     def list_goals(self, limit: int = 50, *, archived: bool = False) -> list[GoalView]:
         with self.sessions() as session:
-            hidden = exists().where(
-                GoalLifecycleRow.goal_id == GoalRow.goal_id,
-                GoalLifecycleRow.deleted.is_(True),
+            return self._views(
+                session,
+                *self._listed(archived),
+                order_by=GoalRow.created_at.desc(),
+                limit=limit,
             )
-            in_archive = exists().where(
-                GoalLifecycleRow.goal_id == GoalRow.goal_id,
-                GoalLifecycleRow.archived.is_(True),
+
+    def list_goals_tag(self, limit: int = 50, *, archived: bool = False) -> str:
+        """A validator for list_goals that reads no contract or state JSON.
+
+        Contracts, creation times and model settings never change after creation;
+        every state change advances the goal's revision. The listed IDs and their
+        revisions therefore determine the whole response.
+        """
+        with self.sessions() as session:
+            rows = session.execute(
+                select(GoalRow.goal_id, GoalRow.revision)
+                .outerjoin(GoalLifecycleRow, GoalLifecycleRow.goal_id == GoalRow.goal_id)
+                .where(*self._listed(archived))
+                .order_by(GoalRow.created_at.desc())
+                .limit(limit)
             )
-            return [
-                self._view(row, session)
-                for row in session.scalars(
-                    select(GoalRow)
-                    .where(~hidden, in_archive if archived else ~in_archive)
-                    .order_by(GoalRow.created_at.desc())
-                    .limit(limit)
-                )
-            ]
+            digest = hashlib.sha256(f"{archived}:{limit}".encode())
+            for goal_id, revision in rows:
+                digest.update(f"\n{goal_id}:{revision}".encode())
+            return digest.hexdigest()[:32]
 
     def pending_goals(self) -> list[GoalView]:
         with self.sessions() as session:
-            return [
-                self._view(row, session)
-                for row in session.scalars(
-                    select(GoalRow)
-                    .where(
-                        GoalRow.dispatched.is_(False),
-                        GoalRow.state["status"].as_string().not_in(TERMINAL_STATUSES),
-                    )
-                    .limit(100)
-                )
-            ]
+            return self._views(
+                session,
+                GoalRow.dispatched.is_(False),
+                GoalRow.state["status"].as_string().not_in(TERMINAL_STATUSES),
+                order_by=GoalRow.created_at,
+                limit=100,
+            )
 
     def mark_dispatched(self, goal_id: str) -> None:
         with self.sessions.begin() as session:
@@ -354,23 +412,15 @@ class Store:
     def reconciliation_goals(self, after: str = "", limit: int = 100) -> list[GoalView]:
         """Bounded cursor scan of projections that may outlive their engine run."""
         with self.sessions() as session:
-            return [
-                self._view(row, session)
-                for row in session.scalars(
-                    select(GoalRow)
-                    .where(
-                        GoalRow.goal_id > after,
-                        GoalRow.dispatched.is_(True),
-                        GoalRow.state["status"].as_string().not_in(TERMINAL_STATUSES),
-                        ~exists().where(
-                            GoalLifecycleRow.goal_id == GoalRow.goal_id,
-                            GoalLifecycleRow.deleted.is_(True),
-                        ),
-                    )
-                    .order_by(GoalRow.goal_id)
-                    .limit(limit)
-                )
-            ]
+            return self._views(
+                session,
+                GoalRow.goal_id > after,
+                GoalRow.dispatched.is_(True),
+                GoalRow.state["status"].as_string().not_in(TERMINAL_STATUSES),
+                GoalLifecycleRow.deleted.is_not(True),
+                order_by=GoalRow.goal_id,
+                limit=limit,
+            )
 
     def reconcile_terminal(self, goal_id: str, expected_revision: int, state: RunState) -> bool:
         """Fence a closed engine outcome against newer work and deletion.
@@ -1043,19 +1093,66 @@ class Store:
                 [term] if term.isascii() else [term[i : i + 2] for i in range(len(term) - 1)]
             )
         ]
-        return list(dict.fromkeys(terms))[:24]
+        # Ranking discounts common terms, so a long objective need not crowd
+        # out the feedback and pending work that follow it in the query.
+        return list(dict.fromkeys(terms))[:_MEMORY_QUERY_TERMS]
+
+    @staticmethod
+    def _rank_memories(rows: list[MemoryRow], terms: list[str], total: int) -> list[MemoryRow]:
+        """Order matches by owner priority, then BM25 relevance, then recency.
+
+        Terms count as substrings, exactly as the SQL filter matched them, so
+        Chinese bigrams and ASCII words behave alike. Keywords and keys weigh
+        more than content: they are the owner's own description of the fact.
+        """
+        k1, b = 1.2, 0.75
+        frequencies = [
+            {
+                term: sum(
+                    weight * (getattr(row, name) or "").lower().count(term)
+                    for name, weight in _MEMORY_FIELD_WEIGHTS
+                )
+                for term in terms
+            }
+            for row in rows
+        ]
+        lengths = [
+            sum(weight * len(getattr(row, name) or "") for name, weight in _MEMORY_FIELD_WEIGHTS)
+            for row in rows
+        ]
+        average = max(1.0, sum(lengths) / len(lengths)) if lengths else 1.0
+        documents = max(total, len(rows))
+        weights = {}
+        for term in terms:
+            matching = sum(1 for counts in frequencies if counts[term])
+            weights[term] = math.log(1 + (documents - matching + 0.5) / (matching + 0.5))
+        scores = [
+            sum(
+                weights[term] * count * (k1 + 1) / (count + k1 * (1 - b + b * length / average))
+                for term, count in counts.items()
+                if count
+            )
+            for counts, length in zip(frequencies, lengths, strict=True)
+        ]
+        ranked = sorted(
+            zip(rows, scores, strict=True),
+            key=lambda item: (item[0].priority, item[1], item[0].updated_at),
+            reverse=True,
+        )
+        return [row for row, _ in ranked]
 
     def memories(
         self, query: str = "", limit: int = 20, *, include_inactive: bool = False
     ) -> list[dict]:
-        """List for owner inspection; a nonempty query retrieves only matching facts."""
+        """List for owner inspection; a nonempty query retrieves the most relevant facts."""
+        limit = max(1, min(limit, 100))
         statement = select(MemoryRow)
         if not include_inactive:
             statement = statement.where(MemoryRow.active.is_(True))
-        if query:
-            terms = self._memory_terms(query)
-            if not terms:
-                return []
+        terms = self._memory_terms(query) if query else []
+        if query and not terms:
+            return []
+        if terms:
             statement = statement.where(
                 or_(
                     *[
@@ -1068,15 +1165,22 @@ class Store:
                     ]
                 )
             )
+        order = (MemoryRow.priority.desc(), MemoryRow.updated_at.desc())
         with self.sessions() as session:
-            return [
-                self._memory_view(row)
-                for row in session.scalars(
-                    statement.order_by(
-                        MemoryRow.priority.desc(), MemoryRow.updated_at.desc()
-                    ).limit(max(1, min(limit, 100)))
-                )
-            ]
+            if not terms:
+                return [
+                    self._memory_view(row)
+                    for row in session.scalars(statement.order_by(*order).limit(limit))
+                ]
+            # Curated memory is small. Rank a bounded candidate set in Python:
+            # the same code serves SQLite and PostgreSQL without a tokenizer.
+            candidates = list(session.scalars(statement.order_by(*order).limit(_MEMORY_CANDIDATES)))
+            counted = select(func.count()).select_from(MemoryRow)
+            if not include_inactive:
+                counted = counted.where(MemoryRow.active.is_(True))
+            total = session.scalar(counted) or 0
+            ranked = self._rank_memories(candidates, terms, total)
+            return [self._memory_view(row) for row in ranked[:limit]]
 
     def put_memory(
         self,

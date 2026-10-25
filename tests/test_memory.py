@@ -556,3 +556,100 @@ def test_omitted_owner_feedback_frees_room_for_other_history():
     assert evidence not in serialize_memory(kept)
     assert [item["id"] for item in omitted["conversation"]] == ["tool"]
     assert omitted["conversation"][0]["content"] == evidence
+
+
+def recalled_decision(action=None, actions=None):
+    """The working-memory copy of one earlier planning decision."""
+
+    class Store:
+        def memory_records(self, goal_id):
+            return [
+                {
+                    "id": "decision",
+                    "kind": "conversation",
+                    "role": "assistant",
+                    "content": json.dumps(
+                        {"kind": "act", "reason": "Next step", "action": action, "actions": actions}
+                    ),
+                    "created_at": "2026-01-01",
+                }
+            ]
+
+    memory = MemoryManager([StoreMemoryProvider(Store())]).build(request())
+    return json.loads(memory["conversation"][0]["content"])
+
+
+def test_recalled_http_request_keeps_method_session_and_sent_fields():
+    # Without the method and form values a successful POST login looks like a
+    # bare GET, or like one that sent no values, and the planner keeps logging
+    # in instead of moving on. Header values may be tokens: names only.
+    options = {
+        "method": "post",
+        "session": "orders",
+        "data": {"username": "analyst", "password": "eval-only-secret"},
+        "headers": {"Authorization": "Bearer header-secret"},
+        "auth": ["analyst", "eval-only-secret"],
+        "follow_redirects": False,
+    }
+    decision = recalled_decision(
+        {"tool": "http_request", "url": "http://127.0.0.1/login", "content": json.dumps(options)}
+    )
+    assert decision["action"] == {
+        "tool": "http_request",
+        "path": None,
+        "url": "http://127.0.0.1/login",
+        "request": {
+            "method": "POST",
+            "session": "orders",
+            "data": {"username": "analyst", "password": "eval-only-secret"},
+            "header_names": ["Authorization"],
+            "auth": "set",
+            "follow_redirects": False,
+        },
+    }
+    assert "header-secret" not in json.dumps(decision)
+    long_value = recalled_decision(
+        {
+            "tool": "http_request",
+            "url": "https://x.test",
+            "content": json.dumps({"method": "PUT", "json": {"note": "n" * 500, "count": 3}}),
+        }
+    )
+    sent = long_value["action"]["request"]["json"]
+    assert sent["count"] == "3" and len(sent["note"]) == 201 and sent["note"].endswith("…")
+
+
+def test_recalled_http_request_defaults_and_unparsed_options_are_explicit():
+    default = recalled_decision({"tool": "http_request", "url": "https://x.test", "content": "{}"})
+    # Defaults are spelled out, so an unmodified request is visibly a GET.
+    assert default["action"]["request"] == {"method": "GET", "session": "default"}
+    bare = recalled_decision({"tool": "http_request", "url": "https://x.test", "content": None})
+    assert "request" not in bare["action"]
+    plain = recalled_decision(
+        {"tool": "http_request", "url": "https://x.test", "content": '{"body": "raw text"}'}
+    )
+    assert plain["action"]["request"] == {"method": "GET", "session": "default", "body_bytes": 8}
+    broken = recalled_decision({"tool": "http_request", "url": "https://x.test", "content": "{"})
+    assert broken["action"]["request"] == {"options": "unparsed"}
+
+
+def test_recalled_commands_ranges_and_batches_keep_how_they_ran_but_not_file_bodies():
+    command = recalled_decision(
+        {"tool": "run_command", "path": ".", "content": "pytest -q " + "x" * 2000, "sandbox": False}
+    )
+    assert command["action"]["command"].startswith("pytest -q ")
+    assert len(command["action"]["command"]) <= 601 and command["action"]["sandbox"] is False
+    batch = recalled_decision(
+        actions=[
+            {"tool": "read_file", "path": "a.py", "content": '{"start_line":1,"end_line":40}'},
+            {"tool": "edit_file", "path": "b.py", "content": "BODY" * 500},
+        ]
+    )
+    assert batch["actions"][0]["range"] == '{"start_line":1,"end_line":40}'
+    assert batch["actions"][1] == {
+        "tool": "edit_file",
+        "path": "b.py",
+        "url": None,
+        "content_bytes": 2000,
+    }
+    assert "BODY" not in json.dumps(batch)

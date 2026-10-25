@@ -39,10 +39,12 @@ with workflow.unsafe.imports_passed_through():
         read_only_action,
     )
 
-# One model request may take up to the planner's 300-second provider timeout.
-# Rate limits, overload and connection failures produce no model output, so
-# the Activity retries them; ModelDecisionError marks responses never to repeat.
-_MODEL_ATTEMPT_SECONDS = 330
+# A streamed model response may take up to the planner's 900-second total limit.
+# Heartbeats detect a lost worker sooner than that. Rate limits, overload and
+# connection failures produce no model output, so the Activity retries them;
+# ModelDecisionError marks responses never to repeat.
+_MODEL_ATTEMPT_SECONDS = 930
+_MODEL_HEARTBEAT = timedelta(seconds=60)
 _MODEL_ATTEMPTS = 3
 _MODEL_TOTAL_SECONDS = _MODEL_ATTEMPT_SECONDS * _MODEL_ATTEMPTS + 120
 _MODEL_RETRY = RetryPolicy(
@@ -260,6 +262,7 @@ class GoalWorkflow:
             result_type=PlanResult,
             start_to_close_timeout=self._timeout(_MODEL_ATTEMPT_SECONDS),
             schedule_to_close_timeout=self._timeout(_MODEL_TOTAL_SECONDS),
+            heartbeat_timeout=_MODEL_HEARTBEAT,
             retry_policy=_MODEL_RETRY,
         )
 
@@ -273,6 +276,7 @@ class GoalWorkflow:
             result_type=VerificationResult,
             start_to_close_timeout=self._timeout(_MODEL_ATTEMPT_SECONDS),
             schedule_to_close_timeout=self._timeout(_MODEL_TOTAL_SECONDS),
+            heartbeat_timeout=_MODEL_HEARTBEAT,
             retry_policy=_MODEL_RETRY,
         )
 
@@ -490,6 +494,7 @@ class GoalWorkflow:
             verification = cycle.verification
             self._state.input_tokens += max(0, verification.input_tokens)
             self._state.output_tokens += max(0, verification.output_tokens)
+            self._state.cached_input_tokens += max(0, verification.cached_input_tokens)
             self._state.artifacts = verification.artifacts
             cycle.feedback = verification.feedback[:4000]
             if not verification.passed:
@@ -772,6 +777,7 @@ class GoalWorkflow:
                 planned = await self._plan(run, cycle.feedback)
                 self._state.input_tokens += max(0, planned.input_tokens)
                 self._state.output_tokens += max(0, planned.output_tokens)
+                self._state.cached_input_tokens += max(0, planned.cached_input_tokens)
                 self._guard_dispatch()
                 cycle.decision = planned.decision
                 if "decide" in run.hook_phases:

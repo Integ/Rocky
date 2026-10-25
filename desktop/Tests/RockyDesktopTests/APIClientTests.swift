@@ -15,6 +15,7 @@ final class APIClientTests: XCTestCase {
     override func tearDown() {
         session.invalidateAndCancel()
         InterceptingProtocol.handle = nil
+        InterceptingProtocol.headers = [:]
         super.tearDown()
     }
 
@@ -61,9 +62,35 @@ final class APIClientTests: XCTestCase {
                 XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer desktop-test-token")
                 return (200, Data("[]".utf8))
             }
-            let goals = try await api.goals(archived: archived)
-            XCTAssertTrue(goals.isEmpty)
+            let list = try await api.goalList(archived: archived)
+            XCTAssertEqual(list?.goals.isEmpty, true)
         }
+    }
+
+    func testGoalListRevalidatesWithItsTagAndTreatsNotModifiedAsUnchanged() async throws {
+        InterceptingProtocol.headers = ["ETag": #""tag-1""#]
+        InterceptingProtocol.handle = { request in
+            XCTAssertNil(request.value(forHTTPHeaderField: "If-None-Match"))
+            return (200, Data("[\(DesktopContractTests.goalJSON)]".utf8))
+        }
+        let fetched = try await api.goalList()
+        let first = try XCTUnwrap(fetched)
+        XCTAssertEqual(first.tag, #""tag-1""#)
+        XCTAssertEqual(first.goals.count, 1)
+
+        InterceptingProtocol.handle = { request in
+            XCTAssertEqual(request.value(forHTTPHeaderField: "If-None-Match"), #""tag-1""#)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer desktop-test-token")
+            return (304, Data())
+        }
+        let unchanged = try await api.goalList(ifNoneMatch: first.tag)
+        XCTAssertNil(unchanged)
+        // Without a validator a 304 is not a successful response.
+        InterceptingProtocol.handle = { _ in (304, Data()) }
+        do {
+            _ = try await api.goalList()
+            XCTFail("An unrequested 304 must not be accepted")
+        } catch {}
     }
 
     func testApprovalUsesAuthenticatedConcreteOperationEndpoint() async throws {
@@ -257,6 +284,11 @@ private final class InterceptingProtocol: URLProtocol {
         get { lock.lock(); defer { lock.unlock() }; return storedHandler }
         set { lock.lock(); defer { lock.unlock() }; storedHandler = newValue }
     }
+    private static var storedHeaders: [String: String] = [:]
+    static var headers: [String: String] {
+        get { lock.lock(); defer { lock.unlock() }; return storedHeaders }
+        set { lock.lock(); defer { lock.unlock() }; storedHeaders = newValue }
+    }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -264,7 +296,7 @@ private final class InterceptingProtocol: URLProtocol {
         do {
             let handler = try XCTUnwrap(Self.handle)
             let (status, data) = try handler(request)
-            let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: Self.headers.merging(["Content-Type": "application/json"]) { first, _ in first })!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: data)
             client?.urlProtocolDidFinishLoading(self)

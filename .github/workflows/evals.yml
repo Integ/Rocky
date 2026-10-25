@@ -1,0 +1,72 @@
+name: Evals
+# Live model runs cost tokens, so this workflow only runs when started by hand.
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: "openai-compatible, anthropic or ollama; empty uses OpenAI with OPENAI_API_KEY"
+        default: ""
+      model:
+        description: "Model ID"
+        default: "gpt-4.1-mini"
+      base_url:
+        description: "Provider API base URL (with provider)"
+        default: ""
+      repeat:
+        description: "Runs per task"
+        default: "3"
+      tasks:
+        description: "Space-separated task IDs; empty runs all"
+        default: ""
+      baseline:
+        description: "Committed baseline (e.g. evals/baselines/gpt-4.1-mini.json); fails on regression"
+        default: ""
+permissions:
+  contents: read
+concurrency:
+  group: evals
+  cancel-in-progress: false
+jobs:
+  evals:
+    # Shell commands run inside the macOS Seatbelt sandbox, as in the app.
+    runs-on: macos-14
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.1"
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: Run evaluation suite
+        shell: bash
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ROCKY_EVAL_API_KEY: ${{ secrets.ROCKY_EVAL_API_KEY }}
+          # Inputs reach the script as data, never as interpolated shell text.
+          PROVIDER: ${{ inputs.provider }}
+          MODEL: ${{ inputs.model }}
+          BASE_URL: ${{ inputs.base_url }}
+          REPEAT: ${{ inputs.repeat }}
+          TASKS: ${{ inputs.tasks }}
+          BASELINE: ${{ inputs.baseline }}
+        run: |
+          # Outside the checkout: workspace commands must not see the repository.
+          args=(run --approvals auto --repeat "$REPEAT" --model "$MODEL"
+                --run-dir "$RUNNER_TEMP/rocky-evals")
+          if [ -n "$PROVIDER" ]; then args+=(--provider "$PROVIDER"); fi
+          if [ -n "$BASE_URL" ]; then args+=(--base-url "$BASE_URL"); fi
+          for task in $TASKS; do args+=(--task "$task"); done
+          if [ -n "$BASELINE" ]; then args+=(--baseline "$BASELINE" --fail-on-regression); fi
+          uv run python scripts/run_evals.py "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: |
+            ${{ runner.temp }}/rocky-evals/report.json
+            ${{ runner.temp }}/rocky-evals/runs.jsonl
+          if-no-files-found: ignore
+          retention-days: 30

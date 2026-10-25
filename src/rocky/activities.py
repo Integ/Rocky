@@ -42,6 +42,26 @@ def _model_failure(error: PlannerError) -> ApplicationError:
     return ApplicationError(str(error), type="ModelDecisionError", non_retryable=True)
 
 
+_HEARTBEAT_SECONDS = 15
+
+
+async def _with_heartbeat(call):
+    """Report liveness during a long model call so a lost worker is noticed early."""
+    if not activity.in_activity():
+        return await call
+
+    async def beat() -> None:
+        while True:
+            activity.heartbeat()
+            await asyncio.sleep(_HEARTBEAT_SECONDS)
+
+    beating = asyncio.create_task(beat())
+    try:
+        return await call
+    finally:
+        beating.cancel()
+
+
 class Activities:
     def __init__(
         self,
@@ -62,6 +82,9 @@ class Activities:
 
     @activity.defn(name="rocky.plan")
     async def plan(self, request: PlanInput) -> PlanResult:
+        return await _with_heartbeat(self._plan(request))
+
+    async def _plan(self, request: PlanInput) -> PlanResult:
         await self.check_cancelled(request.run.goal_id)
         request = request.model_copy(deep=True)
         request.memory = await asyncio.to_thread(self.memory.build, request)
@@ -90,6 +113,9 @@ class Activities:
 
     @activity.defn(name="rocky.verify")
     async def verify(self, request: VerifyInput) -> VerificationResult:
+        return await _with_heartbeat(self._verify(request))
+
+    async def _verify(self, request: VerifyInput) -> VerificationResult:
         await self.check_cancelled(request.run.goal_id)
         files = await asyncio.to_thread(self.tools.verify_files, request.run)
         if not files.passed:
@@ -149,6 +175,7 @@ class Activities:
                     artifacts=current.artifacts,
                     input_tokens=verdict.input_tokens,
                     output_tokens=verdict.output_tokens,
+                    cached_input_tokens=verdict.cached_input_tokens,
                 )
         return verdict
 

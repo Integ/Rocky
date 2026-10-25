@@ -15,7 +15,11 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8,<10", "pytest-asyncio>=0.26,<2", "ruff>=0.11,<1"]
+dev = [
+  "pytest>=8,<10", "pytest-asyncio>=0.26,<2", "ruff>=0.11,<1",
+  # starlette.testclient runs on httpx2; Rocky itself keeps using httpx.
+  "httpx2>=2.16,<3",
+]
 
 [project.scripts]
 rocky = "rocky.cli:main"

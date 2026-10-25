@@ -273,7 +273,7 @@ def request_http(
             raise HTTPToolError("HTTP requests require an http:// or https:// URL")
         _check_control_port(parsed, blocked_ports)
         with _session(Path(session_directory), session_name) as jar:
-            return asyncio.run(
+            result = asyncio.run(
                 _send_http(
                     parsed,
                     method,
@@ -286,6 +286,14 @@ def request_http(
                     blocked_ports,
                 )
             )
+            # Cookie values stay private, but the planner must be able to see
+            # which session a request used and that a login populated it.
+            result.update(
+                method=method,
+                session=session_name,
+                session_cookies=sorted({cookie.name for cookie in jar})[:20],
+            )
+            return result
     except HTTPToolError:
         raise
     except (TimeoutError, httpx.TimeoutException):

@@ -34,6 +34,8 @@ final class AppModel: ObservableObject {
     private var isRefreshing = false
     private var hadConnectionError = false
     private var historyGeneration = 0
+    /// Last applied server page per history filter, revalidated by its tag on each poll.
+    private var goalLists: [Bool: APIClient.GoalList] = [:]
     private let client: APIClient?
 
     init(client: APIClient? = nil) { self.client = client }
@@ -59,13 +61,19 @@ final class AppModel: ObservableObject {
         defer { isRefreshing = false }
         let generation = historyGeneration
         do {
-            async let recent = api.goals()
-            async let archived = api.goals(archived: true)
-            let fresh = try await recent + archived
+            async let recent = api.goalList(ifNoneMatch: goalLists[false]?.tag)
+            async let archived = api.goalList(archived: true, ifNoneMatch: goalLists[true]?.tag)
+            let (freshRecent, freshArchived) = try await (recent, archived)
             let settings = try await api.providerSettings()
-            if generation == historyGeneration, historyUpdates.isEmpty {
+            // Tags are committed only with the lists they describe. A discarded
+            // response must be fetched again, never confirmed by a later 304.
+            if generation == historyGeneration, historyUpdates.isEmpty,
+               let recentList = freshRecent ?? goalLists[false],
+               let archivedList = freshArchived ?? goalLists[true] {
+                goalLists = [false: recentList, true: archivedList]
                 var seen = Set<String>()
-                goals = fresh.filter { seen.insert($0.id).inserted }
+                let fresh = (recentList.goals + archivedList.goals).filter { seen.insert($0.id).inserted }
+                if goals != fresh { goals = fresh }
                 if selectedID != nil, selected == nil { select(nil) }
             }
             provider = settings

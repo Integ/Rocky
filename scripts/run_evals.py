@@ -1,8 +1,9 @@
 """Run Rocky's evaluation suite against a live model; see evals/README.md.
 
-run      execute tasks and write report.json (live model calls; costs tokens)
-compare  show per-task changes between two report.json files
-list     list the available tasks
+run       execute tasks and write report.json (live model calls; costs tokens)
+compare   show per-task changes between two report.json files
+baseline  reduce a report.json to the summary worth committing as a baseline
+list      list the available tasks
 """
 
 import argparse
@@ -25,6 +26,19 @@ from rocky.config import Settings
 from rocky.inference import ModelSettings
 from rocky.planner import OpenAIPlanner
 
+_KEY_VARIABLES = ("OPENAI_API_KEY", "ROCKY_EVAL_API_KEY")
+
+
+def _withhold_keys() -> None:
+    """Remove API keys from this process's environment once the planner holds them.
+
+    Approved commands, including unsandboxed ones that skip the sandbox's
+    environment filter, inherit this environment. No model-proposed command
+    may see the key, for example on a CI runner with --approvals auto.
+    """
+    for name in _KEY_VARIABLES:
+        os.environ.pop(name, None)
+
 
 class KeyFromEnvironment:
     """Planner credential lookup backed by one environment value; never persisted."""
@@ -39,7 +53,8 @@ class KeyFromEnvironment:
 def _git_commit() -> str:
     try:
         return subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
+            # "-dirty" marks a run of uncommitted changes, not of that commit.
+            ["git", "describe", "--always", "--dirty"],
             capture_output=True,
             text=True,
             check=True,
@@ -102,6 +117,7 @@ async def _run(args) -> int:
         credential_store=KeyFromEnvironment(key),
         defer_client=model_settings.provider is not None,
     )
+    _withhold_keys()
     try:
         async with await WorkflowEnvironment.start_local(
             data_converter=pydantic_data_converter,
@@ -139,8 +155,45 @@ async def _run(args) -> int:
     print(evaluation.format_report(report))
     print(f"\nReport: {report_path}")
     if args.baseline:
-        print("\n" + evaluation.compare_reports(_load(args.baseline), report))
+        return _compare(_load(args.baseline), report, args)
     return 0
+
+
+def _compare(baseline: dict, current: dict, args) -> int:
+    print("\n" + evaluation.compare_reports(baseline, current))
+    if not args.fail_on_regression:
+        return 0
+    problems = evaluation.find_regressions(
+        baseline,
+        current,
+        max_success_drop=args.max_success_drop,
+        max_token_increase=args.max_token_increase,
+    )
+    if not problems:
+        print("\nNo regression against the baseline.")
+        return 0
+    print("\nRegressions against the baseline:\n" + "\n".join(f"- {item}" for item in problems))
+    return 1
+
+
+def _add_gate(parser) -> None:
+    parser.add_argument(
+        "--fail-on-regression",
+        action="store_true",
+        help="exit 1 when the run is worse than the baseline (see --max-* thresholds)",
+    )
+    parser.add_argument(
+        "--max-success-drop",
+        type=float,
+        default=0.15,
+        help="tolerated absolute fall in overall success rate (default 0.15)",
+    )
+    parser.add_argument(
+        "--max-token-increase",
+        type=float,
+        default=0.25,
+        help="tolerated relative rise in mean tokens per passed run (default 0.25)",
+    )
 
 
 def _load(path: Path) -> dict:
@@ -177,9 +230,14 @@ def main() -> int:
         default=os.environ.get("ROCKY_TEMPORAL_BINARY") or shutil.which("temporal"),
         help="Temporal CLI to run the local dev server (downloaded when absent)",
     )
+    _add_gate(run)
     compare = commands.add_parser("compare", help="compare two report.json files")
     compare.add_argument("baseline", type=Path)
     compare.add_argument("current", type=Path)
+    _add_gate(compare)
+    baseline = commands.add_parser("baseline", help="write a committable baseline summary")
+    baseline.add_argument("report", type=Path)
+    baseline.add_argument("--output", "-o", type=Path, required=True)
     commands.add_parser("list", help="list tasks")
     args = parser.parse_args()
 
@@ -188,8 +246,15 @@ def main() -> int:
             print(f"{task.id:20} {task.spec.category:14} {task.spec.description}")
         return 0
     if args.command == "compare":
-        print(evaluation.compare_reports(_load(args.baseline), _load(args.current)))
+        return _compare(_load(args.baseline), _load(args.current), args)
+    if args.command == "baseline":
+        summary = evaluation.baseline_summary(_load(args.report))
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
+        print(f"Baseline: {args.output}")
         return 0
+    if args.fail_on_regression and not args.baseline:
+        parser.error("--fail-on-regression requires --baseline")
     if args.repeat < 1:
         parser.error("--repeat must be at least 1")
     return asyncio.run(_run(args))

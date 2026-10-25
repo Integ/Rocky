@@ -339,9 +339,19 @@ def create_app(
 
     @app.get("/goals", response_model=list[GoalView], dependencies=auth)
     def list_goals(
+        response: Response,
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
         archived: bool = False,
+        if_none_match: Annotated[str | None, Header()] = None,
     ):
+        # Read the tag before the list: a write in between yields a newer list
+        # under an older tag, so the next poll refetches instead of missing it.
+        tag = f'"{database.list_goals_tag(limit, archived=archived)}"'
+        if if_none_match and tag in {
+            value.strip().removeprefix("W/") for value in if_none_match.split(",")
+        }:
+            return Response(status_code=304, headers={"ETag": tag, "Cache-Control": "no-store"})
+        response.headers["ETag"] = tag
         return database.list_goals(limit, archived=archived)
 
     @app.get("/memories", dependencies=auth)

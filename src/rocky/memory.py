@@ -198,15 +198,11 @@ class StoreMemoryProvider:
             summary = {
                 "kind": payload["kind"],
                 "reason": payload["reason"],
-                "action": {key: action.get(key) for key in ("tool", "path", "url")}
-                if isinstance(action, dict)
-                else None,
+                "action": _action_summary(action) if isinstance(action, dict) else None,
             }
             if isinstance(actions, list):
                 summary["actions"] = [
-                    {key: item.get(key) for key in ("tool", "path", "url")}
-                    for item in actions
-                    if isinstance(item, dict)
+                    _action_summary(item) for item in actions if isinstance(item, dict)
                 ]
             summary["full_payload"] = "See execution record " + str(row.get("id", ""))
             return serialize_memory(summary)
@@ -252,6 +248,83 @@ class StoreMemoryProvider:
                 return prefix + normalized
             return normalized
         return content
+
+
+_COMMAND_CHARS = 600
+_RANGE_CHARS = 120
+_FIELD_CHARS = 200
+_LISTED_NAMES = 20
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _request_summary(content: str) -> dict:
+    """How an HTTP request was made: method, session and the fields it sent.
+
+    Form and JSON values are the planner's own earlier output and stay in the
+    execution record; showing only their names made a complete login look
+    like one that sent no values. Header values may hold bearer tokens, so
+    only header names are kept.
+    """
+    try:
+        options = json.loads(content)
+    except (ValueError, TypeError):
+        return {"options": "unparsed"}
+    if not isinstance(options, dict):
+        return {"options": "unparsed"}
+    request = {
+        "method": str(options.get("method") or "GET").upper()[:16],
+        "session": str(options.get("session") or "default")[:64],
+    }
+    for name in ("data", "json"):
+        value = options.get(name)
+        if isinstance(value, dict):
+            request[name] = {
+                str(key)[:64]: _clip(
+                    item if isinstance(item, str) else json.dumps(item, ensure_ascii=False),
+                    _FIELD_CHARS,
+                )
+                for key, item in list(value.items())[:_LISTED_NAMES]
+            }
+        elif value is not None:
+            request[name] = _clip(json.dumps(value, ensure_ascii=False), _FIELD_CHARS)
+    if isinstance(options.get("headers"), dict):
+        request["header_names"] = sorted(str(key)[:64] for key in options["headers"])[
+            :_LISTED_NAMES
+        ]
+    if options.get("body") is not None:
+        request["body_bytes"] = len(str(options["body"]).encode("utf-8"))
+    if options.get("auth") is not None:
+        request["auth"] = "set"
+    if "follow_redirects" in options:
+        request["follow_redirects"] = bool(options["follow_redirects"])
+    return request
+
+
+def _action_summary(action: dict) -> dict:
+    """What a later decision needs to know about an earlier action.
+
+    Written file bodies stay out (they are in the file and the execution
+    record), but how a command or request was issued must survive: without
+    it a successful login or command looks like one that was never sent.
+    """
+    summary = {key: action.get(key) for key in ("tool", "path", "url")}
+    content = action.get("content")
+    if not isinstance(content, str) or not content:
+        return summary
+    tool = action.get("tool")
+    if tool == "run_command":
+        summary["command"] = _clip(content, _COMMAND_CHARS)
+        summary["sandbox"] = action.get("sandbox", True)
+    elif tool == "http_request":
+        summary["request"] = _request_summary(content)
+    elif tool == "read_file":
+        summary["range"] = _clip(content, _RANGE_CHARS)
+    else:
+        summary["content_bytes"] = len(content.encode("utf-8"))
+    return summary
 
 
 class MemoryManager:

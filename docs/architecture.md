@@ -15,12 +15,28 @@ ordinary code owns state, execution scope, usage and completion gates.
    408/409, 5xx/529 overload and failed connections. Read timeouts and completed
    but unusable responses are `ModelDecisionError`s and are never repeated. One
    logical call counts once in the usage counters, however many attempts it took.
-   Each request may take up to 300 seconds; the response cap
+   Responses stream: a request fails after 300 seconds without any received
+   bytes or 900 seconds in total, so a long answer that keeps arriving is not
+   cut off. Model Activities heartbeat, so a lost worker is noticed within a
+   minute despite the 930-second attempt timeout. A gateway that ignores
+   `stream: true` and returns one JSON body is also accepted. The response cap
    (`ROCKY_PLAN_RESPONSE_TOKENS`, default 16384, doubled for high reasoning effort)
    includes reasoning tokens, and hitting it returns actionable feedback.
-   The instructions and schema form an identical prefix on every step: Anthropic
-   requests mark it with `cache_control`, official OpenAI requests send a stable
-   `prompt_cache_key`, and provider clients are reused across steps.
+   Anthropic and OpenAI-compatible requests ask for provider-side structured
+   output (`output_config.format`, or a strict `json_schema` response format)
+   with a closed copy of the schema. Size and range limits are removed from that
+   copy but stay in the schema text in the instructions and in local validation.
+   If an endpoint rejects the format with HTTP 400/422 and the same request then
+   succeeds without it, that endpoint and model use the prompt-only JSON mode for
+   the rest of the process.
+   Prompt caches match request prefixes, so the envelope puts what stays fixed
+   for the whole task first: instructions and schema, then `run` and the
+   `execution` policy, then per-step state, memory, feedback and
+   `budget_remaining`. Anthropic requests end the system prompt and the stable
+   envelope part at `cache_control` breakpoints; official OpenAI requests send a
+   stable `prompt_cache_key`; provider clients are reused across steps. Cache-read
+   input tokens are counted in `input_tokens` and also reported separately as
+   `cached_input_tokens` on task state and in evaluation results.
 4. Tools run as separate Activities. A per-goal file lock and a request-fingerprinted,
    atomic receipt make single-host retries idempotent. A file write completed
    before its receipt can be safely replayed with the same content. HTTP requests,
@@ -62,7 +78,11 @@ started/completed/failed transition appends an immutable execution event with
 input, output, timestamps and elapsed milliseconds. The current step projection,
 messages and task state update in the same revision-fenced transaction; retrying
 a revision adds no duplicate events. `/steps` reads the mutable projection;
-`/execution-events` reads the append-only audit trail. Deletion purges both with
+`/execution-events` reads the append-only audit trail.
+`/goals` returns an `ETag` derived from the listed goal IDs and revisions;
+polls that send it back with `If-None-Match` receive a bodiless 304 until a
+goal is created, advances, or is archived, restored or deleted. A file-backed
+SQLite store runs in WAL mode so API reads do not wait on worker commits. Deletion purges both with
 the existing task/outbox records, and tombstones prevent resurrection.
 
 The contract and explicit `task_progress` (completed, pending, evidence) remain
@@ -94,6 +114,12 @@ source metadata; traces and model summaries are never automatically promoted.
 The owner explicitly writes them through `/memories/{key}`. Revisions use
 compare-and-swap updates (stale writes return 409); corrections replace the same
 key, retractions mark it inactive, and inactive records are excluded from recall.
+A memory query splits text into ASCII words and Chinese character bigrams (up to
+64 terms), selects at most 500 active records containing any term, and ranks
+them by owner priority, then BM25 relevance with keywords and keys weighted above
+content, then recency. Ranking runs in Python, so SQLite and PostgreSQL behave
+identically without a tokenizer extension; common terms count for little, so a
+long objective does not crowd out rarer, more specific terms.
 Memory remains untrusted evidence and cannot grant authority or establish success.
 
 The durable handoff approach is informed by Anthropic's

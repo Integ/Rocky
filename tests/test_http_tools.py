@@ -141,14 +141,20 @@ def test_login_cookie_session_survives_subsequent_client_and_worker_restart(
     assert login["status_code"] == 200
     assert TOKEN not in json.dumps(login)
     assert "set-cookie" not in login["headers"]
+    # The planner sees how the login ran and that it populated the session,
+    # never the cookie value itself.
+    assert (login["method"], login["session"], login["session_cookies"]) == (
+        "POST",
+        "account",
+        ["session"],
+    )
     protected = request_http(http_server + "/protected", {"session": "account"}, directory)
+    assert (protected["method"], protected["session_cookies"]) == ("GET", ["session"])
     assert protected["status_code"] == 200
     assert json.loads(protected["text"]) == {"private": "authorized"}
     assert TOKEN not in json.dumps(protected)
-    assert (
-        request_http(http_server + "/protected", {"session": "other"}, directory)["status_code"]
-        == 401
-    )
+    other = request_http(http_server + "/protected", {"session": "other"}, directory)
+    assert other["status_code"] == 401 and other["session_cookies"] == []
     files = list(directory.glob("*.json"))
     assert any(TOKEN in file.read_text() for file in files)
     assert all(file.stat().st_mode & 0o777 == 0o600 for file in directory.iterdir())

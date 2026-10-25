@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 import test_workflow as workflow_tests
 from fastapi.testclient import TestClient
+from openai_stream import with_stream
 from temporalio.worker import Worker
 
 from rocky.activities import Activities
@@ -108,7 +109,7 @@ def components(tmp_path):
     store = Store(settings.database_url)
     tools = WorkspaceTools(settings)
     responses = ScriptedResponses(decisions())
-    planner = OpenAIPlanner(settings, client=SimpleNamespace(responses=responses))
+    planner = OpenAIPlanner(settings, client=SimpleNamespace(responses=with_stream(responses)))
     activities = Activities(store, tools, planner)
     try:
         yield settings, store, tools, responses, activities

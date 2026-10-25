@@ -55,7 +55,8 @@ async def test_compatible_provider_survives_default_switch_and_produces_reviewed
         assert str(request.url) == "https://original-model.example/v1/chat/completions"
         assert request.headers["authorization"] == "Bearer invented-original-test-key"
         assert payload["model"] == "original-vendor/model-v1"
-        assert payload["response_format"] == {"type": "json_object"}
+        assert payload["response_format"]["type"] == "json_schema"
+        assert payload["stream"] is True
         assert "invented-original-test-key" not in request.content.decode()
         if len(requests) == 1:
             decision = {
