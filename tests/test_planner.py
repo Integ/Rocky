@@ -1,8 +1,10 @@
 import json
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from pydantic import BaseModel
 
 from rocky import planner as planner_module
 from rocky.config import Settings
@@ -253,9 +255,60 @@ async def test_plan_receives_actual_remaining_budget_for_delivery_and_review(unl
     await OpenAIPlanner(Settings(), client=client).plan(request)
     payload = json.loads(client.responses.parse.await_args.kwargs["input"][1]["content"])
     assert payload["execution"]["budget_remaining"] == (
-        {"steps": None, "model_calls": None, "tokens": None}
+        {"steps": None, "model_calls": None, "tokens": None, "seconds": None}
         if unlimited
-        else {"steps": 12, "model_calls": 22, "tokens": 894923}
+        else {"steps": 12, "model_calls": 22, "tokens": 894923, "seconds": None}
+    )
+
+
+@pytest.mark.parametrize("offset,expected", [(600, (595, 600)), (-30, (0, 0))])
+async def test_plan_receives_remaining_wall_clock_seconds(offset, expected):
+    request = goal_request()
+    request.state.deadline_at = (datetime.now(UTC) + timedelta(seconds=offset)).isoformat()
+    client = fake_client(completed(Decision(kind="blocked", reason="Need source material")))
+    await OpenAIPlanner(Settings(), client=client).plan(request)
+    payload = json.loads(client.responses.parse.await_args.kwargs["input"][1]["content"])
+    low, high = expected
+    assert low <= payload["execution"]["budget_remaining"]["seconds"] <= high
+
+
+def test_response_schema_is_serialized_once_per_class(monkeypatch):
+    class Probe(BaseModel):
+        value: int
+
+    calls = []
+    original = Probe.model_json_schema.__func__
+
+    def counting(cls, *args, **kwargs):
+        calls.append(cls)
+        return original(cls, *args, **kwargs)
+
+    monkeypatch.setattr(Probe, "model_json_schema", classmethod(counting))
+    first = planner_module._schema_text(Probe)
+    assert planner_module._schema_text(Probe) == first
+    assert json.loads(first)["properties"]["value"] == {"type": "integer"}
+    assert len(calls) == 1
+
+
+async def test_prepare_contract_logs_its_unbudgeted_token_usage(caplog):
+    requirements = DeliveryRequirements(
+        acceptance_criteria=["Complete the task"],
+        deliverables=[Deliverable(path="result.md")],
+        limits={
+            "max_steps": 12,
+            "max_model_calls": 20,
+            "max_tokens": 60000,
+            "timeout_seconds": 600,
+        },
+    )
+    planner = OpenAIPlanner(Settings(), client=fake_client(completed(requirements)))
+    with caplog.at_level("INFO", logger="rocky.planner"):
+        await planner.prepare_contract(
+            GoalDraft(objective="Explain Rocky"), ModelSettings(model="m")
+        )
+    assert any(
+        "Prepared goal contract" in record.getMessage() and "input" in record.getMessage()
+        for record in caplog.records
     )
 
 

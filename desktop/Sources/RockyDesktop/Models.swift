@@ -14,6 +14,25 @@ struct GoalContract: Codable, Equatable {
     var allowed_tools: [String] = ["read_file", "write_file", "list_files", "fetch_url", "http_request", "run_command", "append_file", "edit_file"]
     var allowed_domains: [String] = []
     var limits: TaskLimits?
+
+    /// The same task with each finite limit doubled, up to `TaskLimits.retryCeiling`.
+    /// Disabled (nil) limits stay disabled.
+    func retryingWithLargerBudget() -> GoalContract {
+        var copy = self
+        let current = limits ?? TaskLimits()
+        let ceiling = TaskLimits.retryCeiling
+        func grow(_ value: Int?, _ maximum: Int?) -> Int? {
+            guard let value, let maximum else { return value }
+            return max(value, min(maximum, value > Int.max / 2 ? Int.max : value * 2))
+        }
+        copy.limits = TaskLimits(
+            max_steps: grow(current.max_steps, ceiling.max_steps),
+            max_model_calls: grow(current.max_model_calls, ceiling.max_model_calls),
+            max_tokens: grow(current.max_tokens, ceiling.max_tokens),
+            timeout_seconds: grow(current.timeout_seconds, ceiling.timeout_seconds)
+        )
+        return copy
+    }
 }
 
 struct TaskLimits: Codable, Equatable {
@@ -21,6 +40,9 @@ struct TaskLimits: Codable, Equatable {
     var max_model_calls: Int? = 150
     var max_tokens: Int? = 500_000
     var timeout_seconds: Int? = 3600
+
+    /// Owner-initiated retries may exceed the automatic estimate ceilings, but stay bounded.
+    static let retryCeiling = TaskLimits(max_steps: 400, max_model_calls: 600, max_tokens: 20_000_000, timeout_seconds: 4 * 3600)
 
     enum CodingKeys: String, CodingKey { case max_steps, max_model_calls, max_tokens, timeout_seconds }
     func encode(to encoder: Encoder) throws {

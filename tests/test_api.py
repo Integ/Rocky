@@ -85,6 +85,21 @@ def test_automatic_preparation_rejects_manual_budget_override_before_model_call(
     prepare.assert_not_awaited()
 
 
+def test_shutdown_closes_owned_database_when_planner_close_fails(tmp_path, monkeypatch):
+    closed = []
+    monkeypatch.setattr(OpenAIPlanner, "close", AsyncMock(side_effect=PlannerError("close failed")))
+    monkeypatch.setattr(Store, "close", lambda self: closed.append(self))
+    settings = Settings(
+        auth_mode="token",
+        api_token="owner-test-token",
+        database_url=f"sqlite:///{tmp_path}/owned.db",
+    )
+    with pytest.raises(PlannerError):
+        with TestClient(create_app(settings)):
+            pass
+    assert len(closed) == 1
+
+
 def test_owner_auth_and_fail_closed_without_configuration(api):
     client, _ = api
     assert client.get("/health").status_code == 200
@@ -158,3 +173,21 @@ def test_missing_goals_and_invalid_pagination(api):
     client, _ = api
     assert client.get("/goals/missing", headers=AUTH).status_code == 404
     assert client.get("/goals?limit=1000", headers=AUTH).status_code == 422
+
+
+def test_budget_retry_contract_above_automatic_ceilings_is_accepted_once(api):
+    client, _ = api
+    retried = contract() | {
+        "limits": {
+            "max_steps": 200,
+            "max_model_calls": 300,
+            "max_tokens": 9_728_000,
+            "timeout_seconds": 7200,
+        }
+    }
+    headers = AUTH | {"Idempotency-Key": "budget-retry:original-goal"}
+    first = client.post("/goals", json=retried, headers=headers)
+    second = client.post("/goals", json=retried, headers=headers)
+    assert first.status_code == second.status_code == 202
+    assert first.json()["goal_id"] == second.json()["goal_id"]
+    assert first.json()["contract"]["limits"] == retried["limits"]

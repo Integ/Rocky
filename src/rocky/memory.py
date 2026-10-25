@@ -98,7 +98,10 @@ class StoreMemoryProvider:
         covered = set()
         summary = request.state.handoff_summary
         if summary:
-            for position, (_, row) in enumerate(ordered):
+            # Only the newest matching decision matters, and it is usually the
+            # latest one: scan backwards so long histories are not reparsed.
+            for position in range(len(ordered) - 1, -1, -1):
+                row = ordered[position][1]
                 if row.get("role") != "assistant":
                     continue
                 try:
@@ -107,6 +110,7 @@ class StoreMemoryProvider:
                     continue
                 if isinstance(decision, dict) and decision.get("handoff_summary") == summary:
                     covered = {index for index, _ in ordered[:position]}
+                    break
         latest = next((row for _, row in reversed(ordered) if row.get("role") == "tool"), None)
         latest_batch = self._batch_key(latest) if latest else ""
         for index, row in enumerate(rows):
@@ -282,7 +286,9 @@ class MemoryManager:
         *,
         records: Iterable[MemoryRecord] | None = None,
         handoff_summary: str | None = None,
+        omit_user_content: str = "",
     ) -> dict:
+        """omit_user_content: owner text the caller already sends whole elsewhere."""
         memory = {
             "handoff_summary": "",
             "conversation": [],
@@ -310,6 +316,9 @@ class MemoryManager:
         seen = set()
         for record in available:
             if record.kind not in grouped or not record.content:
+                continue
+            # Drop the duplicate before budgeting so its room goes to other history.
+            if omit_user_content and record.role == "user" and record.content == omit_user_content:
                 continue
             identity = (record.kind, record.key or record.content)
             if identity in seen:
@@ -419,12 +428,14 @@ def _item(record: MemoryRecord, layer: str) -> dict:
     return item
 
 
-def bounded_memory(request: PlanInput, *, manager: MemoryManager | None = None) -> dict:
+def bounded_memory(
+    request: PlanInput, *, manager: MemoryManager | None = None, omit_user_content: str = ""
+) -> dict:
     """Rebudget injected data at the model boundary; use state when absent."""
     supplied = getattr(request, "memory", None)
     manager = manager or MemoryManager()
     if not supplied:
-        return manager.build(request)
+        return manager.build(request, omit_user_content=omit_user_content)
     records = []
     for kind in ("conversation", "knowledge"):
         rows = supplied.get(kind, [])
@@ -444,4 +455,9 @@ def bounded_memory(request: PlanInput, *, manager: MemoryManager | None = None) 
                 )
             )
     summary = getattr(request.state, "handoff_summary", "") or supplied.get("handoff_summary", "")
-    return manager.build(request, records=records, handoff_summary=str(summary))
+    return manager.build(
+        request,
+        records=records,
+        handoff_summary=str(summary),
+        omit_user_content=omit_user_content,
+    )

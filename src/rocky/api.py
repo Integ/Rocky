@@ -169,10 +169,15 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await asyncio.to_thread(database.initialize)
-        yield
-        await planner.close()
-        if store is None:
-            database.close()
+        try:
+            yield
+        finally:
+            try:
+                await planner.close()
+            finally:
+                # A model client that fails to close must not leak the database.
+                if store is None:
+                    database.close()
 
     app = FastAPI(
         title="Rocky",

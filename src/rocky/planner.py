@@ -8,10 +8,13 @@ import copy
 import email.utils
 import hashlib
 import json
+import logging
 import os
 import shlex
 import sys
 import time
+from datetime import UTC, datetime
+from functools import lru_cache
 from typing import Any
 
 import httpx
@@ -54,6 +57,8 @@ _REVIEW_RESPONSE_TOKENS = 12_000
 _HIGH_REASONING = frozenset({"high", "xhigh", "max"})
 # Long non-streaming responses from reasoning models need minutes, not seconds.
 # The workflow's per-attempt Activity timeout must stay above this value.
+log = logging.getLogger(__name__)
+
 MODEL_TIMEOUT_SECONDS = 300.0
 _MODEL_TIMEOUT = httpx.Timeout(MODEL_TIMEOUT_SECONDS, connect=15.0)
 _OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -156,11 +161,10 @@ deadline_seconds values: they are historical metadata, not execution limits.
 Choose economical steps and leave enough budget for actual completion checks. Do not
 spend the entire run on exploration: write a useful first deliverable once the
 essential evidence is available, then validate and refine it. The execution envelope
-includes budget_remaining, after reservation of this call. When it gets low,
-prioritize required deliverables and independent review over optional exploration.
-Do not lower acceptance standards or claim unverified completion to fit a budget.
-Do not
-repeat failed operations without new evidence or a changed plan. Recent observations
+includes budget_remaining (steps, model_calls, tokens and wall-clock seconds), after
+reservation of this call. When it gets low, prioritize required deliverables and
+independent review over optional exploration. Do not lower acceptance standards or
+claim unverified completion to fit a budget. Do not repeat failed operations without new evidence or a changed plan. Recent observations
 may be omitted or visibly truncated; missing text is not evidence. Read a file
 again when its earlier content is no longer visible; repeating a read whose
 result is still visible is not progress. The reason is a brief, user-facing explanation,
@@ -576,6 +580,33 @@ def _compact_schema(schema: Any) -> Any:
     }
 
 
+@lru_cache(maxsize=16)
+def _schema_text(schema: type[BaseModel]) -> str:
+    """Schemas are fixed per class; serialize each once instead of per request."""
+    return json.dumps(_compact_schema(schema.model_json_schema()), separators=(",", ":"))
+
+
+def _budget_remaining(request: PlanInput) -> dict[str, int | None]:
+    """What the task may still spend; None means that limit is disabled."""
+    limits, state = request.run.contract.limits, request.state
+
+    def left(limit: int | None, used: int) -> int | None:
+        return None if limit is None else max(0, limit - used)
+
+    seconds = None
+    if state.deadline_at:
+        deadline = datetime.fromisoformat(state.deadline_at)
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=UTC)
+        seconds = max(0, int((deadline - datetime.now(UTC)).total_seconds()))
+    return {
+        "steps": left(limits.max_steps, state.steps),
+        "model_calls": left(limits.max_model_calls, state.model_calls),
+        "tokens": left(limits.max_tokens, state.input_tokens + state.output_tokens),
+        "seconds": seconds,
+    }
+
+
 def _planning_run_context(request: PlanInput, *, scoped: bool) -> dict[str, Any]:
     fields = {
         "objective",
@@ -792,7 +823,7 @@ class OpenAIPlanner:
         system = (
             instructions
             + "\nReturn exactly one JSON object, without Markdown, matching this JSON schema:\n"
-            + json.dumps(_compact_schema(schema.model_json_schema()), separators=(",", ":"))
+            + _schema_text(schema)
         )
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(
@@ -941,7 +972,7 @@ class OpenAIPlanner:
     async def prepare_contract(
         self, draft: GoalDraft, model_settings: ModelSettings
     ) -> GoalContract:
-        requirements, _, _ = await self._request(
+        requirements, input_tokens, output_tokens = await self._request(
             instructions="""Define delivery requirements and execution budgets for Rocky before execution.
 The user's objective is the only source of task scope. Return concrete, verifiable
 acceptance criteria and a minimal set of deliverable files appropriate to that
@@ -974,6 +1005,12 @@ objective, permissions or model settings. Return only DeliveryRequirements.
             ),
             inference=model_settings,
             cache_key="rocky-delivery-requirements-v3",
+        )
+        # This call precedes the goal, so no task budget records its cost.
+        log.info(
+            "Prepared goal contract with %d input and %d output tokens",
+            input_tokens,
+            output_tokens,
         )
         return GoalContract(
             objective=draft.objective,
@@ -1014,24 +1051,7 @@ objective, permissions or model settings. Return only DeliveryRequirements.
                 )[:50],
                 "max_parallel_actions": MAX_PARALLEL_ACTIONS,
                 "response_token_limit": response_tokens,
-                "budget_remaining": {
-                    "steps": max(0, request.run.contract.limits.max_steps - request.state.steps)
-                    if request.run.contract.limits.max_steps is not None
-                    else None,
-                    "model_calls": max(
-                        0, request.run.contract.limits.max_model_calls - request.state.model_calls
-                    )
-                    if request.run.contract.limits.max_model_calls is not None
-                    else None,
-                    "tokens": max(
-                        0,
-                        request.run.contract.limits.max_tokens
-                        - request.state.input_tokens
-                        - request.state.output_tokens,
-                    )
-                    if request.run.contract.limits.max_tokens is not None
-                    else None,
-                },
+                "budget_remaining": _budget_remaining(request),
                 "python_executable": sys.executable,
             },
         }
@@ -1044,17 +1064,13 @@ objective, permissions or model settings. Return only DeliveryRequirements.
         )
         if room < 256:
             raise PlannerError("Goal context is too large for a bounded model request.")
-        payload["memory"] = bounded_memory(
-            request, manager=self.memory_manager.with_budget(min(self.memory_manager.budget, room))
-        )
         # Whole owner feedback already present in the envelope needs one copy.
         # If feedback was clipped, retain the independently bounded history.
-        if payload["feedback"] == request.feedback and request.feedback:
-            payload["memory"]["conversation"] = [
-                item
-                for item in payload["memory"]["conversation"]
-                if not (item.get("role") == "user" and item.get("content") == request.feedback)
-            ]
+        payload["memory"] = bounded_memory(
+            request,
+            manager=self.memory_manager.with_budget(min(self.memory_manager.budget, room)),
+            omit_user_content=request.feedback if payload["feedback"] == request.feedback else "",
+        )
         decision, input_tokens, output_tokens = await self._request(
             instructions=_PLAN_INSTRUCTIONS + access,
             payload=payload,

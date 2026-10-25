@@ -514,3 +514,45 @@ def test_uncovered_old_excerpts_do_not_claim_summary_coverage():
     assert "covered by handoff" not in older["content"]
     uncompressed = MemoryManager([StoreMemoryProvider(RowStore(rows))]).build(request())
     assert "earlier source " * 200 in serialize_memory(uncompressed)
+
+
+def test_handoff_coverage_scan_stops_at_newest_matching_decision(monkeypatch):
+    rows = _store_rows(["module body " * 200 for _ in range(30)])
+    summary = "Modules inspected; draft the report."
+    for position in (10, -2):  # An older duplicate must not shorten coverage.
+        decision = json.loads(rows[position]["content"])
+        decision["handoff_summary"] = summary
+        rows[position]["content"] = json.dumps(decision)
+    decisions = {row["content"] for row in rows if row["role"] == "assistant"}
+    parsed = []
+    original = json.loads
+
+    def counting(text, *args, **kwargs):
+        if text in decisions:
+            parsed.append(text)
+        return original(text, *args, **kwargs)
+
+    monkeypatch.setattr(json, "loads", counting)
+    records = list(StoreMemoryProvider(RowStore(rows)).recall(request(summary)))
+
+    # One working-copy parse per decision, plus a single coverage check.
+    assert len(parsed) == len(decisions) + 1
+    covered = [record.key for record in records if "covered by handoff" in record.content]
+    assert "phase:task:28:act" in covered
+
+
+def test_omitted_owner_feedback_frees_room_for_other_history():
+    feedback = "请使用中文并注明来源。" * 30
+    evidence = "EVIDENCE " + "finding " * 100
+    records = [
+        MemoryRecord(kind="conversation", key="owner", role="user", content=feedback, priority=5),
+        MemoryRecord(kind="conversation", key="tool", role="tool", content=evidence),
+    ]
+    manager = MemoryManager(budget=1500)
+
+    kept = manager.build(request(), records=records)
+    omitted = manager.build(request(), records=records, omit_user_content=feedback)
+
+    assert evidence not in serialize_memory(kept)
+    assert [item["id"] for item in omitted["conversation"]] == ["tool"]
+    assert omitted["conversation"][0]["content"] == evidence

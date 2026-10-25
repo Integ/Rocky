@@ -232,9 +232,21 @@ final class AppModel: ObservableObject {
     func retryBudgetExhausted(_ goal: Goal) async {
         guard goal.state.status == "budget_exhausted", runtime.isReady, isConnected,
               !isSubmitting, provider?.isConfigured == true else { return }
-        newTask()
-        input = goal.contract.objective
-        await send()
+        let generation = selectionGeneration
+        isSubmitting = true
+        error = nil
+        submissionStatus = "正在以更高预算重新创建任务…"
+        defer { isSubmitting = false; submissionStatus = nil }
+        do {
+            // Re-estimating the same objective would likely pick the same budget
+            // again; reuse the accepted contract and grow its limits instead.
+            // The key makes repeated clicks for one exhausted task idempotent.
+            let retried = try await api.submit(goal.contract.retryingWithLargerBudget(), key: "budget-retry:\(goal.id)")
+            goals.removeAll { $0.id == retried.id }
+            goals.insert(retried, at: 0)
+            if generation == selectionGeneration { showArchived = false; select(retried.id) }
+            await refresh()
+        } catch { self.error = error.localizedDescription }
     }
 
     func cancel() async {

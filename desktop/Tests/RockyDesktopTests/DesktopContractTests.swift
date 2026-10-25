@@ -24,6 +24,25 @@ final class DesktopContractTests: XCTestCase {
         }
     }
 
+    func testBudgetRetryKeepsContractAndDoublesFiniteLimits() {
+        let original = GoalContract(objective: "整理材料", acceptance_criteria: ["逐项注明来源"], deliverables: [Deliverable(path: "notes.md")],
+                                    limits: TaskLimits(max_steps: 20, max_model_calls: 30, max_tokens: 1_024_000, timeout_seconds: nil))
+        let retried = original.retryingWithLargerBudget()
+        XCTAssertEqual(retried.objective, original.objective)
+        XCTAssertEqual(retried.acceptance_criteria, original.acceptance_criteria)
+        XCTAssertEqual(retried.deliverables, original.deliverables)
+        XCTAssertEqual(retried.limits, TaskLimits(max_steps: 40, max_model_calls: 60, max_tokens: 2_048_000, timeout_seconds: nil))
+    }
+
+    func testBudgetRetryStaysWithinCeilingWithoutShrinking() {
+        let large = GoalContract(objective: "整理材料", acceptance_criteria: ["完成"], deliverables: [Deliverable(path: "notes.md")],
+                                 limits: TaskLimits(max_steps: 300, max_model_calls: 900, max_tokens: Int.max, timeout_seconds: 3600))
+        XCTAssertEqual(large.retryingWithLargerBudget().limits,
+                       TaskLimits(max_steps: 400, max_model_calls: 900, max_tokens: Int.max, timeout_seconds: 7200))
+        let legacy = GoalContract(objective: "整理材料", acceptance_criteria: ["完成"], deliverables: [Deliverable(path: "notes.md")], limits: nil)
+        XCTAssertEqual(legacy.retryingWithLargerBudget().limits, TaskLimits(max_steps: 200, max_model_calls: 300, max_tokens: 1_000_000, timeout_seconds: 7200))
+    }
+
     func testDirectContractDefaultsIncludeAllTools() {
         let contract = GoalContract(objective: "整理材料", acceptance_criteria: ["完成"], deliverables: [Deliverable(path: "report.md")])
         XCTAssertEqual(contract.allowed_tools, Self.fullTools)

@@ -247,10 +247,10 @@ struct WorkspaceView: View {
                         HStack(spacing: 10) {
                             if goal.state.status == "budget_exhausted" {
                                 Button { Task { await model.retryBudgetExhausted(goal) } } label: {
-                                    Label("使用新预算重试", systemImage: "arrow.clockwise")
+                                    Label("加倍预算重试", systemImage: "arrow.clockwise")
                                 }.buttonStyle(.borderedProminent)
                                     .disabled(!model.isConnected || model.isSubmitting || model.provider?.isConfigured != true)
-                                    .help("沿用原目标，重新评估预算并创建新任务；保留原任务记录。")
+                                    .help("沿用原目标和验收标准，预算翻倍后创建新任务；保留原任务记录。")
                             }
                             Button { model.newTask(); composerFocused = true } label: { Label("开始新任务", systemImage: "plus") }.buttonStyle(.bordered)
                         }.padding(.leading, 41)

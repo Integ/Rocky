@@ -215,6 +215,50 @@ def test_listing_an_external_ancestor_prunes_other_tasks_and_private_state(isola
     assert "receipt-link" not in result.content
 
 
+def test_listing_resolves_only_symlink_entries(isolated_tasks, monkeypatch):
+    tasks = isolated_tasks
+    for number in range(50):
+        (tasks.own / f"note-{number}.txt").write_text("plain")
+    (tasks.own / "notes-link").symlink_to(tasks.own / "note-0.txt")
+    resolved = []
+    original = type(tasks.own).resolve
+
+    def counting(self, *args, **kwargs):
+        resolved.append(self.name)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(tasks.own), "resolve", counting)
+    result = execute(tasks, Action(tool="list_files", path=None))
+
+    assert result.success, result.content
+    assert "note-49.txt" in result.content and "notes-link" in result.content
+    # Plain entries skip realpath; the symlink entries (including the fixture's
+    # aliases, which stay hidden) are still checked through their target.
+    assert not any(name.startswith("note-") for name in resolved)
+    assert "notes-link" in resolved and "other-alias" in resolved
+    assert "other-alias" not in result.content
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt execution requires macOS")
+def test_command_snapshot_resolves_only_symlink_entries(isolated_tasks, monkeypatch):
+    tasks = isolated_tasks
+    for number in range(50):
+        (tasks.own / f"file-{number}.txt").write_text("plain")
+    resolved = []
+    original = type(tasks.own).resolve
+
+    def counting(self, *args, **kwargs):
+        resolved.append(self.name)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(tasks.own), "resolve", counting)
+    result = execute(tasks, Action(tool="run_command", content="echo ok > out.txt"))
+
+    assert result.success, result.content
+    assert (tasks.own / "out.txt").read_text() == "ok\n"
+    assert not any(name.startswith("file-") for name in resolved)
+
+
 @pytest.mark.parametrize("protected", ["other", "own_control", "other_control"])
 @pytest.mark.parametrize("alias", ["absolute", "traversal", "symlink"])
 def test_reviewer_file_descriptions_do_not_expose_protected_contents(

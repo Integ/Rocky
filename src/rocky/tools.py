@@ -20,6 +20,7 @@ import unicodedata
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -88,6 +89,12 @@ def _path_failure(exc: OSError) -> ToolResult:
 def _clip(value: str) -> str:
     suffix = "\n[truncated]"
     return value if len(value) <= MAX_CONTENT else value[: MAX_CONTENT - len(suffix)] + suffix
+
+
+@lru_cache(maxsize=256)
+def _path_key(text: str) -> str:
+    """Compare paths the way the macOS filesystem does: case and Unicode insensitive."""
+    return unicodedata.normalize("NFD", text).casefold() if sys.platform == "darwin" else text
 
 
 def _digest(content: bytes) -> str:
@@ -586,31 +593,32 @@ class WorkspaceTools:
 
     def _check_path(self, goal_id: str, path: Path, *, write: bool = False) -> None:
         """Full access never includes another goal or the private control tree."""
+        # Normalize the candidate once; the fixed root and protected keys are cached.
+        target = _path_key(str(path))
 
-        def key(value: Path) -> str:
-            text = str(value)
-            return (
-                unicodedata.normalize("NFD", text).casefold() if sys.platform == "darwin" else text
-            )
+        def inside(parent: Path) -> bool:
+            base = _path_key(str(parent))
+            return target == base or target.startswith(base.rstrip("/") + "/")
 
-        def inside(value: Path, parent: Path) -> bool:
-            return key(value) == key(parent) or key(value).startswith(key(parent).rstrip("/") + "/")
-
-        if inside(path, self.root) and not inside(path, self.root / goal_id):
+        if inside(self.root) and not inside(self.root / goal_id):
             raise ToolError(
                 "Access to other task directories and private .rocky storage is forbidden"
             )
-        if any(inside(path, protected) for protected in self.protected_paths):
+        if any(inside(protected) for protected in self.protected_paths):
             raise ToolError("Access to Rocky's private control files is forbidden")
-        if write and any(inside(path, protected) for protected in self.protected_write_paths):
+        if write and any(inside(protected) for protected in self.protected_write_paths):
             raise ToolError(
                 "File tools cannot modify Rocky's code or Python runtime; request approved unsandboxed execution"
             )
 
-    def _visible_path(self, goal_id: str, path: Path) -> bool:
+    def _visible_path(self, goal_id: str, path: Path, *, parent_resolved: bool = False) -> bool:
+        """parent_resolved: path is an entry of a real directory below a resolved root."""
         try:
             self._check_path(goal_id, path)
-            self._check_path(goal_id, path.resolve())
+            # Walkers never descend symlinked directories, so only the entry itself
+            # can redirect elsewhere; one lstat then replaces a full realpath.
+            if not parent_resolved or path.is_symlink():
+                self._check_path(goal_id, path.resolve())
             return True
         except (OSError, RuntimeError, ToolError):
             return False
@@ -749,7 +757,7 @@ class WorkspaceTools:
                 command = [*prefix, *command]
 
             def visible(path: Path) -> bool:
-                return self._visible_path(request.run.goal_id, path)
+                return self._visible_path(request.run.goal_id, path, parent_resolved=True)
 
             before, complete_before = _snapshot(directory, visible)
             with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
@@ -823,7 +831,7 @@ class WorkspaceTools:
                     # They remain readable when explicitly requested.
                     if name == ".rocky-sandbox":
                         continue
-                    if not self._visible_path(request.run.goal_id, item):
+                    if not self._visible_path(request.run.goal_id, item, parent_resolved=True):
                         continue
                     try:
                         self._check_parent(request.run.goal_id, descriptor, name)
