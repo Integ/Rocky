@@ -72,6 +72,26 @@ uv run python scripts/run_evals.py baseline 某次运行/report.json -o evals/ba
 
 成功率和 token 设有容差，是因为真实模型单次运行波动较大；虚假成功不设容差。
 
+默认门槛只比较总体成功率和通过运行的成本：同样的失败继续出现、通过的任务互换、失败任务
+花费增加，都可能不触发门槛。针对需要修复的任务，可在 `run` 或 `compare` 中添加可重复的绝对检查：
+
+```bash
+uv run python scripts/run_evals.py compare baseline.json current.json --fail-on-regression \
+  --require-pass missing-info \
+  --max-task-tokens missing-info=60000 \
+  --max-task-tokens add-feature=200000 \
+  --max-task-tokens long-guide=150000
+```
+
+这些数字是需自行校准的试验目标，不是已经测得的修复效果。`--require-pass` 要求该任务每次运行
+都通过独立评分（`missing-info` 通过意味着正确 blocked）；`--max-task-tokens` 检查该任务所有
+已计量运行（含失败）的平均 token。任务缺失或无 token 计量也失败。它们必须配合
+`--fail-on-regression`，并且仍要求两份报告的任务集合一致。
+成本检查发生在运行结束后，**不会限制执行时的花费**；硬上限由 `contract.limits` 决定。
+
+排查这三项失败的证据、离线测试和分阶段复测方法见
+[`docs/eval-failure-investigation.md`](../docs/eval-failure-investigation.md)。
+
 仓库中的基线：
 
 | 文件 | 模型 | 结果 | 说明 |

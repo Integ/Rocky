@@ -213,6 +213,25 @@ def test_step_metrics_count_tools_repeats_recoveries_and_time():
     assert metrics["phase_seconds"] == {"act": 7.0, "complete": 2.0, "think": 8.0}
 
 
+def test_step_metrics_count_each_batched_result_and_cross_batch_repeats():
+    actions = [{"tool": "read_file", "path": path} for path in ("a.txt", "b.txt")]
+    batch = step(
+        "act",
+        decision={"kind": "act", "actions": actions},
+        output={
+            "results": [
+                {"action": action, "result": {"success": index == 0}}
+                for index, action in enumerate(actions)
+            ],
+        },
+    )
+    metrics = evaluation.step_metrics([act("read_file", "a.txt"), batch])
+    assert metrics["tool_calls"] == 3 and metrics["tools"] == {"read_file": 3}
+    assert metrics["duplicate_actions"] == 1 and metrics["tool_failures"] == 1
+    failed = step("act", "failed", decision={"kind": "act", "actions": actions})
+    assert evaluation.step_metrics([failed])["tool_failures"] == 2
+
+
 def run_record(task, passed, *, status="succeeded", steps=10, tokens=1000, approvals=0):
     return {
         "task": task,
@@ -342,6 +361,90 @@ def test_gate_refuses_a_different_model_or_task_set():
     assert any("missing a, new b" in item for item in evaluation.find_regressions(baseline, subset))
 
 
+def test_task_guards_cover_persistent_failures_and_their_token_cost():
+    baseline = gate_report(
+        [
+            run_record("a", True, tokens=100),
+            run_record("missing-info", False, status="budget_exhausted", tokens=1000),
+        ]
+    )
+    current = gate_report(
+        [
+            run_record("a", True, tokens=100),
+            run_record("missing-info", False, status="budget_exhausted", tokens=2000),
+        ]
+    )
+    # The existing aggregate gate is blind to cost growth of failed work.
+    assert evaluation.find_regressions(baseline, current) == []
+    problems = evaluation.find_regressions(
+        baseline,
+        current,
+        require_pass=("missing-info",),
+        max_task_tokens={"missing-info": 1500},
+    )
+    assert len(problems) == 2
+    assert "Required task missing-info" in problems[0]
+    assert "2000 exceeds limit 1500" in problems[1]
+
+
+def test_task_guards_catch_success_swaps_and_require_every_repetition():
+    baseline = gate_report([run_record("a", True), run_record("b", False, status="blocked")])
+    swapped = gate_report([run_record("a", False, status="blocked"), run_record("b", True)])
+    assert evaluation.find_regressions(baseline, swapped) == []
+    assert evaluation.find_regressions(baseline, swapped, require_pass=("a",))
+    repeated = gate_report([run_record("a", True), run_record("a", False, status="blocked")])
+    assert any(
+        "Required task a" in problem
+        for problem in evaluation.find_regressions(
+            repeated,
+            repeated,
+            require_pass=("a",),
+        )
+    )
+
+
+def test_task_guards_accept_boundary_and_reject_unmeasured_or_absent_tasks():
+    report = gate_report([run_record("a", True, tokens=1500)] * 3)
+    assert (
+        evaluation.find_regressions(
+            report,
+            report,
+            require_pass=("a",),
+            max_task_tokens={"a": 1500},
+        )
+        == []
+    )
+    assert (
+        len(
+            evaluation.find_regressions(
+                report,
+                report,
+                require_pass=("absent",),
+                max_task_tokens={"absent": 1500},
+            )
+        )
+        == 2
+    )
+    unmeasured = gate_report(
+        [
+            {
+                "task": "a",
+                "category": "code",
+                "passed": False,
+                "outcome": "error",
+            }
+        ]
+    )
+    assert any(
+        "no measurement" in problem
+        for problem in evaluation.find_regressions(
+            unmeasured,
+            unmeasured,
+            max_task_tokens={"a": 1500},
+        )
+    )
+
+
 def test_reports_from_before_cached_tokens_still_summarize():
     record = run_record("a", True, steps=5, tokens=100)
     assert "cached_input_tokens" not in record
@@ -379,6 +482,51 @@ def test_compare_command_exits_nonzero_only_when_gating_finds_a_regression(
     assert main("compare", str(trimmed), str(paths["worse"]), "--fail-on-regression") == 1
     assert "Success rate fell from 1 to 0" in capsys.readouterr().out
     assert main("compare", str(trimmed), str(paths["baseline"]), "--fail-on-regression") == 0
+    assert (
+        main(
+            "compare",
+            str(trimmed),
+            str(paths["baseline"]),
+            "--fail-on-regression",
+            "--require-pass",
+            "a",
+            "--max-task-tokens",
+            "a=100",
+        )
+        == 0
+    )
+    assert (
+        main(
+            "compare",
+            str(trimmed),
+            str(paths["baseline"]),
+            "--fail-on-regression",
+            "--max-task-tokens",
+            "a=99",
+        )
+        == 1
+    )
+    assert (
+        main(
+            "compare",
+            str(trimmed),
+            str(paths["worse"]),
+            "--fail-on-regression",
+            "--max-success-drop",
+            "1",
+            "--require-pass",
+            "a",
+        )
+        == 1
+    )
+    for arguments in (
+        ("--require-pass", "a"),
+        ("--max-task-tokens", "a=0"),
+        ("--max-task-tokens", "a=invalid"),
+    ):
+        with pytest.raises(SystemExit) as error:
+            main("compare", str(trimmed), str(paths["baseline"]), *arguments)
+        assert error.value.code == 2
 
 
 def test_eval_runner_withholds_api_keys_from_commands(monkeypatch):
@@ -564,6 +712,68 @@ async def test_request_for_missing_information_is_the_expected_outcome(temporal_
     assert record["outcome"] == "blocked" and record["status"] == "cancelled"
     assert record["passed"] and record["reason"] == reason
     assert record["steps"] == 1 and record["tool_calls"] == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio(loop_scope="session")
+async def test_missing_info_reads_sources_then_blocks_without_a_memo(temporal_env, tmp_path):
+    reason = BY_ID["missing-info"].spec.example_blocked_reason
+    planner = ScriptedPlanner(
+        [
+            Decision(
+                kind="act",
+                reason="Inspect the actuals and approved targets",
+                actions=[
+                    Action(tool="read_file", path="finance/q3.csv"),
+                    Action(tool="read_file", path="finance/targets.md"),
+                ],
+            ),
+            Decision(kind="blocked", reason=reason),
+        ]
+    )
+    record = await run(temporal_env, tmp_path, "missing-info", planner)
+    assert record["passed"] and record["outcome"] == "blocked"
+    assert record["steps"] == 2 and record["model_calls"] == 2
+    assert record["approvals"] == 0 and record["tool_calls"] == 2
+    assert planner.reviews == [] and len(planner.plans) == 2
+    assert "Pending CFO approval" in json.dumps(planner.plans[-1].memory)
+    assert not (tmp_path / "workspaces" / record["goal_id"] / "q3-memo.md").exists()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio(loop_scope="session")
+async def test_long_guide_tool_path_needs_no_shell_or_approval(temporal_env, tmp_path):
+    class GuidePlanner(ScriptedPlanner):
+        async def review(self, request, artifacts_text, **evidence):
+            result = await super().review(request, artifacts_text, **evidence)
+            result.claims = [
+                {
+                    "deliverable": "guide.md",
+                    "pointer": "",
+                    "value": "Atlas",
+                    "kind": "quoted",
+                    "location": "source:outline.md",
+                    "quote": "Atlas",
+                    "supported": True,
+                }
+            ]
+            return result
+
+    planner = GuidePlanner(
+        [
+            Decision(
+                kind="act",
+                reason="Read the outline",
+                action=Action(tool="read_file", path="outline.md"),
+            ),
+            write_reference("long-guide", "guide.md"),
+            finish(),
+        ]
+    )
+    record = await run(temporal_env, tmp_path, "long-guide", planner)
+    assert record["passed"] and record["outcome"] == "succeeded", record
+    assert record["approvals"] == 0 and record["steps"] == 3 and record["model_calls"] == 4
+    assert record["tools"] == {"read_file": 1, "write_file": 1}
 
 
 @pytest.mark.integration

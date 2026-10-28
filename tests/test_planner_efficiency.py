@@ -272,3 +272,78 @@ async def test_only_failures_without_model_output_are_retried_by_temporal():
             await getattr(target, call)(argument)
         assert decided.value.type == "ModelDecisionError"
         assert decided.value.non_retryable
+
+
+@pytest.mark.parametrize("provider_name", ["anthropic", "openai-compatible", "ollama"])
+@pytest.mark.parametrize("failure", ["truncated", "invalid", "refused"])
+async def test_unusable_http_responses_preserve_reported_usage(provider_name, failure):
+    def respond(request):
+        if provider_name == "anthropic":
+            return httpx.Response(
+                200,
+                json={
+                    "stop_reason": {
+                        "truncated": "max_tokens",
+                        "invalid": "end_turn",
+                        "refused": "refusal",
+                    }[failure],
+                    "content": [{"type": "text", "text": "{"}],
+                    "usage": {
+                        "input_tokens": 20,
+                        "cache_read_input_tokens": 50,
+                        "cache_creation_input_tokens": 30,
+                        "output_tokens": 10,
+                    },
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "length" if failure == "truncated" else "stop",
+                        "message": {"content": "{", "refusal": failure == "refused"},
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 10,
+                    "prompt_tokens_details": {"cached_tokens": 50},
+                },
+            },
+        )
+
+    planner, http = http_planner(respond)
+    async with http:
+        with pytest.raises(PlannerError) as error:
+            await planner.plan(request_with_settings(provider(provider_name)))
+    assert error.value.usage == {
+        "input_tokens": 100,
+        "output_tokens": 10,
+        "cached_input_tokens": 50,
+    }
+    # Only numeric counts, never raw provider response or credentials, cross Temporal.
+    with pytest.raises(ApplicationError) as activity_error:
+        await activities(error.value).plan(goal_request())
+    assert activity_error.value.details == (error.value.usage,)
+    assert activity_error.value.non_retryable
+
+
+@pytest.mark.parametrize("failure", ["truncated", "invalid", "refused", "empty"])
+async def test_unusable_responses_api_results_preserve_usage(failure):
+    response = completed(None, input_tokens=100, output_tokens=10)
+    response.usage.input_tokens_details = SimpleNamespace(cached_tokens=50)
+    if failure == "truncated":
+        response.status = "incomplete"
+        response.incomplete_details = SimpleNamespace(reason="max_output_tokens")
+    elif failure == "invalid":
+        response.output_parsed = {"kind": "unsupported"}
+    elif failure == "refused":
+        response.output = [SimpleNamespace(content=[SimpleNamespace(type="refusal")])]
+    with pytest.raises(PlannerError) as error:
+        await OpenAIPlanner(Settings(), client=fake_client(response)).plan(goal_request())
+    assert error.value.usage == {
+        "input_tokens": 100,
+        "output_tokens": 10,
+        "cached_input_tokens": 50,
+    }

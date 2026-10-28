@@ -55,6 +55,9 @@ _MODEL_RETRY = RetryPolicy(
     non_retryable_error_types=["ModelDecisionError", "GoalCancelled"],
 )
 _REPORTED_MODEL_ERRORS = {"ModelDecisionError", "ModelTransientError"}
+_BLOCKED_REASON_ERROR = (
+    "A blocked decision requires the concrete missing information or dependency."
+)
 
 
 @workflow.defn(name="RockyGoal")
@@ -125,6 +128,17 @@ class GoalWorkflow:
         if isinstance(cause, ApplicationError) and cause.type == "GoalCancelled":
             self._cancel_requested = True
         return self._cancel_requested
+
+    def _record_failed_model_usage(self, error: ActivityError) -> None:
+        cause = error.cause
+        if not isinstance(cause, ApplicationError) or cause.type != "ModelDecisionError":
+            return
+        if not cause.details or not isinstance(cause.details[0], dict):
+            return  # Older histories and failures with no reported usage.
+        for name in ("input_tokens", "output_tokens", "cached_input_tokens"):
+            value = cause.details[0].get(name)
+            if type(value) is int and value >= 0:
+                setattr(self._state, name, getattr(self._state, name) + value)
 
     def _guard_dispatch(self) -> None:
         if self._cancel_requested:
@@ -395,6 +409,8 @@ class GoalWorkflow:
             or decision.wait_seconds is not None
         ):
             return "Only act may contain an action, and only wait may contain a wait duration."
+        if decision.kind == "blocked" and not decision.reason.strip():
+            return _BLOCKED_REASON_ERROR
         return ""
 
     async def _harness_wait(self, decision: Decision) -> str:
@@ -784,6 +800,12 @@ class GoalWorkflow:
                     await self._end_phase({"decision": planned.decision.model_dump(mode="json")})
                     await self._start_phase(run, "decide", cycle)
                 cycle.error = self._decision_error(run, cycle.decision)
+                # Existing histories may contain accepted empty reasons. Keep
+                # their recorded branches when replaying; validate new decisions.
+                if cycle.error == _BLOCKED_REASON_ERROR and not workflow.patched(
+                    "require-blocked-reason-v1"
+                ):
+                    cycle.error = ""
                 if not cycle.error:
                     decision = cycle.decision
                     if decision.task_progress is not None:
@@ -798,6 +820,7 @@ class GoalWorkflow:
             except ActivityError as error:
                 if self._check_activity_cancellation(error):
                     raise _StopExecution("cancelled", "Cancelled by the user.") from None
+                self._record_failed_model_usage(error)
                 cause = error.cause
                 cycle.error = (
                     cause.message[:4000]
@@ -814,6 +837,7 @@ class GoalWorkflow:
                 except ActivityError as error:
                     if self._check_activity_cancellation(error):
                         raise _StopExecution("cancelled", "Cancelled by the user.") from None
+                    self._record_failed_model_usage(error)
                     cycle.error = "The action could not complete. Inspect its actual state before issuing another operation; change strategy if the dependency remains unavailable."
                     output = {"error": cycle.error}
                 # Model-maintained summaries accumulate conclusions across the
