@@ -516,12 +516,13 @@ async def test_task_scoped_approval_covers_later_similar_commands_only(temporal_
 class RateLimitedActivities(Activities):
     attempts: int = 0
     failure_type: str = "ModelTransientError"
+    failure_usage: dict = field(default_factory=dict)
 
     @activity.defn(name="rocky.plan")
     async def plan(self, value: PlanInput) -> PlanResult:
         self.attempts += 1
         if self.attempts == 1:
-            raise ApplicationError("rate limited", type=self.failure_type)
+            raise ApplicationError("rate limited", self.failure_usage, type=self.failure_type)
         self.plans.append(value)
         return PlanResult(decision=finish(), input_tokens=12, output_tokens=7)
 
@@ -556,6 +557,38 @@ async def test_unusable_model_responses_are_never_repeated(temporal_env):
     assert activities.attempts == 2
     assert result.steps == 2
     assert activities.plans[0].feedback == "rate limited"
+
+
+async def test_reported_failed_response_usage_survives_temporal_serialization(temporal_env):
+    activities = RateLimitedActivities(
+        failure_type="ModelDecisionError",
+        failure_usage={"input_tokens": 100, "output_tokens": 10, "cached_input_tokens": 50},
+    )
+    run = request(limits=ExecutionLimits(max_tokens=100))
+    async with worker(temporal_env, run, activities):
+        result = await temporal_env.client.execute_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+    assert activities.attempts == 1 and activities.verifications == 0
+    assert result.status == "budget_exhausted"
+    assert (result.input_tokens, result.output_tokens, result.cached_input_tokens) == (100, 10, 50)
+
+
+async def test_empty_blocked_reason_enters_bounded_recovery(temporal_env):
+    activities = Activities(decisions=[Decision(kind="blocked", reason="")] * 2)
+    run = request(max_no_progress=1)
+    async with worker(temporal_env, run, activities):
+        handle = await temporal_env.client.start_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        await asyncio.wait_for(activities.blocked.wait(), timeout=15)
+        state = await handle.query(GoalWorkflow.state)
+        assert state.status == "blocked" and "missing information" in state.reason
+        assert state.model_calls == 2 and not activities.tools
+        await handle.signal(GoalWorkflow.cancel)
+        assert (await handle.result()).status == "cancelled"
+    replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
+    await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)
 
 
 @dataclass

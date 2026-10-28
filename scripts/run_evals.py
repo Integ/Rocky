@@ -168,6 +168,8 @@ def _compare(baseline: dict, current: dict, args) -> int:
         current,
         max_success_drop=args.max_success_drop,
         max_token_increase=args.max_token_increase,
+        require_pass=tuple(args.require_pass),
+        max_task_tokens=dict(args.max_task_tokens),
     )
     if not problems:
         print("\nNo regression against the baseline.")
@@ -194,6 +196,32 @@ def _add_gate(parser) -> None:
         default=0.25,
         help="tolerated relative rise in mean tokens per passed run (default 0.25)",
     )
+    parser.add_argument(
+        "--require-pass",
+        action="append",
+        default=[],
+        metavar="TASK",
+        help="require this task to pass every run, even if it failed in the baseline (repeatable)",
+    )
+    parser.add_argument(
+        "--max-task-tokens",
+        action="append",
+        default=[],
+        type=_task_token_limit,
+        metavar="TASK=TOKENS",
+        help="cap this task's mean tokens across passed and failed runs (repeatable)",
+    )
+
+
+def _task_token_limit(value: str) -> tuple[str, int]:
+    name, separator, number = value.partition("=")
+    try:
+        limit = int(number)
+    except ValueError:
+        limit = 0
+    if not name.strip() or not separator or limit <= 0:
+        raise argparse.ArgumentTypeError("Expected TASK=TOKENS with a positive integer limit.")
+    return name, limit
 
 
 def _load(path: Path) -> dict:
@@ -240,6 +268,9 @@ def main() -> int:
     baseline.add_argument("--output", "-o", type=Path, required=True)
     commands.add_parser("list", help="list tasks")
     args = parser.parse_args()
+    if getattr(args, "require_pass", []) or getattr(args, "max_task_tokens", []):
+        if not args.fail_on_regression:
+            parser.error("task guards require --fail-on-regression")
 
     if args.command == "list":
         for task in evaluation.load_tasks():

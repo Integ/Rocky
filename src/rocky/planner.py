@@ -134,6 +134,9 @@ Valid decisions:
   acceptance criteria. The application will independently verify the artifacts.
 - blocked: specify the concrete missing information or authorization, or why
   the objective cannot be completed with the available information or access.
+  Once inspected evidence establishes that a required authoritative input is
+  unavailable, choose blocked and ask for that input. Do not substitute a draft,
+  invent a value, or keep making artifacts and checks that cannot resolve it.
 
 Keep explicit task state current: task_progress contains completed work,
 pending work and concrete evidence references (paths, source URLs and check
@@ -373,6 +376,51 @@ explain why the evidence satisfies them. Return only the structured verdict.
 
 class PlannerError(RuntimeError):
     """A safe error suitable for persisted workflow status and user display."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.usage: dict[str, int] = {}
+
+    def with_usage(self, usage: dict[str, int]) -> "PlannerError":
+        self.usage = usage
+        return self
+
+
+def _known_usage(usage: Any, provider: str = "responses") -> dict[str, int]:
+    """Keep only reported numeric counts, including for unusable responses.
+
+    No estimate is invented when a connection/SDK failure exposes no usage.
+    """
+
+    def get(name, default=0):
+        return (
+            usage.get(name, default) if isinstance(usage, dict) else getattr(usage, name, default)
+        )
+
+    try:
+        if provider == "anthropic":
+            cached = int(get("cache_read_input_tokens") or 0)
+            incoming = (
+                cached
+                + int(get("input_tokens") or 0)
+                + int(get("cache_creation_input_tokens") or 0)
+            )
+            outgoing = int(get("output_tokens") or 0)
+        elif provider == "responses":
+            incoming, outgoing = int(get("input_tokens") or 0), int(get("output_tokens") or 0)
+            cached = _cached_tokens(get("input_tokens_details", None))
+        else:
+            incoming, outgoing = int(get("prompt_tokens") or 0), int(get("completion_tokens") or 0)
+            cached = _cached_tokens(get("prompt_tokens_details", None)) or int(
+                get("prompt_cache_hit_tokens") or 0
+            )
+        return {
+            "input_tokens": max(0, incoming),
+            "output_tokens": max(0, outgoing),
+            "cached_input_tokens": min(max(0, cached), max(0, incoming)),
+        }
+    except (TypeError, ValueError, OverflowError):
+        return {}
 
 
 class TransientModelError(PlannerError):
@@ -853,18 +901,25 @@ def _invalid_result(error: ValidationError) -> PlannerError:
 def _parsed_result[Parsed: BaseModel](
     response: Any, schema: type[Parsed], max_output_tokens: int
 ) -> tuple[Parsed, int, int, int]:
+    reported = _known_usage(getattr(response, "usage", None))
     if getattr(response, "status", None) != "completed":
         details = getattr(response, "incomplete_details", None)
         if getattr(details, "reason", None) == "max_output_tokens":
-            raise _truncated_output(max_output_tokens)
-        raise PlannerError("Model response did not complete; no decision was accepted.")
+            raise _truncated_output(max_output_tokens).with_usage(reported)
+        raise PlannerError("Model response did not complete; no decision was accepted.").with_usage(
+            reported
+        )
     for item in getattr(response, "output", None) or []:
         for content in getattr(item, "content", None) or []:
             if getattr(content, "type", None) == "refusal":
-                raise PlannerError("Model refused the request; no decision was accepted.")
+                raise PlannerError(
+                    "Model refused the request; no decision was accepted."
+                ).with_usage(reported)
     parsed = getattr(response, "output_parsed", None)
     if parsed is None:
-        raise PlannerError("Model returned no structured result; no decision was accepted.")
+        raise PlannerError(
+            "Model returned no structured result; no decision was accepted."
+        ).with_usage(reported)
     try:
         result = schema.model_validate(parsed)
         usage = getattr(response, "usage", None)
@@ -872,9 +927,11 @@ def _parsed_result[Parsed: BaseModel](
         output_tokens = max(0, int(getattr(usage, "output_tokens", 0) or 0))
         cached = _cached_tokens(getattr(usage, "input_tokens_details", None))
     except ValidationError as error:
-        raise _invalid_result(error) from None
+        raise _invalid_result(error).with_usage(reported) from None
     except (TypeError, ValueError, OverflowError):
-        raise PlannerError("Model returned an invalid structured result.") from None
+        raise PlannerError("Model returned an invalid structured result.").with_usage(
+            reported
+        ) from None
     return result, input_tokens, output_tokens, min(cached, input_tokens)
 
 
@@ -1140,13 +1197,18 @@ class OpenAIPlanner:
             response.raise_for_status()
             result = await _completion_body(response, provider)
         usage = result.get("usage") or {}
+        reported = _known_usage(usage, provider)
         if provider == "anthropic":
             if result.get("stop_reason") == "max_tokens":
-                raise _truncated_output(max_output_tokens)
+                raise _truncated_output(max_output_tokens).with_usage(reported)
             if result.get("stop_reason") == "refusal":
-                raise PlannerError("Model refused the request; no decision was accepted.")
+                raise PlannerError(
+                    "Model refused the request; no decision was accepted."
+                ).with_usage(reported)
             if result.get("stop_reason") != "end_turn":
-                raise PlannerError("Model response did not complete; no decision was accepted.")
+                raise PlannerError(
+                    "Model response did not complete; no decision was accepted."
+                ).with_usage(reported)
             content = "".join(
                 item.get("text", "")
                 for item in result.get("content", [])
@@ -1163,9 +1225,11 @@ class OpenAIPlanner:
         else:
             choice = result["choices"][0]
             if choice.get("finish_reason") == "length":
-                raise _truncated_output(max_output_tokens)
+                raise _truncated_output(max_output_tokens).with_usage(reported)
             if choice.get("finish_reason") != "stop" or choice["message"].get("refusal"):
-                raise PlannerError("Model response did not complete; no decision was accepted.")
+                raise PlannerError(
+                    "Model response did not complete; no decision was accepted."
+                ).with_usage(reported)
             content = choice["message"]["content"]
             input_tokens, output_tokens = (
                 usage.get("prompt_tokens", 0),
@@ -1181,7 +1245,7 @@ class OpenAIPlanner:
         try:
             parsed = schema.model_validate_json(content)
         except ValidationError as error:
-            raise _invalid_result(error) from None
+            raise _invalid_result(error).with_usage(reported) from None
         input_tokens = max(0, int(input_tokens))
         return parsed, input_tokens, max(0, int(output_tokens)), min(max(0, cached), input_tokens)
 

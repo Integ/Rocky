@@ -39,7 +39,7 @@ def _model_failure(error: PlannerError) -> ApplicationError:
             type="ModelTransientError",
             next_retry_delay=timedelta(seconds=error.retry_after) if error.retry_after else None,
         )
-    return ApplicationError(str(error), type="ModelDecisionError", non_retryable=True)
+    return ApplicationError(str(error), error.usage, type="ModelDecisionError", non_retryable=True)
 
 
 _HEARTBEAT_SECONDS = 15

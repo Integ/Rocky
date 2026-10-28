@@ -537,21 +537,30 @@ def step_metrics(steps: list[dict]) -> dict:
             decision = inputs.get("decision") or {}
             if decision.get("kind") == "wait":
                 counts["waits"] += 1
-            action = decision.get("action")
-            if decision.get("kind") != "act" or not isinstance(action, dict):
+            if decision.get("kind") != "act":
                 continue
-            counts["tool_calls"] += 1
-            tools[str(action.get("tool"))] += 1
-            identity = json.dumps(
-                {key: action.get(key) for key in ("tool", "path", "url", "content")},
-                sort_keys=True,
-            )
-            counts["duplicate_actions"] += identity in seen
-            seen.add(identity)
-            result = output.get("result")
-            counts["tool_failures"] += step.get("status") == "failed" or (
-                isinstance(result, dict) and not result.get("success")
-            )
+            if isinstance(output.get("results"), list):
+                outcomes = [(item.get("action"), item.get("result")) for item in output["results"]]
+            elif isinstance(decision.get("actions"), list):
+                outcomes = [(action, None) for action in decision["actions"]]
+            else:
+                outcomes = [(decision.get("action"), output.get("result"))]
+            for action, result in outcomes:
+                if not isinstance(action, dict):
+                    continue
+                counts["tool_calls"] += 1
+                tools[str(action.get("tool"))] += 1
+                identity = json.dumps(
+                    {key: action.get(key) for key in ("tool", "path", "url", "content")},
+                    sort_keys=True,
+                )
+                counts["duplicate_actions"] += identity in seen
+                seen.add(identity)
+                counts["tool_failures"] += (
+                    not result.get("success")
+                    if isinstance(result, dict)
+                    else step.get("status") == "failed"
+                )
         elif phase == "complete":
             counts["verifications"] += 1
             verification = output.get("verification")
@@ -921,6 +930,8 @@ def find_regressions(
     *,
     max_success_drop: float = 0.15,
     max_token_increase: float = 0.25,
+    require_pass: tuple[str, ...] = (),
+    max_task_tokens: dict[str, int] | None = None,
 ) -> list[str]:
     """Reasons the current report is worse than the baseline; empty when it is not.
 
@@ -928,6 +939,9 @@ def find_regressions(
     passed run may grow by up to max_token_increase (relative) before failing,
     because single runs of a live model vary. Any rise in the false-success
     rate fails: Rocky claiming unverified work is never noise to tolerate.
+    Optional task guards require every repetition to pass or cap mean tokens
+    across all measured runs, including failures. They are absolute checks,
+    so an already failing baseline cannot normalize a persistent failure.
     """
     problems = []
     if _model_identity(baseline) != _model_identity(current):
@@ -974,5 +988,17 @@ def find_regressions(
             problems.append(
                 f"Mean tokens per passed run rose {growth:+.0%} "
                 f"({_number(before_tokens)} → {_number(after_tokens)})."
+            )
+    tasks = current["summary"]["by_task"]
+    for name in dict.fromkeys(require_pass):
+        task = tasks.get(name, {})
+        if not task.get("runs") or task.get("passed") != task["runs"]:
+            problems.append(f"Required task {name} did not pass every run (or was not run).")
+    for name, limit in (max_task_tokens or {}).items():
+        tokens = tasks.get(name, {}).get("tokens")
+        if tokens is None or tokens > limit:
+            problems.append(
+                f"Task {name} mean tokens {_number(tokens)} exceeds limit {limit} "
+                "or has no measurement."
             )
     return problems
