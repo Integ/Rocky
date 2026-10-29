@@ -1,0 +1,67 @@
+#!/bin/bash
+# launchd entry point for the Rocky background service (dev.rocky.agent).
+# Stages the bundled backend, prepares its Python environment, then execs
+# `rocky serve`. Paths mirror the data directory the desktop client reads.
+set -euo pipefail
+umask 077
+
+BIN="$(cd "$(dirname "$0")" && pwd -P)"
+RESOURCES="$(cd "$BIN/../.." && pwd -P)"
+if [[ -z "${HOME:-}" ]]; then
+  HOME="$(/usr/bin/dscl . -read "/Users/$(/usr/bin/id -un)" NFSHomeDirectory | /usr/bin/awk '{print $2}')"
+  export HOME
+fi
+SUPPORT="$HOME/Library/Application Support/Rocky"
+PROJECT="$SUPPORT/backend"
+RUN="$SUPPORT/run"
+LOGS="$SUPPORT/logs"
+
+for dir in "$SUPPORT" "$SUPPORT/data" "$SUPPORT/data/workspaces" "$LOGS" "$RUN" "$PROJECT" \
+           "$SUPPORT/cache" "$SUPPORT/cache/uv" "$SUPPORT/runtime" "$SUPPORT/runtime/python"; do
+  if [[ -L "$dir" ]]; then echo "Refusing symbolic link: $dir" >&2; exit 78; fi
+  mkdir -p "$dir"
+  chmod 700 "$dir"
+done
+if [[ -L "$PROJECT/.venv" ]]; then echo "Refusing symbolic link: $PROJECT/.venv" >&2; exit 78; fi
+
+[[ -f "$LOGS/agent.log" ]] && mv -f "$LOGS/agent.log" "$LOGS/agent.log.1"
+exec >"$LOGS/agent.log" 2>&1
+
+status() {
+  /usr/bin/printf '{"phase":"%s","detail":"%s","pid":%d}' "$1" "$2" "$$" >"$RUN/.status.$$"
+  mv -f "$RUN/.status.$$" "$RUN/status"
+}
+
+status preparing "正在准备本地运行环境"
+for name in src pyproject.toml uv.lock README.md; do
+  rm -rf "${PROJECT:?}/$name"
+  cp -R "$RESOURCES/backend/$name" "$PROJECT/$name"
+done
+
+# launchd starts agents with a minimal environment; set everything explicitly.
+export PATH="$PROJECT/.venv/bin:$BIN:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export TMPDIR="${TMPDIR:-$(/usr/bin/getconf DARWIN_USER_TEMP_DIR)}"
+export LANG=en_US.UTF-8 PYTHONUNBUFFERED=1
+export UV_CACHE_DIR="$SUPPORT/cache/uv" UV_PYTHON_INSTALL_DIR="$SUPPORT/runtime/python"
+export UV_PROJECT_ENVIRONMENT="$PROJECT/.venv" UV_NO_CONFIG=1 UV_NO_ENV_FILE=1 UV_NATIVE_TLS=true
+export ROCKY_HOST=127.0.0.1 ROCKY_PORT=18741
+export ROCKY_TEMPORAL_ADDRESS=127.0.0.1:18743 ROCKY_TASK_QUEUE=rocky-desktop
+export ROCKY_DATABASE_URL="sqlite:///$SUPPORT/data/rocky.db"
+export ROCKY_WORKSPACE_ROOT="$SUPPORT/data/workspaces"
+export ROCKY_TOOL_ACCESS=full
+export ROCKY_CREDENTIAL_PATH="$SUPPORT/data/credentials.json"
+export ROCKY_API_TOKEN_FILE="$SUPPORT/data/api-token"
+export ROCKY_RUN_DIR="$RUN" ROCKY_LOG_DIR="$LOGS"
+export ROCKY_TEMPORAL_BIN="$BIN/temporal" ROCKY_TEMPORAL_DB="$SUPPORT/data/temporal.db"
+export ROCKY_PREVENT_SLEEP=1
+
+cd "$PROJECT"
+if ! "$BIN/uv" sync --frozen --no-dev --no-editable --python 3.12 --managed-python \
+     --reinstall-package rocky-agent; then
+  status failed "Python 环境准备失败。检查网络后会自动重试；详细信息见 agent.log。"
+  exit 1
+fi
+# The client compares this with the bundle to restart a service left over
+# from an older app version.
+cp "$RESOURCES/backend/BUILD_ID" "$RUN/backend-build"
+exec "$PROJECT/.venv/bin/python" -m rocky.cli serve

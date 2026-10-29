@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 extension Color {
@@ -360,7 +361,10 @@ struct WorkspaceView: View {
             Text(runtime.status).font(.system(size: 19, weight: .medium))
             Text(runtime.detail).font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 450)
             if runtime.phase == .failed {
-                Button("重试启动") { Task { await runtime.start() } }.buttonStyle(.borderedProminent)
+                HStack(spacing: 10) {
+                    Button("打开日志") { NSWorkspace.shared.open(runtime.logsURL) }
+                    Button(runtime.serviceStopped ? "启动后台服务" : "重试启动") { Task { await runtime.start() } }.buttonStyle(.borderedProminent)
+                }
             } else { ProgressView().controlSize(.small) }
             Spacer()
             Text("首次启动会准备本地运行环境，可能需要几分钟。")

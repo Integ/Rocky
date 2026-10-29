@@ -2,29 +2,36 @@ import AppKit
 import Combine
 import Darwin
 import Foundation
+import ServiceManagement
 
-/// Owns the three local services. Never discovers, adopts, or stops unrelated services.
+/// Connects to the Rocky background service, a launchd agent the app registers
+/// through SMAppService. The agent (`rocky serve`) owns Temporal, the API and the
+/// worker and keeps running after the app quits; the app only observes it.
 @MainActor
 final class RuntimeManager: ObservableObject {
     enum Phase: String { case stopped, preparing, starting, ready, failed }
 
+    static let agentLabel = "dev.rocky.agent"
+    static let agentPlist = "dev.rocky.agent.plist"
+
     @Published private(set) var phase: Phase = .stopped
-    @Published private(set) var status = "本地服务尚未启动"
+    @Published private(set) var status = "后台服务尚未连接"
     @Published private(set) var detail = ""
+    /// Persistent owner token created by the service on first start.
+    @Published private(set) var apiToken = ""
+    /// True after the owner stopped the service from the app.
+    @Published private(set) var serviceStopped = false
     let apiURL = URL(string: "http://127.0.0.1:18741")!
-    let apiToken = UUID().uuidString + UUID().uuidString
     let applicationSupportURL: URL
     var workspaceURL: URL { applicationSupportURL.appendingPathComponent("data/workspaces") }
     var logsURL: URL { applicationSupportURL.appendingPathComponent("logs") }
+    var runURL: URL { applicationSupportURL.appendingPathComponent("run") }
+    var tokenURL: URL { applicationSupportURL.appendingPathComponent("data/api-token") }
     var isReady: Bool { phase == .ready }
 
-    private var services: [Process] = []
-    private var setupProcess: Process?
     private var monitor: Task<Void, Never>?
     private var generation = UUID()
-    private var lockFD: Int32 = -1
-    private var readyFile: URL?
-    private var logHandles: [FileHandle] = []
+    private let service = SMAppService.agent(plistName: RuntimeManager.agentPlist)
     private let fm = FileManager.default
 
     init() {
@@ -34,200 +41,172 @@ final class RuntimeManager: ObservableObject {
 
     func start() async {
         guard phase == .stopped || phase == .failed else { return }
-        stop()
         let run = UUID()
         generation = run
+        serviceStopped = false
+        monitor?.cancel()
+        monitor = nil
         phase = .preparing
-        status = "正在准备本地运行环境"
-        detail = "首次启动会下载 Python 和依赖，请保持网络连接。以后可直接打开应用。"
+        status = "正在连接后台服务"
+        detail = "Rocky 在后台常驻运行，关闭窗口后任务会继续。首次启动会下载 Python 和依赖，请保持网络连接。"
         do {
-            try prepareDirectoriesAndLock()
-            try checkPorts()
-            guard let resources = Bundle.main.resourceURL else { throw RuntimeFailure("找不到应用资源。请重新构建 Rocky.app。") }
-            let bundled = resources.appendingPathComponent("backend")
-            let uv = resources.appendingPathComponent("runtime/bin/uv")
-            let temporal = resources.appendingPathComponent("runtime/bin/temporal")
-            guard fm.isExecutableFile(atPath: uv.path), fm.isExecutableFile(atPath: temporal.path),
-                  fm.fileExists(atPath: bundled.appendingPathComponent("pyproject.toml").path) else {
-                throw RuntimeFailure("运行组件不完整。请使用 scripts/build_macos.sh 构建完整应用。")
-            }
-            let project = applicationSupportURL.appendingPathComponent("backend")
-            try stageBackend(from: bundled, to: project)
-            var environment = serviceEnvironment(project: project)
-            let marker = applicationSupportURL.appendingPathComponent("worker-ready-\(run.uuidString)")
-            readyFile = marker
-            environment["ROCKY_WORKER_READY_FILE"] = marker.path
-            let setup = try launch(uv, ["sync", "--frozen", "--no-dev", "--no-editable", "--python", "3.12", "--managed-python", "--reinstall-package", "rocky-agent"],
-                                   project: project, environment: environment, log: "setup")
-            setupProcess = setup
-            while setup.isRunning {
-                try await Task.sleep(for: .milliseconds(150))
-                guard generation == run, !Task.isCancelled else { throw CancellationError() }
-            }
-            setupProcess = nil
-            guard setup.terminationStatus == 0 else {
-                throw RuntimeFailure("Python 环境准备失败。检查网络后重试；详细信息见本地 setup.log。")
-            }
-            guard generation == run, !Task.isCancelled else { throw CancellationError() }
-            phase = .starting
-            status = "正在启动执行引擎"
-            detail = "正在连接本地任务存储和工作进程。"
-            let temporalProcess = try launch(temporal, ["server", "start-dev", "--ip", "127.0.0.1", "--port", "18743",
-                "--headless", "--db-filename", applicationSupportURL.appendingPathComponent("data/temporal.db").path],
-                project: project, environment: environment, log: "temporal")
-            services.append(temporalProcess)
-            let python = project.appendingPathComponent(".venv/bin/python")
-            try await waitForTemporal(python: python, project: project, environment: environment, run: run)
-            let api = try launch(python, ["-m", "rocky.cli", "api"], project: project, environment: environment, log: "api")
-            services.append(api)
-            let worker = try launch(python, ["-m", "rocky.cli", "worker"], project: project, environment: environment, log: "worker")
-            services.append(worker)
-            let deadline = Date().addingTimeInterval(60)
-            while Date() < deadline {
-                guard generation == run, !Task.isCancelled else { throw CancellationError() }
-                guard services.allSatisfy(\.isRunning) else {
-                    throw RuntimeFailure("本地执行服务意外退出。可打开日志查看原因，再重试启动。")
-                }
-                if fm.fileExists(atPath: marker.path), await apiIsHealthy() {
-                    phase = .ready
-                    status = "本地引擎已就绪"
-                    detail = "任务、记录和产物保存在这台 Mac 上。"
-                    startMonitoring(run: run)
-                    return
-                }
-                try await Task.sleep(for: .milliseconds(250))
-            }
-            throw RuntimeFailure("执行引擎启动超时。请检查本地日志后重试。")
+            try registerAgent()
+            try await waitUntilReady(run: run, timeout: 900)
+            guard generation == run else { return }
+            markReady()
+            startMonitoring(run: run)
         } catch is CancellationError {
-            if generation == run { stop() }
+            if generation == run { phase = .stopped }
         } catch {
-            if generation == run {
-                stop()
-                phase = .failed
-                status = "本地引擎启动失败"
-                detail = (error as? RuntimeFailure)?.message ?? "无法准备本地运行环境。请检查日志后重试。"
-            }
+            if generation == run { fail(error) }
         }
     }
 
-    /// Synchronous cleanup is intentional: application termination must not orphan child services.
-    func stop() {
+    /// Stops observing the service. The service and its tasks keep running.
+    func disconnect() {
         generation = UUID()
         monitor?.cancel()
         monitor = nil
-        let owned = ([setupProcess].compactMap { $0 } + services).reversed()
-        for process in owned where process.isRunning { process.terminate() }
-        let deadline = Date().addingTimeInterval(2)
-        while owned.contains(where: \.isRunning), Date() < deadline { Thread.sleep(forTimeInterval: 0.025) }
-        for process in owned where process.isRunning { kill(process.processIdentifier, SIGKILL) }
-        for process in owned { process.waitUntilExit() }
-        setupProcess = nil
-        services.removeAll()
-        logHandles.forEach { try? $0.close() }
-        logHandles.removeAll()
-        if let readyFile { try? fm.removeItem(at: readyFile) }
-        readyFile = nil
-        if lockFD >= 0 { flock(lockFD, LOCK_UN); close(lockFD); lockFD = -1 }
         phase = .stopped
-        status = "本地引擎已停止"
+        status = "后台服务尚未连接"
     }
 
-    private func prepareDirectoriesAndLock() throws {
-        for path in [applicationSupportURL, applicationSupportURL.appendingPathComponent("data"), workspaceURL, logsURL,
-                     applicationSupportURL.appendingPathComponent("cache"), applicationSupportURL.appendingPathComponent("cache/uv"),
-                     applicationSupportURL.appendingPathComponent("runtime"), applicationSupportURL.appendingPathComponent("runtime/python")] {
-            try ensureDirectory(path)
+    /// Restarts the agent; unfinished tasks resume from their durable history.
+    func restartService() async {
+        disconnect()
+        do {
+            try registerAgent()
+            try kickstart()
+        } catch {
+            fail(error)
+            return
         }
-        let lockURL = applicationSupportURL.appendingPathComponent("desktop.lock")
-        lockFD = open(lockURL.path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, S_IRUSR | S_IWUSR)
-        guard lockFD >= 0 else { throw RuntimeFailure("无法锁定本地数据目录。") }
-        guard flock(lockFD, LOCK_EX | LOCK_NB) == 0 else {
-            close(lockFD); lockFD = -1
-            throw RuntimeFailure("Rocky 已在运行。请切换到已打开的应用，或退出另一个实例后重试。")
-        }
+        await start()
     }
 
-    private func stageBackend(from source: URL, to destination: URL) throws {
-        try ensureDirectory(destination)
-        try rejectSymbolicLink(destination.appendingPathComponent(".venv"))
-        for name in ["src", "pyproject.toml", "uv.lock", "README.md"] {
-            let target = destination.appendingPathComponent(name)
-            if fm.fileExists(atPath: target.path) { try fm.removeItem(at: target) }
-            try fm.copyItem(at: source.appendingPathComponent(name), to: target)
-        }
-    }
-
-    private func rejectSymbolicLink(_ path: URL) throws {
-        // Compare the actual file type, not canonical path strings: APFS may
-        // normalize case ("Rocky" -> "rocky") without any symbolic link.
-        if let attributes = try? fm.attributesOfItem(atPath: path.path),
-           attributes[.type] as? FileAttributeType == .typeSymbolicLink {
-            throw RuntimeFailure("运行目录包含符号链接，请使用普通的 Rocky 应用数据目录。")
+    /// Unregisters the agent so launchd stops it. Starting again registers it.
+    func stopService() async {
+        disconnect()
+        do {
+            try await service.unregister()
+            serviceStopped = true
+            phase = .failed
+            status = "后台服务已停止"
+            detail = "未结束的任务会在后台服务再次启动后继续。点击下方按钮或重新打开 Rocky 即可启动。"
+        } catch {
+            fail(error)
         }
     }
 
-    private func ensureDirectory(_ path: URL) throws {
-        try rejectSymbolicLink(path)
-        try fm.createDirectory(at: path, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let values = try path.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-        guard values.isDirectory == true, values.isSymbolicLink != true else {
-            throw RuntimeFailure("本地运行环境需要普通目录。")
+    private func markReady() {
+        phase = .ready
+        status = "本地引擎已就绪"
+        detail = "任务、记录和产物保存在这台 Mac 上。关闭应用后任务继续在后台运行。"
+    }
+
+    private func fail(_ error: Error) {
+        phase = .failed
+        status = "无法连接后台服务"
+        detail = (error as? RuntimeFailure)?.message ?? error.localizedDescription
+    }
+
+    private func registerAgent() throws {
+        guard Bundle.main.bundleURL.pathExtension == "app" else {
+            throw RuntimeFailure("后台服务需要完整的应用包。请使用 scripts/build_macos.sh 构建 Rocky.app 后打开。")
+        }
+        if service.status != .enabled {
+            do {
+                try service.register()
+            } catch {
+                if service.status != .requiresApproval {
+                    throw RuntimeFailure("无法注册后台服务：\(error.localizedDescription)")
+                }
+            }
+        }
+        if service.status == .requiresApproval {
+            SMAppService.openSystemSettingsLoginItems()
+            throw RuntimeFailure("请在“系统设置 > 通用 > 登录项与扩展”中允许 Rocky 在后台运行，然后点击重试。")
         }
     }
 
-    private func serviceEnvironment(project: URL) -> [String: String] {
-        // Ignore arbitrary inherited ROCKY settings, provider keys, proxies and Python paths.
-        let runtimeBin = Bundle.main.resourceURL?.appendingPathComponent("runtime/bin").path ?? ""
-        var env: [String: String] = [
-            "PATH": project.appendingPathComponent(".venv/bin").path + ":" + runtimeBin + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "HOME": fm.homeDirectoryForCurrentUser.path,
-            "TMPDIR": NSTemporaryDirectory(), "LANG": "en_US.UTF-8", "PYTHONUNBUFFERED": "1",
-            "UV_CACHE_DIR": applicationSupportURL.appendingPathComponent("cache/uv").path,
-            "UV_PYTHON_INSTALL_DIR": applicationSupportURL.appendingPathComponent("runtime/python").path,
-            "UV_PROJECT_ENVIRONMENT": project.appendingPathComponent(".venv").path,
-            "UV_NO_CONFIG": "1", "UV_NO_ENV_FILE": "1", "UV_NATIVE_TLS": "true",
-            "ROCKY_AUTH_MODE": "token", "ROCKY_API_TOKEN": apiToken,
-            "ROCKY_HOST": "127.0.0.1", "ROCKY_PORT": "18741",
-            "ROCKY_TEMPORAL_ADDRESS": "127.0.0.1:18743", "ROCKY_TASK_QUEUE": "rocky-desktop",
-            "ROCKY_DATABASE_URL": "sqlite:///" + applicationSupportURL.appendingPathComponent("data/rocky.db").path,
-            "ROCKY_WORKSPACE_ROOT": workspaceURL.path,
-            "ROCKY_TOOL_ACCESS": "full",
-            "ROCKY_CREDENTIAL_PATH": applicationSupportURL.appendingPathComponent("data/credentials.json").path,
-        ]
-        // Certificate configuration supports managed corporate networks without importing credentials.
-        for key in ["SSL_CERT_FILE", "SSL_CERT_DIR"] { if let value = ProcessInfo.processInfo.environment[key] { env[key] = value } }
-        return env
-    }
-
-    private func launch(_ executable: URL, _ arguments: [String], project: URL,
-                        environment: [String: String], log name: String) throws -> Process {
-        let logURL = logsURL.appendingPathComponent("\(name).log")
-        let fd = open(logURL.path, O_CREAT | O_WRONLY | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, S_IRUSR | S_IWUSR)
-        guard fd >= 0 else { throw RuntimeFailure("无法打开本地日志文件。") }
-        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
-        logHandles.append(handle)
-        let process = Process()
-        process.executableURL = executable
-        process.arguments = arguments
-        process.currentDirectoryURL = project
-        process.environment = environment
-        process.standardOutput = handle
-        process.standardError = handle
-        process.standardInput = FileHandle.nullDevice
-        try process.run()
-        return process
-    }
-
-    private func waitForTemporal(python: URL, project: URL, environment: [String: String], run: UUID) async throws {
-        let probe = "import asyncio, os\nfrom temporalio.client import Client\nasync def main():\n for _ in range(200):\n  try:\n   await Client.connect(os.environ['ROCKY_TEMPORAL_ADDRESS'])\n   return\n  except Exception:\n   await asyncio.sleep(.2)\n raise SystemExit(1)\nasyncio.run(main())"
-        let process = try launch(python, ["-c", probe], project: project, environment: environment, log: "startup")
-        setupProcess = process
-        while process.isRunning {
+    private func waitUntilReady(run: UUID, timeout: TimeInterval) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        let expectedBuild = bundleBuild()
+        var restarted = false
+        while Date() < deadline {
             guard generation == run, !Task.isCancelled else { throw CancellationError() }
-            guard services.allSatisfy(\.isRunning) else { throw RuntimeFailure("任务存储服务无法启动，请检查 temporal.log。") }
-            try await Task.sleep(for: .milliseconds(200))
+            if let token = readToken() { apiToken = token }
+            let state = readStatus()
+            if state.phase == "ready", !apiToken.isEmpty, await apiIsHealthy() {
+                // A service left running by an older build is restarted once so
+                // it stages the backend shipped with this app.
+                if expectedBuild == nil || readText(runURL.appendingPathComponent("backend-build")) == expectedBuild { return }
+                if !restarted {
+                    try kickstart()
+                    restarted = true
+                }
+            }
+            switch state.phase {
+            case "preparing":
+                phase = .preparing
+                status = "正在准备本地运行环境"
+            case "starting":
+                phase = .starting
+                status = "正在启动执行引擎"
+            case "failed":
+                status = "后台服务启动失败，正在自动重试"
+                if let message = state.detail, !message.isEmpty { detail = message }
+            default:
+                break
+            }
+            if service.status == .requiresApproval {
+                throw RuntimeFailure("请在“系统设置 > 通用 > 登录项与扩展”中允许 Rocky 在后台运行，然后点击重试。")
+            }
+            try await Task.sleep(for: .milliseconds(500))
         }
-        setupProcess = nil
-        guard process.terminationStatus == 0 else { throw RuntimeFailure("无法连接本地任务存储。请检查 temporal.log 后重试。") }
+        throw RuntimeFailure("后台服务启动超时。可打开日志查看原因，再重试。")
+    }
+
+    private func kickstart() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["kickstart", "-k", "gui/\(getuid())/\(Self.agentLabel)"]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw RuntimeFailure("无法重启后台服务（launchctl 返回 \(process.terminationStatus)）。")
+        }
+    }
+
+    private struct AgentStatus: Decodable {
+        var phase: String
+        var detail: String?
+    }
+
+    private func readStatus() -> AgentStatus {
+        guard let data = try? Data(contentsOf: runURL.appendingPathComponent("status")),
+              let value = try? JSONDecoder().decode(AgentStatus.self, from: data) else {
+            return AgentStatus(phase: "unknown", detail: nil)
+        }
+        return value
+    }
+
+    private func readText(_ url: URL) -> String? {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func readToken() -> String? {
+        guard let token = readText(tokenURL), token.count >= 32 else { return nil }
+        return token
+    }
+
+    private func bundleBuild() -> String? {
+        Bundle.main.resourceURL.flatMap { readText($0.appendingPathComponent("backend/BUILD_ID")) }
     }
 
     private func apiIsHealthy() async -> Bool {
@@ -241,39 +220,34 @@ final class RuntimeManager: ObservableObject {
         } catch { return false }
     }
 
+    /// launchd restarts a crashed service; the client waits and reconnects
+    /// instead of stopping anything.
     private func startMonitoring(run: UUID) {
         monitor = Task { [weak self] in
+            var failures = 0
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
                 guard let self, self.generation == run else { return }
-                let healthy = await self.apiIsHealthy()
-                if !self.services.allSatisfy(\.isRunning) || !healthy {
-                    self.stop()
+                if self.service.status != .enabled {
+                    self.monitor = nil
                     self.phase = .failed
-                    self.status = "本地引擎连接中断"
-                    self.detail = "任务记录已保存。请重试启动，以恢复未完成的任务。"
+                    self.status = "后台服务已关闭"
+                    self.detail = "Rocky 的后台运行权限已被关闭。点击下方按钮重新启动，或在“系统设置 > 通用 > 登录项与扩展”中允许。"
                     return
                 }
+                if let token = self.readToken() { self.apiToken = token }
+                if await self.apiIsHealthy() {
+                    failures = 0
+                    if self.phase != .ready { self.markReady() }
+                } else {
+                    failures += 1
+                    if failures >= 2, self.phase == .ready {
+                        self.phase = .starting
+                        self.status = "正在重新连接后台服务"
+                        self.detail = "后台服务会自动重启，任务记录已保存。"
+                    }
+                }
             }
-        }
-    }
-
-    private func checkPorts() throws {
-        for port: UInt16 in [18741, 18743] {
-            let fd = socket(AF_INET, SOCK_STREAM, 0)
-            guard fd >= 0 else { throw RuntimeFailure("无法创建本地网络连接。") }
-            defer { close(fd) }
-            var reuse: Int32 = 1
-            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
-            var address = sockaddr_in()
-            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-            address.sin_family = sa_family_t(AF_INET)
-            address.sin_port = port.bigEndian
-            address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
-            let result = withUnsafePointer(to: &address) { pointer in
-                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
-            }
-            guard result == 0 else { throw RuntimeFailure("本地端口 \(port) 已被占用。请关闭占用该端口的服务后重试。") }
         }
     }
 }
