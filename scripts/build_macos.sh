@@ -17,7 +17,7 @@ STAGE="$(mktemp -d "$DIST/.rocky-build.XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
 APP="$STAGE/Rocky.app"
 RESOURCES="$APP/Contents/Resources"
-mkdir -p "$APP/Contents/MacOS" "$RESOURCES/backend" "$RESOURCES/runtime/bin"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Library/LaunchAgents" "$RESOURCES/backend" "$RESOURCES/runtime/bin"
 
 verify_sha() {
   local file="$1" expected="$2" actual
@@ -41,6 +41,12 @@ cp "$ROOT/desktop/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/pyproject.toml" "$ROOT/uv.lock" "$ROOT/README.md" "$RESOURCES/backend/"
 # Copy sources only: never include local environments, credentials, databases or test output.
 (cd "$ROOT" && tar --exclude='__pycache__' --exclude='*.pyc' -cf - src) | (cd "$RESOURCES/backend" && tar -xf -)
+# Each build gets a new ID so the app restarts a background service left
+# running from an older build.
+uuidgen > "$RESOURCES/backend/BUILD_ID"
+# The background service is a launchd agent registered by the app (SMAppService).
+cp "$ROOT/desktop/LaunchAgent/dev.rocky.agent.plist" "$APP/Contents/Library/LaunchAgents/"
+cp "$ROOT/desktop/LaunchAgent/rocky-agent" "$RESOURCES/runtime/bin/rocky-agent"
 
 if [[ -n "${ROCKY_UV_BINARY:-}" ]]; then
   cp -L "$ROCKY_UV_BINARY" "$RESOURCES/runtime/bin/uv"
@@ -73,7 +79,9 @@ else
   tar -xzf "$TEMPORAL_PATH" -C "$STAGE" temporal
   cp "$STAGE/temporal" "$RESOURCES/runtime/bin/temporal"
 fi
-chmod 755 "$RESOURCES/runtime/bin/uv" "$RESOURCES/runtime/bin/temporal" "$APP/Contents/MacOS/RockyDesktop"
+chmod 755 "$RESOURCES/runtime/bin/uv" "$RESOURCES/runtime/bin/temporal" "$RESOURCES/runtime/bin/rocky-agent" \
+  "$APP/Contents/MacOS/RockyDesktop"
+plutil -lint "$APP/Contents/Library/LaunchAgents/dev.rocky.agent.plist" >/dev/null
 if [[ -f "$ROOT/scripts/make_app_icon.swift" ]]; then
   swift -module-cache-path "$ROOT/desktop/.cache/modules" "$ROOT/scripts/make_app_icon.swift" \
     "$ROOT/desktop/Branding/Rocky-Obsidian.png" "$STAGE/Rocky.iconset"

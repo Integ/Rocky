@@ -17,6 +17,7 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("api", help="Run the owner HTTP API")
     commands.add_parser("worker", help="Run the workflow worker and outbox dispatcher")
+    commands.add_parser("serve", help="Supervise Temporal, the API and the worker as one service")
     submit = commands.add_parser("submit", help="Submit a goal contract JSON file")
     submit.add_argument("file", type=Path)
     submit.add_argument("--idempotency-key")
@@ -44,6 +45,10 @@ def main() -> None:
 
         asyncio.run(run_worker(settings))
         return
+    if args.command == "serve":
+        from rocky.supervisor import serve
+
+        raise SystemExit(serve(settings))
     if settings.auth_mode == "token" and not settings.api_token:
         parser.error("Set ROCKY_API_TOKEN for owner API access")
     base_url = os.environ.get("ROCKY_API_URL", "http://127.0.0.1:8000")

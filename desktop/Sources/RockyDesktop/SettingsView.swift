@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct SettingsView: View {
@@ -100,6 +101,16 @@ struct SettingsView: View {
                     } header: { Text("思考设置") } footer: {
                         Text("仅显示所选模型支持的档位。更高的思考程度可能增加响应时间和用量。")
                     }
+                }
+                Section {
+                    HStack(spacing: 10) {
+                        Button("重启后台服务") { Task { await model.runtime.restartService() } }
+                        Button("停止后台服务") { Task { await model.runtime.stopService() } }
+                        Spacer()
+                        Button("打开日志") { NSWorkspace.shared.open(model.runtime.logsURL) }
+                    }
+                } header: { Text("后台服务") } footer: {
+                    Text("Rocky 在后台常驻运行，关闭窗口或退出应用后任务继续执行；有任务运行时会阻止 Mac 空闲睡眠，但合盖或手动睡眠时任务会暂停。停止后台服务后，重新打开 Rocky 会再次启动。")
                 }
             }.formStyle(.grouped).disabled(saving || model.provider == nil)
             Divider()

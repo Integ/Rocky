@@ -32,16 +32,18 @@ open dist/Rocky.app
 ```
 
 构建需要 Xcode Command Line Tools；脚本捆绑 uv 和经过校验的
-Temporal 本地引擎。首次打开应用会自动准备 Python 依赖，然后启动本地服务；日常使用无需终端、
-Docker 或浏览器。可以将 `Rocky.app` 拖入“应用程序”文件夹。
+Temporal 本地引擎。首次打开应用会注册 Rocky 后台服务（launchd 用户级 LaunchAgent），
+由后台服务自动准备 Python 依赖并常驻运行；日常使用无需终端、Docker 或浏览器。若 macOS 要求批准，
+请在“系统设置 > 通用 > 登录项与扩展”中允许 Rocky 在后台运行。可以将 `Rocky.app` 拖入“应用程序”文件夹。
 
 在应用左下角打开 **设置与模型**（`⌘,`），选择 DeepSeek、OpenRouter、Anthropic、Ollama，
 或填写自定义 OpenAI 兼容接口的 API 地址、模型名称和 API key。macOS 将密钥保存到系统钥匙串，
 设置不会返回密钥明文。Ollama 可以不填密钥，但需事先启动本机 Ollama 并下载模型。
 
 `⌘N` 新建任务，`⌘↩` 提交；验收标准、产物路径和执行预算由 AI 根据目标及任务难度自动设定，无需手动配置。默认完整权限，无需配置域名白名单。
-需要审批时，任务详情展示完整操作，点击“批准此操作”继续同一操作，或取消任务。任务结束后可直接预览、导出文件。关闭最后一个窗口或退出应用会停止本地服务，
-下次打开时恢复未结束任务。已结束任务支持存档、恢复和删除；删除任务记录会保留工作区文件。
+需要审批时，任务详情展示完整操作，点击“批准此操作”继续同一操作，或取消任务。任务结束后可直接预览、导出文件。关闭窗口或退出应用不会停止后台服务，
+任务继续执行，下次打开应用直接连接；后台服务崩溃后由 launchd 自动重启并恢复未结束任务。有任务运行时，后台服务会阻止 Mac 空闲睡眠，
+但合盖或手动睡眠时任务暂停，唤醒后继续。设置中可重启或停止后台服务。已结束任务支持存档、恢复和删除；删除任务记录会保留工作区文件。
 
 数据保存到 `~/Library/Application Support/Rocky/`。完整使用说明、开发验证和分发要求见
 [macOS 应用指南](docs/macos.md)。本机构建为临时签名，公开分发需要 Developer ID 签名和 Apple 公证。
@@ -63,7 +65,9 @@ temporal server start-dev --headless --db-filename data/temporal.db
 ```
 
 保留 Temporal 终端，另开终端运行 `uv run rocky api`，再开一个运行
-`uv run rocky worker`。三个进程从同一仓库目录启动；本机默认无需设置
+`uv run rocky worker`。也可用 `uv run rocky serve` 在一个进程中托管 API 和 worker（设置
+`ROCKY_TEMPORAL_BIN` 时同时托管 Temporal）；它使用 `data/api-token` 中的持久令牌并强制 token 模式，
+任一子进程退出即整体以非零状态退出，供 launchd/systemd 重启。三个进程从同一仓库目录启动；本机默认无需设置
 `ROCKY_API_TOKEN`，worker 需要现有 `OPENAI_API_KEY`。本地默认 SQLite；
 `ROCKY_DATABASE_URL` 可以指向 PostgreSQL。
 
@@ -85,7 +89,7 @@ uv run rocky cancel GOAL_ID
 独立启动后端时默认 `ROCKY_AUTH_MODE=local`，API 只允许回环地址绑定和本机请求，
 并检查 Host、Origin 与跨站请求标记。本机模式中的任意本地程序均可调用 API。
 对外反代、隧道或非回环部署请设置 `ROCKY_AUTH_MODE=token`，并配置 `ROCKY_API_TOKEN`。
-macOS 应用固定使用回环地址和每次启动生成的 API 令牌。
+macOS 后台服务固定使用回环地址和保存在 `data/api-token`（权限 0600）的持久 API 令牌。
 
 首次启动、尚未保存模型设置时，`ROCKY_MODEL` 与可选的 `ROCKY_REASONING_EFFORT`
 提供后端初始默认值。旧版任务未记录模型配置时继续使用 worker 的环境配置；

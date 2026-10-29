@@ -5,7 +5,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var runtime: RuntimeManager?
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationWillTerminate(_ notification: Notification) {
-        MainActor.assumeIsolated { runtime?.stop() }
+        // The background service keeps running; only stop observing it.
+        MainActor.assumeIsolated { runtime?.disconnect() }
     }
 }
 
