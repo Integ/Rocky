@@ -23,7 +23,7 @@ class ApprovalSettings(Model):
     """Owner choices editable at runtime; environment settings supply defaults."""
 
     read_only_commands: bool = True
-    # 0 waits for the owner indefinitely (up to the task deadline).
+    # 0 waits for the owner indefinitely; owner waits pause the task deadline.
     timeout_minutes: int = Field(default=30, ge=0, le=10_080)
 
 

@@ -16,6 +16,8 @@ final class AppModel: ObservableObject {
     @Published var showSettings = false
     @Published var showApprovals = false
     @Published var approvalPolicy: ApprovalPolicy?
+    /// A drafted contract shown for review; nothing is submitted until the owner confirms.
+    @Published var contractReview: PendingReview?
     @Published var showInspector = false
     @Published var input = ""
     @Published var error: String?
@@ -26,10 +28,18 @@ final class AppModel: ObservableObject {
     @Published var artifactContents: [String: String] = [:]
     @Published var artifactErrors: [String: String] = [:]
     @Published private(set) var historyUpdates: Set<String> = []
-    private var submissionKey = UUID().uuidString
-    private var pendingContract: GoalContract?
-    private var pendingDraft: GoalDraft?
-    private var pendingModel: [String?] = []
+
+    struct PendingReview: Equatable {
+        /// The contract as drafted; edits start from it.
+        var drafted: GoalContract
+        var contract: GoalContract
+        var warnings: [ContractWarning]
+        /// Idempotency key and the contract it was first sent with, so a retried
+        /// submission cannot create a second goal and an edited one gets a new key.
+        var key = UUID().uuidString
+        var keyContract: GoalContract?
+        var concerns: [ContractWarning] { warnings.filter(\.isConcern) }
+    }
     private var selectionGeneration = 0
     private var selectionLoadGeneration = 0
     private var eventCursor = 0
@@ -112,9 +122,7 @@ final class AppModel: ObservableObject {
         select(nil)
         input = ""
         error = nil
-        submissionKey = UUID().uuidString
-        pendingContract = nil
-        pendingDraft = nil
+        contractReview = nil
     }
 
     func showHistory(archived: Bool) {
@@ -208,34 +216,50 @@ final class AppModel: ObservableObject {
                 }
             } else {
                 let submission = try GoalDraft(objective: input)
-                let modelIdentity = [provider?.provider, provider?.base_url, provider?.model, provider?.reasoning_effort]
-                let contract: GoalContract
-                let key: String
-                if pendingDraft == submission, pendingModel == modelIdentity, let pendingContract {
-                    contract = pendingContract
-                    key = submissionKey
-                } else {
-                    submissionStatus = "AI 正在评估任务难度并设定执行预算…"
-                    contract = try await api.prepareContract(submission)
-                    key = UUID().uuidString
-                    if generation == selectionGeneration {
-                        pendingDraft = submission
-                        pendingModel = modelIdentity
-                        pendingContract = contract
-                        submissionKey = key
-                    }
+                submissionStatus = "AI 正在拟定验收标准并评估执行预算…"
+                let review = try await api.prepareContract(submission)
+                if generation == selectionGeneration, selectedID == nil {
+                    contractReview = PendingReview(drafted: review.contract, contract: review.contract, warnings: review.warnings)
                 }
-                submissionStatus = "正在创建任务…"
-                let goal = try await api.submit(contract, key: key)
-                goals.removeAll { $0.id == goal.id }
-                goals.insert(goal, at: 0)
-                if generation == selectionGeneration {
-                    pendingContract = nil
-                    pendingDraft = nil
-                    submissionKey = UUID().uuidString
-                    showArchived = false
-                    select(goal.id)
-                }
+                return
+            }
+            await refresh()
+        } catch { self.error = error.localizedDescription }
+    }
+
+    /// Re-checks the budget after the owner changes limits; drafter concerns are kept.
+    func updateReview(limits: TaskLimits) async {
+        guard var review = contractReview else { return }
+        review.contract.limits = limits
+        contractReview = review
+        do {
+            let checked = try await api.checkContract(review.contract)
+            guard contractReview?.contract == review.contract else { return }
+            contractReview?.warnings = review.concerns + checked.warnings
+        } catch { self.error = error.localizedDescription }
+    }
+
+    func submitReviewed() async {
+        guard var review = contractReview, runtime.isReady, isConnected, !isSubmitting else { return }
+        let generation = selectionGeneration
+        if review.keyContract != review.contract {
+            review.key = UUID().uuidString
+            review.keyContract = review.contract
+            contractReview = review
+        }
+        isSubmitting = true
+        error = nil
+        submissionStatus = "正在创建任务…"
+        defer { isSubmitting = false; submissionStatus = nil }
+        do {
+            let goal = try await api.submit(review.contract, key: review.key)
+            goals.removeAll { $0.id == goal.id }
+            goals.insert(goal, at: 0)
+            contractReview = nil
+            if generation == selectionGeneration {
+                input = ""
+                showArchived = false
+                select(goal.id)
             }
             await refresh()
         } catch { self.error = error.localizedDescription }
@@ -338,6 +362,19 @@ final class AppModel: ObservableObject {
 
     func saveApprovalSettings(_ settings: ApprovalSettings) async {
         do { approvalPolicy = try await api.saveApprovalSettings(settings) } catch { self.error = error.localizedDescription }
+    }
+
+    /// Adds an "always allow" command prefix; returns a message when it is refused.
+    func addCommandRule(_ command: String) async -> String? {
+        let text = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, isConnected else { return nil }
+        do {
+            try await api.addCommandRule(text)
+            approvalPolicy = try await api.approvalPolicy()
+            return nil
+        } catch {
+            return "无法添加“\(text)”：规则只能是命令开头的几个普通词（如 uv run pytest），不能含管道、重定向、$ 或 sudo、env 这类包装命令，规则总数也有上限。"
+        }
     }
 
     func deleteApprovalRule(_ rule: ApprovalRule) async {

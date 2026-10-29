@@ -176,8 +176,12 @@ path; normal worker restart replays this version's durable execution history.
 `queued` → `running` ↔ `waiting` / `blocked` → terminal result.
 
 - `waiting` is a model-requested bounded timer, interrupted by owner input/cancel.
-- `blocked` waits for owner input or exact-operation approval; configured task
-  deadlines still apply. No models run while waiting. A real wake resets the
+- `blocked` waits for owner input or exact-operation approval. The task deadline
+  bounds Rocky's own work, so it moves forward by the time spent waiting for the
+  owner; an unanswered approval is still declined after its own timeout, and a
+  blocked question waits until the owner answers or cancels. Histories recorded
+  before `owner-wait-pauses-deadline-v1` replay with the clock running. No models
+  run while waiting. A real wake resets the
   no-progress counter and preserves usage/history; wake does not grant approval.
   A wake during an approval wait withdraws the request (`approval_superseded`)
   so the next round follows the owner's message.
@@ -382,7 +386,7 @@ max_output_tokens/deadline_seconds fields remain decode-only metadata so stored
 goal records remain readable; the single execution loop reads limits only.
 Checkpoints preserve cumulative counters and the original deadline across
 continue-as-new and worker restart. Input and
-approval waits also observe that deadline.
+approval waits extend that deadline by their duration instead of consuming it.
 
 Observed token usage is checked before further calls/actions. An in-flight
 request may exceed the token threshold, and missing provider usage cannot be

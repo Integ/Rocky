@@ -21,9 +21,10 @@ from sqlalchemy.exc import IntegrityError
 from rocky import __version__
 from rocky.approval_policy import ApprovalRule, ApprovalSettings
 from rocky.config import Settings
+from rocky.contract_check import ContractWarning, contract_warnings
 from rocky.credentials import CredentialError, CredentialStore
 from rocky.inference import ModelSettings, model_catalog
-from rocky.models import GoalContract, GoalDraft, GoalView, Model
+from rocky.models import DraftedContract, GoalContract, GoalDraft, GoalView, Model
 from rocky.planner import OpenAIPlanner, PlannerError
 from rocky.providers import PRESETS, ProviderUpdate, credential_id, provider_model_catalog
 from rocky.store import MemoryConflictError, Store, equivalent_contracts
@@ -133,6 +134,11 @@ def _local_request(request: Request) -> bool:
         if site not in {b"same-origin", b"same-site", b"none"}:
             return False
     return True
+
+
+class ContractReview(Model):
+    contract: GoalContract
+    warnings: list[ContractWarning] = Field(default_factory=list)
 
 
 class WakeRequest(Model):
@@ -333,14 +339,23 @@ def create_app(
         # This is liveness. Queued goals can remain pending while Temporal is offline.
         return {"status": "ok", "service": "rocky"}
 
-    @app.post("/goal-contract", response_model=GoalContract, dependencies=auth)
+    @app.post("/goal-contract", response_model=ContractReview, dependencies=auth)
     async def prepare_goal_contract(draft: GoalDraft):
+        """Draft a contract for owner review; it is submitted separately."""
         try:
-            return await planner.prepare_contract(draft, get_default_model_settings())
+            prepared = await planner.prepare_contract(draft, get_default_model_settings())
         except PlannerError:
             raise HTTPException(
                 502, "Could not assess task requirements and budget; retry submission"
             ) from None
+        concerns = prepared.concerns if isinstance(prepared, DraftedContract) else []
+        contract = prepared.contract() if isinstance(prepared, DraftedContract) else prepared
+        return ContractReview(contract=contract, warnings=contract_warnings(contract, concerns))
+
+    @app.post("/goal-contract/check", response_model=ContractReview, dependencies=auth)
+    def check_goal_contract(contract: GoalContract):
+        """Budget warnings for a contract the owner edited before submitting."""
+        return ContractReview(contract=contract, warnings=contract_warnings(contract))
 
     @app.post("/goals", response_model=GoalView, status_code=202, dependencies=auth)
     def submit_goal(

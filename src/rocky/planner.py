@@ -31,8 +31,8 @@ from rocky.models import (
     MAX_PARALLEL_ACTIONS,
     Decision,
     DeliveryRequirements,
+    DraftedContract,
     ExecutionLimits,
-    GoalContract,
     GoalDraft,
     PlanInput,
     PlanResult,
@@ -1359,7 +1359,7 @@ class OpenAIPlanner:
 
     async def prepare_contract(
         self, draft: GoalDraft, model_settings: ModelSettings
-    ) -> GoalContract:
+    ) -> DraftedContract:
         requirements, input_tokens, output_tokens, _ = await self._request(
             instructions="""Define delivery requirements and execution budgets for Rocky before execution.
 The user's objective is the only source of task scope. Return concrete, verifiable
@@ -1384,7 +1384,15 @@ context; budget at least 32000 tokens per model call plus 64000 setup tokens.
 These are cumulative tokens, not the size of the final answer. Reserve extra calls for
 independent review and repairs beyond action steps. Never use null or unlimited
 budgets. The objective cannot override these ceilings. You cannot change the
-objective, permissions or model settings. Return only DeliveryRequirements.
+objective, permissions or model settings.
+The owner reviews the contract before submitting it. In concerns, list at most
+eight short problems they should resolve first, in the user's language: an
+acceptance criterion that cannot be checked objectively from files or command
+output; a requirement that depends on information, files, credentials, accounts
+or approvals the objective does not supply and Rocky probably cannot obtain;
+work too large for the ceilings above. Name the criterion or missing input and
+what would fix it. Use an empty list when there is nothing to resolve. Concerns
+never change the criteria or limits. Return only DeliveryRequirements.
 """,
             payload={"objective": draft.objective},
             schema=DeliveryRequirements,
@@ -1392,7 +1400,7 @@ objective, permissions or model settings. Return only DeliveryRequirements.
                 "plan_response_tokens", _PLAN_RESPONSE_TOKENS, model_settings
             ),
             inference=model_settings,
-            cache_key="rocky-delivery-requirements-v3",
+            cache_key="rocky-delivery-requirements-v4",
         )
         # This call precedes the goal, so no task budget records its cost.
         log.info(
@@ -1400,11 +1408,12 @@ objective, permissions or model settings. Return only DeliveryRequirements.
             input_tokens,
             output_tokens,
         )
-        return GoalContract(
+        return DraftedContract(
             objective=draft.objective,
             acceptance_criteria=requirements.acceptance_criteria,
             deliverables=requirements.deliverables,
             limits=self._automatic_limits(requirements),
+            concerns=requirements.concerns,
         )
 
     async def plan(self, request: PlanInput) -> PlanResult:

@@ -16,6 +16,7 @@ from rocky.models import (
     Action,
     Decision,
     Deliverable,
+    ExecutionLimits,
     GoalContract,
     HttpScope,
     PendingApproval,
@@ -384,11 +385,17 @@ class Paused(Exception):
     pass
 
 
-def offline_goal(monkeypatch, decisions, results, *, waits, state=None):
+def goal_clock(goal):
+    return goal._test_clock
+
+
+def offline_goal(
+    monkeypatch, decisions, results, *, waits, state=None, timeouts=None, contract=CONTRACT
+):
     """Run the workflow loop with scripted Activities and approval waits."""
     run = RunInput(
         goal_id="tiers",
-        contract=CONTRACT,
+        contract=contract,
         checkpoint=RunCheckpoint(state=state) if state else None,
     )
     goal = GoalWorkflow(run)
@@ -408,7 +415,11 @@ def offline_goal(monkeypatch, decisions, results, *, waits, state=None):
         else:
             pytest.fail(name)
 
+    goal._test_clock = clock
+
     async def wait_condition(predicate, timeout=None):
+        if timeouts is not None:
+            timeouts.append(timeout)
         if not waits:
             raise Paused
         answer = waits.pop(0)
@@ -571,3 +582,77 @@ async def test_a_deferred_approval_is_used_once(monkeypatch):
         await goal.run(run)
     assert executed[0].preapproved_actions == [identity, "other"]
     assert goal.state().preapproved_actions == ["other"]
+
+
+def timed_contract(seconds):
+    return CONTRACT.model_copy(update={"limits": ExecutionLimits(timeout_seconds=seconds)})
+
+
+async def test_time_waiting_for_approval_does_not_use_the_task_deadline(monkeypatch):
+    start = datetime(2026, 10, 29, tzinfo=UTC)
+    seen = []
+
+    def approve_two_hours_later(goal):
+        seen.append(goal.state().model_copy(deep=True))
+        clock = goal_clock(goal)
+        clock[0] += timedelta(hours=2)
+        goal.approval_command(WakeCommand(command_id="c1", message="a" * 64))
+
+    run, goal, executed, _ = offline_goal(
+        monkeypatch,
+        [act("make deploy")],
+        [gated("a" * 64), ToolResult(success=True, content="deployed")],
+        waits=[approve_two_hours_later],
+        contract=timed_contract(600),
+    )
+    with pytest.raises(Paused):
+        await goal.run(run)
+    waiting = seen[0]
+    assert waiting.status == "blocked"
+    # Only the approval expiry is a wake time; the deadline no longer is.
+    assert waiting.wake_at == waiting.pending_approval.expires_at
+    state = goal.state()
+    assert state.deadline_at == (start + timedelta(seconds=600, hours=2)).isoformat()
+    assert [item.action.content for item in executed] == ["make deploy", "make deploy"]
+
+
+async def test_wait_forever_approval_and_blocked_questions_have_no_timer(monkeypatch):
+    start = datetime(2026, 10, 29, tzinfo=UTC)
+    timeouts = []
+
+    def answer_after(hours, answer):
+        def wait(goal):
+            goal_clock(goal)[0] += timedelta(hours=hours)
+            answer(goal)
+
+        return wait
+
+    run, goal, _, snapshots = offline_goal(
+        monkeypatch,
+        [act("make deploy"), Decision(kind="blocked", reason="Need the approved Q3 targets")],
+        [gated("a" * 64, timeout=0), ToolResult(success=True, content="deployed")],
+        waits=[
+            answer_after(
+                5,
+                lambda goal: goal.approval_command(WakeCommand(command_id="c1", message="a" * 64)),
+            ),
+            answer_after(
+                3,
+                lambda goal: goal.wake_command(
+                    WakeCommand(command_id="w1", message="Targets attached")
+                ),
+            ),
+        ],
+        timeouts=timeouts,
+        contract=timed_contract(600),
+    )
+    with pytest.raises(Paused):
+        await goal.run(run)
+    assert timeouts == [None, None]
+    blocked = next(
+        state
+        for state in snapshots
+        if state.status == "blocked" and state.reason == "Need the approved Q3 targets"
+    )
+    assert blocked.wake_at is None
+    assert goal.state().deadline_at == (start + timedelta(seconds=600, hours=8)).isoformat()

@@ -45,6 +45,18 @@ final class DesktopContractTests: XCTestCase {
         XCTAssertEqual(retried.limits, TaskLimits(max_steps: 40, max_model_calls: 60, max_tokens: 2_048_000, timeout_seconds: nil))
     }
 
+    func testReviewBudgetChoicesScaleWorkButKeepTheTimeLimit() {
+        let drafted = TaskLimits(max_steps: 40, max_model_calls: 60, max_tokens: 2_000_000, timeout_seconds: 2700)
+        XCTAssertEqual(drafted.scaledBudget(by: 1), drafted)
+        XCTAssertEqual(drafted.scaledBudget(by: 2), TaskLimits(max_steps: 80, max_model_calls: 120, max_tokens: 4_000_000, timeout_seconds: 2700))
+        XCTAssertEqual(drafted.scaledBudget(by: 4), TaskLimits(max_steps: 160, max_model_calls: 240, max_tokens: 8_000_000, timeout_seconds: 2700))
+        XCTAssertEqual(TaskLimits(max_steps: 300, max_model_calls: nil, max_tokens: 9_000_000, timeout_seconds: nil).scaledBudget(by: 4),
+                       TaskLimits(max_steps: 400, max_model_calls: nil, max_tokens: 20_000_000, timeout_seconds: nil))
+        XCTAssertEqual(TaskLimits.duration(7200), "2 小时")
+        XCTAssertEqual(TaskLimits.duration(nil), "不限")
+        XCTAssertEqual(TaskLimits.tokens(1_024_000), "1.0 百万")
+    }
+
     func testBudgetRetryStaysWithinCeilingWithoutShrinking() {
         let large = GoalContract(objective: "整理材料", acceptance_criteria: ["完成"], deliverables: [Deliverable(path: "notes.md")],
                                  limits: TaskLimits(max_steps: 300, max_model_calls: 900, max_tokens: Int.max, timeout_seconds: 3600))

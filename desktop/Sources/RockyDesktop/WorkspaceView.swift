@@ -41,6 +41,9 @@ struct WorkspaceView: View {
         .tint(.rockyAccent)
         .sheet(isPresented: $model.showSettings) { SettingsView(model: model) }
         .sheet(isPresented: $model.showApprovals) { ApprovalsView(model: model) }
+        .sheet(isPresented: Binding(get: { model.contractReview != nil }, set: { if !$0 { model.contractReview = nil } })) {
+            if let review = model.contractReview { ContractReviewView(model: model, review: review) }
+        }
         .confirmationDialog("停止这个任务？已经完成的文件会保留。", isPresented: $confirmStop, titleVisibility: .visible) {
             Button("停止任务", role: .destructive) { Task { await model.cancel() } }
         }
@@ -461,11 +464,11 @@ struct WorkspaceView: View {
             inspectorAction("更改模型…", systemImage: "slider.horizontal.3") { model.showSettings = true }.disabled(!runtime.isReady)
         }
         detailSection("交付要求") {
-            Text("Rocky 会根据目标自动设定验收标准和产物路径，提交后可在任务详情中查看。")
+            Text("Rocky 会根据目标拟定验收标准和产物路径，提交前先给你核对，并提示缺少的资料。")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         detailSection("执行预算") {
-            Text("Rocky 会根据任务难度自动分配步骤、模型调用、tokens 和运行时间，无需手动设置。")
+            Text("Rocky 会根据任务难度估算步骤、模型调用、tokens 和运行时间，核对时可以调大。等你审批或补充信息时不计时。")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }

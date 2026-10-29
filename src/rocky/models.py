@@ -70,6 +70,8 @@ class DeliveryRequirements(Model):
     acceptance_criteria: list[Criterion] = Field(min_length=1, max_length=20)
     deliverables: list[Deliverable] = Field(min_length=1, max_length=20)
     limits: AutomaticExecutionLimits
+    # Problems the owner should resolve before submitting, in their language.
+    concerns: list[Criterion] = Field(default_factory=list, max_length=8)
 
 
 class GoalDraft(Model):
@@ -104,6 +106,15 @@ class GoalContract(Model):
                 raise ValueError("Use exact hostnames without a scheme, port or wildcard")
             result.append(value.encode("idna").decode("ascii"))
         return list(dict.fromkeys(result))
+
+
+class DraftedContract(GoalContract):
+    """A model-drafted contract with the drafter's concerns for owner review."""
+
+    concerns: list[Criterion] = Field(default_factory=list, max_length=8)
+
+    def contract(self) -> GoalContract:
+        return GoalContract.model_validate(self.model_dump(exclude={"concerns"}))
 
 
 class Action(Model):

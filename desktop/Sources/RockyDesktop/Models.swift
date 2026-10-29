@@ -35,6 +35,33 @@ struct GoalContract: Codable, Equatable {
     }
 }
 
+/// A drafted contract and what the owner should check before submitting it.
+struct ContractReview: Codable, Equatable {
+    var contract: GoalContract
+    var warnings: [ContractWarning]
+}
+
+struct ContractWarning: Codable, Equatable, Hashable {
+    var code: String
+    var message: String = ""
+    var current: Int?
+    var suggested: Int?
+
+    var isConcern: Bool { code == "concern" }
+    var text: String {
+        switch code {
+        case "concern": return message
+        case "model_calls_low":
+            return "模型调用上限 \(current ?? 0) 次没有给独立审查和修补留余量，建议至少 \(suggested ?? 0) 次。"
+        case "token_budget_low":
+            return "Token 上限 \(TaskLimits.tokens(current)) 偏低：每次调用都会重发上下文，按调用上限估算需要约 \(TaskLimits.tokens(suggested))。"
+        case "time_limit_low":
+            return "时限 \(TaskLimits.duration(current)) 可能不够用完调用上限，建议至少 \(TaskLimits.duration(suggested))。等你审批或补充信息的时间不计入时限。"
+        default: return message.isEmpty ? "预算可能不足（\(code)）。" : message
+        }
+    }
+}
+
 struct TaskLimits: Codable, Equatable {
     var max_steps: Int? = 100
     var max_model_calls: Int? = 150
@@ -43,6 +70,31 @@ struct TaskLimits: Codable, Equatable {
 
     /// Owner-initiated retries may exceed the automatic estimate ceilings, but stay bounded.
     static let retryCeiling = TaskLimits(max_steps: 400, max_model_calls: 600, max_tokens: 20_000_000, timeout_seconds: 4 * 3600)
+
+    /// The same limits with steps, calls and tokens scaled, up to `retryCeiling`; the time limit is kept.
+    func scaledBudget(by factor: Int) -> TaskLimits {
+        let ceiling = TaskLimits.retryCeiling
+        func scale(_ value: Int?, _ maximum: Int?) -> Int? {
+            guard let value, let maximum, factor > 1 else { return value }
+            return max(value, min(maximum, value > Int.max / factor ? Int.max : value * factor))
+        }
+        return TaskLimits(max_steps: scale(max_steps, ceiling.max_steps), max_model_calls: scale(max_model_calls, ceiling.max_model_calls),
+                          max_tokens: scale(max_tokens, ceiling.max_tokens), timeout_seconds: timeout_seconds)
+    }
+
+    static func duration(_ seconds: Int?) -> String {
+        guard let seconds else { return "不限" }
+        if seconds % 3600 == 0 { return "\(seconds / 3600) 小时" }
+        if seconds % 60 == 0 { return "\(seconds / 60) 分钟" }
+        return seconds > 60 ? "约 \(seconds / 60 + 1) 分钟" : "\(seconds) 秒"
+    }
+
+    static func tokens(_ value: Int?) -> String {
+        guard let value else { return "不限" }
+        if value >= 1_000_000 { return String(format: "%.1f 百万", Double(value) / 1_000_000) }
+        if value >= 10_000 { return "\(value / 10_000) 万" }
+        return "\(value)"
+    }
 
     enum CodingKeys: String, CodingKey { case max_steps, max_model_calls, max_tokens, timeout_seconds }
     func encode(to encoder: Encoder) throws {

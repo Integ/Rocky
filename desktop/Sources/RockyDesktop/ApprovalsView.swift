@@ -6,6 +6,12 @@ struct ApprovalsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var selection = Set<String>()
     @State private var working = false
+    @State private var newRule = ""
+    @State private var ruleError: String?
+
+    /// Common test and build commands, offered for one-click rules. They run
+    /// project code inside the sandbox, so none is added without the owner.
+    static let suggestedRules = ["uv run pytest", "python3 -m pytest", "npm test", "npm run build", "swift test", "swift build", "cargo test", "go test", "make test"]
 
     private static let timeoutChoices = [0, 10, 30, 60, 120, 240, 480, 1440]
 
@@ -72,7 +78,7 @@ struct ApprovalsView: View {
                         ProgressView().controlSize(.small)
                     }
                 } header: { Text("自动放行") } footer: {
-                    Text("只读命令包括 ls、cat、grep、rg、find（不含 -exec/-delete）等，必须在沙箱内运行，且不含管道、重定向或未加引号的通配符。超时只会拒绝，不会自动批准。")
+                    Text("只读命令包括 ls、cat、grep、rg、find（不含 -exec/-delete）等，必须在沙箱内运行，且不含管道、重定向或未加引号的通配符。超时只会拒绝，不会自动批准。等你处理的时间不计入任务时限，长时间无人值守时可选“一直等待”。")
                 }
                 Section {
                     let rules = model.approvalPolicy?.rules ?? []
@@ -90,8 +96,32 @@ struct ApprovalsView: View {
                     ForEach(model.approvalPolicy?.allowlist ?? [], id: \.self) { prefix in
                         Text("命令 \(prefix)（环境变量）").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
                     }
+                    HStack {
+                        TextField("命令开头，例如 uv run pytest", text: $newRule)
+                            .font(.system(size: 11, design: .monospaced)).autocorrectionDisabled()
+                            .onSubmit { addRule(newRule) }
+                        Button("添加") { addRule(newRule) }
+                            .disabled(newRule.trimmingCharacters(in: .whitespaces).isEmpty || !model.isConnected)
+                    }
+                    let existing = Set((model.approvalPolicy?.rules ?? []).compactMap(\.command) + (model.approvalPolicy?.allowlist ?? []))
+                    let suggestions = Self.suggestedRules.filter { !existing.contains($0) }
+                    if !suggestions.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("常用命令，点一下添加：").font(.system(size: 11)).foregroundStyle(.secondary)
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), alignment: .leading)], alignment: .leading, spacing: 6) {
+                                ForEach(suggestions, id: \.self) { command in
+                                    Button { addRule(command) } label: {
+                                        Label(command, systemImage: "plus").font(.system(size: 11, design: .monospaced))
+                                    }.buttonStyle(.bordered).controlSize(.small).disabled(!model.isConnected)
+                                }
+                            }
+                        }
+                    }
+                    if let ruleError {
+                        Text(ruleError).font(.system(size: 11)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                    }
                 } header: { Text("始终允许") } footer: {
-                    Text("规则对所有任务生效。不在沙箱内运行的命令始终需要逐条批准。")
+                    Text("规则对所有任务生效，只匹配以这些词开头、不含管道或重定向的简单命令，并且只在沙箱内放行。不在沙箱内运行的命令、写到任务文件夹以外的文件、读取凭据始终需要逐条批准。")
                 }
             }.formStyle(.grouped)
             Divider()
@@ -115,6 +145,13 @@ struct ApprovalsView: View {
             await model.answer(items, approve: approve)
             selection.subtract(items.map(\.id))
             working = false
+        }
+    }
+
+    private func addRule(_ command: String) {
+        Task {
+            ruleError = await model.addCommandRule(command)
+            if ruleError == nil { newRule = "" }
         }
     }
 

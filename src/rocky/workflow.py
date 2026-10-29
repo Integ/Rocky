@@ -263,6 +263,21 @@ class GoalWorkflow:
         self._wake_feedback = ""
         return feedback
 
+    def _pauses_deadline(self) -> bool:
+        """Whether waiting for the owner stops the task's wall clock.
+
+        The deadline bounds the task's own work. Time spent on an approval or a
+        blocked question is the owner's, so the deadline moves by that much.
+        Histories recorded before this rule replay with the clock running.
+        """
+        return workflow.patched("owner-wait-pauses-deadline-v1")
+
+    def _extend_deadline(self, waiting_since: datetime) -> None:
+        if self._state.deadline_at:
+            self._state.deadline_at = (
+                datetime.fromisoformat(self._state.deadline_at) + (workflow.now() - waiting_since)
+            ).isoformat()
+
     async def _await_external_input(self, reason: str) -> str:
         """Keep blocked goals alive without inference until input or cancellation.
 
@@ -270,20 +285,24 @@ class GoalWorkflow:
         snapshot. This also notices a wake received during planning or persistence.
         """
         generation = self._consumed_wake_generation
+        paused = self._pauses_deadline()
         self._state.status = "blocked"
         self._state.reason = reason[:4000]
-        self._state.wake_at = self._state.deadline_at
+        self._state.wake_at = None if paused else self._state.deadline_at
         await self._persist()
         self._guard_dispatch()
+        started = workflow.now()
         try:
             await workflow.wait_condition(
                 lambda: self._cancel_requested or self._wake_generation != generation,
                 timeout=datetime.fromisoformat(self._state.deadline_at) - workflow.now()
-                if self._state.deadline_at
+                if self._state.deadline_at and not paused
                 else None,
             )
         except TimeoutError:
             pass
+        if paused:
+            self._extend_deadline(started)
         self._guard_dispatch()
         self._no_progress = 0
         self._state.approval_timeouts = 0
@@ -562,14 +581,16 @@ class GoalWorkflow:
             requested_at=now.isoformat(),
             expires_at=(now + expiry).isoformat() if expiry else None,
         )
+        paused = self._pauses_deadline()
         self._state.pending_approval = pending
         self._state.status = "blocked"
         self._state.reason = result.content
-        self._state.wake_at = pending.expires_at or self._state.deadline_at
+        self._state.wake_at = pending.expires_at or (None if paused else self._state.deadline_at)
         self._denied_action = ""
         await self._persist()
         self._guard_dispatch()
-        timeout = self._timeout(86400 * 365) if self._state.deadline_at else None
+        started = workflow.now()
+        timeout = self._timeout(86400 * 365) if self._state.deadline_at and not paused else None
         if expiry is not None:
             timeout = min(timeout, expiry) if timeout is not None else expiry
         generation = self._wake_generation
@@ -587,6 +608,8 @@ class GoalWorkflow:
             )
         except TimeoutError:
             pass
+        if paused:
+            self._extend_deadline(started)
         self._guard_dispatch()
         self._state.status = "running"
         self._state.pending_approval = None

@@ -44,13 +44,43 @@ final class APIClientTests: XCTestCase {
             XCTAssertEqual(request.timeoutInterval, 330)
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer desktop-test-token")
             let goal = try JSONDecoder().decode(Goal.self, from: Data(DesktopContractTests.goalJSON.utf8))
-            return (200, try JSONEncoder().encode(goal.contract))
+            let warnings = [ContractWarning(code: "concern", message: "目标没有提供数据来源"),
+                            ContractWarning(code: "time_limit_low", current: 600, suggested: 2700)]
+            return (200, try JSONEncoder().encode(ContractReview(contract: goal.contract, warnings: warnings)))
         }
-        let contract = try await api.prepareContract(GoalDraft(objective: "整理材料"))
+        let review = try await api.prepareContract(GoalDraft(objective: "整理材料"))
+        let contract = review.contract
+        XCTAssertEqual(review.warnings.map(\.isConcern), [true, false])
+        XCTAssertEqual(review.warnings[0].text, "目标没有提供数据来源")
+        XCTAssertTrue(review.warnings[1].text.contains("10 分钟"))
+        XCTAssertTrue(review.warnings[1].text.contains("45 分钟"))
         XCTAssertEqual(contract.acceptance_criteria, ["来源可核验"])
         XCTAssertEqual(contract.deliverables.first?.path, "report.md")
         XCTAssertEqual(contract.deliverables.first?.min_bytes, 100)
         XCTAssertEqual(contract.deliverables.first?.contains, ["证据"])
+    }
+
+    func testEditedContractIsCheckedWithoutModelAndRulesAreAddedAsCommands() async throws {
+        InterceptingProtocol.handle = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            let payload = try JSONSerialization.jsonObject(with: Self.body(request)) as! [String: Any]
+            switch request.url?.path {
+            case "/goal-contract/check":
+                XCTAssertEqual(payload["objective"] as? String, "整理材料")
+                let contract = GoalContract(objective: "整理材料", acceptance_criteria: ["完成整理"], deliverables: [Deliverable(path: "summary.md")])
+                return (200, try JSONEncoder().encode(ContractReview(contract: contract, warnings: [])))
+            case "/approval-rules":
+                XCTAssertEqual(payload["kind"] as? String, "command")
+                XCTAssertEqual(payload["command"] as? String, "uv run pytest")
+                return (201, Data(#"{"rule_id":"r1","kind":"command","command":"uv run pytest","methods":[],"origin":null,"path_prefix":"/"}"#.utf8))
+            default:
+                XCTFail("unexpected \(request.url?.path ?? "")")
+                return (404, Data())
+            }
+        }
+        let checked = try await api.checkContract(GoalContract(objective: "整理材料", acceptance_criteria: ["完成整理"], deliverables: [Deliverable(path: "summary.md")]))
+        XCTAssertTrue(checked.warnings.isEmpty)
+        try await api.addCommandRule("uv run pytest")
     }
 
     func testRecentAndArchivedHistoryUseSeparateServerFilters() async throws {

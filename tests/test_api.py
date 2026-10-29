@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from rocky.api import create_app
 from rocky.config import Settings
 from rocky.inference import ModelSettings
-from rocky.models import GoalContract, RunState
+from rocky.models import DraftedContract, GoalContract, RunState
 from rocky.planner import OpenAIPlanner, PlannerError
 from rocky.store import Store
 
@@ -53,11 +53,57 @@ def test_prepare_contract_requires_auth_and_uses_saved_model_without_creating_go
     prepare.assert_not_awaited()
     response = client.post("/goal-contract", json=payload, headers=AUTH)
     assert response.status_code == 200
-    assert response.json()["deliverables"] == generated.model_dump()["deliverables"]
+    assert response.json()["contract"]["deliverables"] == generated.model_dump()["deliverables"]
     draft, model = prepare.await_args.args
     assert draft.objective == generated.objective
     assert model == saved_model
     assert store.pending_goals() == []
+    assert store.list_goals() == []
+
+
+def test_prepared_contract_returns_drafter_concerns_and_budget_warnings(api, monkeypatch):
+    client, store = api
+    drafted = DraftedContract(
+        **contract() | {"limits": {"max_steps": 40, "max_model_calls": 30, "max_tokens": 100_000}},
+        concerns=["“与 Q3 目标对比”需要已批准的 Q3 目标，目标里没有提供"],
+    )
+    monkeypatch.setattr(OpenAIPlanner, "prepare_contract", AsyncMock(return_value=drafted))
+    response = client.post("/goal-contract", json={"objective": drafted.objective}, headers=AUTH)
+    assert response.status_code == 200
+    body = response.json()
+    assert "concerns" not in body["contract"]
+    assert [item["code"] for item in body["warnings"]] == [
+        "concern",
+        "model_calls_low",
+        "token_budget_low",
+    ]
+    assert body["warnings"][0]["message"].startswith("“与 Q3 目标对比”")
+    assert body["warnings"][2]["suggested"] == 30 * 32_000 + 64_000
+    # The reviewed contract submits as returned.
+    submitted = client.post("/goals", json=body["contract"], headers=AUTH)
+    assert submitted.status_code == 202
+    assert store.list_goals()[0].contract.limits.max_tokens == 100_000
+
+
+def test_contract_check_reports_budget_warnings_without_model_or_goal(api, monkeypatch):
+    client, store = api
+    prepare = AsyncMock()
+    monkeypatch.setattr(OpenAIPlanner, "prepare_contract", prepare)
+    edited = contract() | {
+        "limits": {
+            "max_steps": 100,
+            "max_model_calls": 150,
+            "max_tokens": None,
+            "timeout_seconds": 3600,
+        }
+    }
+    assert client.post("/goal-contract/check", json=edited).status_code == 401
+    response = client.post("/goal-contract/check", json=edited, headers=AUTH)
+    assert response.status_code == 200
+    assert response.json()["warnings"] == [
+        {"code": "time_limit_low", "message": "", "current": 3600, "suggested": 150 * 45}
+    ]
+    prepare.assert_not_awaited()
     assert store.list_goals() == []
 
 

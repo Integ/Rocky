@@ -96,8 +96,12 @@ struct APIClient {
     func submit(_ contract: GoalContract, key: String) async throws -> Goal {
         try await request("/goals", method: "POST", body: JSONEncoder().encode(contract), idempotencyKey: key)
     }
-    func prepareContract(_ draft: GoalDraft) async throws -> GoalContract {
+    func prepareContract(_ draft: GoalDraft) async throws -> ContractReview {
         try await request("/goal-contract", method: "POST", body: JSONEncoder().encode(draft), timeout: 330)
+    }
+    /// Budget warnings for a contract the owner edited; no model call.
+    func checkContract(_ contract: GoalContract) async throws -> ContractReview {
+        try await request("/goal-contract/check", method: "POST", body: JSONEncoder().encode(contract))
     }
     func command(_ id: String, kind: String, message: String? = nil) async throws {
         struct Receipt: Decodable { var status: String }
@@ -129,6 +133,10 @@ struct APIClient {
     func approvalPolicy() async throws -> ApprovalPolicy { try await request("/approval-policy") }
     func saveApprovalSettings(_ settings: ApprovalSettings) async throws -> ApprovalPolicy {
         try await request("/approval-policy", method: "PUT", body: JSONEncoder().encode(settings))
+    }
+    func addCommandRule(_ command: String) async throws {
+        struct Rule: Encodable { var kind = "command"; var command: String }
+        _ = try await rawRequest("/approval-rules", method: "POST", body: JSONEncoder().encode(Rule(command: command)))
     }
     func deleteApprovalRule(_ id: String) async throws {
         _ = try await rawRequest("/approval-rules/\(id)", method: "DELETE")

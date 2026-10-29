@@ -143,6 +143,11 @@ async def test_prepare_contract_uses_configured_model_and_generated_budget(limit
     assert arguments["text_format"] is DeliveryRequirements
     assert "Estimate task difficulty" in arguments["input"][0]["content"]
     assert "Reserve extra calls" in arguments["input"][0]["content"]
+    assert "In concerns" in arguments["input"][0]["content"]
+    assert contract.concerns == []
+    assert contract.contract() == GoalContract.model_validate(
+        contract.model_dump(exclude={"concerns"})
+    )
     assert json.loads(arguments["input"][1]["content"]) == {"objective": draft.objective}
     assert draft.objective not in arguments["input"][0]["content"]
 
@@ -224,6 +229,27 @@ async def test_project_documentation_task_does_not_exhaust_tokens_after_eight_ca
     assert contract.limits.max_steps == 20
     assert contract.limits.max_model_calls == 30
     assert contract.limits.timeout_seconds >= 900
+
+
+async def test_prepare_contract_keeps_concerns_out_of_the_submitted_contract():
+    requirements = DeliveryRequirements(
+        acceptance_criteria=["与已批准的 Q3 目标对比"],
+        deliverables=[Deliverable(path="memo.md")],
+        limits={
+            "max_steps": 12,
+            "max_model_calls": 20,
+            "max_tokens": 60000,
+            "timeout_seconds": 600,
+        },
+        concerns=["目标里没有已批准的 Q3 目标，请补充"],
+    )
+    planner = OpenAIPlanner(Settings(), client=fake_client(completed(requirements)))
+    drafted = await planner.prepare_contract(
+        GoalDraft(objective="写财务备忘录"), ModelSettings(model="test")
+    )
+    assert drafted.concerns == ["目标里没有已批准的 Q3 目标，请补充"]
+    assert "concerns" not in drafted.contract().model_dump()
+    assert drafted.contract().acceptance_criteria == requirements.acceptance_criteria
 
 
 def test_automatic_budget_stays_within_finite_ceilings():

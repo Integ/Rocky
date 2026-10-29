@@ -40,7 +40,7 @@ Temporal 本地引擎。首次打开应用会注册 Rocky 后台服务（launchd
 或填写自定义 OpenAI 兼容接口的 API 地址、模型名称和 API key。macOS 将密钥保存到系统钥匙串，
 设置不会返回密钥明文。Ollama 可以不填密钥，但需事先启动本机 Ollama 并下载模型。
 
-`⌘N` 新建任务，`⌘↩` 提交；验收标准、产物路径和执行预算由 AI 根据目标及任务难度自动设定，无需手动配置。默认完整权限，无需配置域名白名单。
+`⌘N` 新建任务，`⌘↩` 提交；验收标准、产物路径和执行预算由 AI 根据目标及任务难度拟定，提交前先给你核对并提示缺少的资料或偏紧的预算，可以返回修改或调大预算和时限。默认完整权限，无需配置域名白名单。
 需要审批时，任务详情展示完整操作，点击“批准此操作”继续同一操作，或取消任务。任务结束后可直接预览、导出文件。关闭窗口或退出应用不会停止后台服务，
 任务继续执行，下次打开应用直接连接；后台服务崩溃后由 launchd 自动重启并恢复未结束任务。有任务运行时，后台服务会阻止 Mac 空闲睡眠，
 但合盖或手动睡眠时任务暂停，唤醒后继续。设置中可重启或停止后台服务。已结束任务支持存档、恢复和删除；删除任务记录会保留工作区文件。
@@ -143,11 +143,11 @@ macOS 上的 `run_command` 默认通过 `/usr/bin/sandbox-exec -p <按 goal 生�
 `ROCKY_APPROVAL_MODE=required` 是默认值：每条 Shell 命令，以及 GET/HEAD/OPTIONS 以外的 HTTP 请求，都要先经过分级审批。审批绑定任务、操作 ID 和完整参数，普通唤醒消息或网页中的“已批准”不会授权。依次检查：
 
 1. **只读命令**：在 Seatbelt 内运行的简单只读命令直接执行，包括 `ls`、`cat`、`head`、`tail`、`wc`、`grep`、`rg`、`find`、`stat`、`du`、`diff`、`jq` 等；会写文件或执行其他程序的参数（`find -exec/-delete`、`sort -o`、`tail -f`、`rg --pre` 等）、未加引号的通配符和 `~` 展开仍需批准。程序必须解析到任务工作区之外。`git` 不在其中，因为仓库配置（如 `core.fsmonitor`、diff 驱动）可以执行任意程序，而任务能写这些配置。`ROCKY_AUTO_APPROVE_READ_ONLY=false` 或客户端“审批”页可关闭。
-2. **所有者规则**：命令前缀（如 `uv run pytest`），或某个精确来源上的 HTTP 方法（如 `POST https://api.example.com`，可限定路径前缀）。规则保存在 Rocky 数据库，命令和文件工具都无法改写；客户端审批卡片的“以后始终允许”或 `POST /approval-rules` 添加，`DELETE /approval-rules/{id}` 删除。`ROCKY_AUTO_APPROVE_COMMANDS=ls,git status,uv run pytest` 仍可配置环境变量白名单。
+2. **所有者规则**：命令前缀（如 `uv run pytest`），或某个精确来源上的 HTTP 方法（如 `POST https://api.example.com`，可限定路径前缀）。规则保存在 Rocky 数据库，命令和文件工具都无法改写；客户端审批卡片的“以后始终允许”、“审批”页手动输入或一键添加常用命令，或 `POST /approval-rules` 添加，`DELETE /approval-rules/{id}` 删除。`ROCKY_AUTO_APPROVE_COMMANDS=ls,git status,uv run pytest` 仍可配置环境变量白名单。
 3. **本任务授权**：“本任务内批准同类”或 API 的 `{"fingerprint":"…","scope":"task"}` 让本任务后续同前缀的简单命令，或同方法、同来源的 HTTP 请求直接执行。
 4. **等待所有者**：其余操作暂停等待批准。`POST /goals/{id}/approve` 接受 `scope` 为 `action`（默认）、`task`、`always`、`deny`。`GET /approvals` 列出所有未结束任务的待批与超时未批请求，`POST /approvals/batch` 一次处理多条。
 
-无人回应的请求在 `ROCKY_APPROVAL_TIMEOUT_MINUTES`（默认 30，0 表示一直等待，客户端可改）后**只会被拒绝，绝不会自动批准**：操作不执行，模型收到 `approval_timeout` 并改做不需要审批的工作，该请求进入任务的“超时未批”列表。所有者之后用 `scope` 为 `deferred` 批准它，任务会被唤醒，并可原样执行这一操作一次；`dismiss` 将其移除。连续 3 次超时后任务转为等待输入。含 `;`、`&&`、`|`、重定向、`$`、反引号或换行的命令永远不匹配前缀与只读规则，`sudo`/`env`/`xargs` 等包装命令和 `python -c` 这类内联代码不会提供同类批准。执行记录中的 `approved_by` 注明每个免审操作由哪一级放行（`read_only`、`allowlist`、`rule:<id>`、`task`、`deferred:…`、`owner`、`trusted`）。明确接受命令自行执行的单机所有者可配置 `ROCKY_APPROVAL_MODE=trusted`；完整工具权限本身不会关闭审批。此门禁按工具/方法分类，不能识别具有副作用的 GET 接口；任务目录内的文件写入无需审批。
+无人回应的请求在 `ROCKY_APPROVAL_TIMEOUT_MINUTES`（默认 30，0 表示一直等待，客户端可改）后**只会被拒绝，绝不会自动批准**（选“一直等待”时会一直等到你处理或取消，期间不计时）：操作不执行，模型收到 `approval_timeout` 并改做不需要审批的工作，该请求进入任务的“超时未批”列表。所有者之后用 `scope` 为 `deferred` 批准它，任务会被唤醒，并可原样执行这一操作一次；`dismiss` 将其移除。连续 3 次超时后任务转为等待输入。含 `;`、`&&`、`|`、重定向、`$`、反引号或换行的命令永远不匹配前缀与只读规则，`sudo`/`env`/`xargs` 等包装命令和 `python -c` 这类内联代码不会提供同类批准。执行记录中的 `approved_by` 注明每个免审操作由哪一级放行（`read_only`、`allowlist`、`rule:<id>`、`task`、`deferred:…`、`owner`、`trusted`）。明确接受命令自行执行的单机所有者可配置 `ROCKY_APPROVAL_MODE=trusted`；完整工具权限本身不会关闭审批。此门禁按工具/方法分类，不能识别具有副作用的 GET 接口；任务目录内的文件写入无需审批。
 
 浏览器自动化或需要写工作区外部文件的特殊命令可设置 `{"tool":"run_command","content":"…","path":"…","sandbox":false}`。这一出口始终需要用户逐次批准完整操作，即使使用 `trusted`、全局前缀白名单或本任务同类授权也不能跳过；审批界面会明确提示以当前用户权限在 Seatbelt 外运行。无沙箱命令不再具有任务文件隔离保证。更改命令、工作目录或 `sandbox` 值都会使原审批失效。
 
@@ -163,7 +163,9 @@ macOS 上的 `run_command` 默认通过 `/usr/bin/sandbox-exec -p <按 goal 生�
 
 等待审批时发送消息会撤回这条审批请求，任务按消息继续。审批请求超时后才点批准，会自动按“补批”处理。GET/HEAD/OPTIONS 以外的请求不会跟随重定向到其他来源。
 
-新任务默认最多 100 个规划步骤、150 次模型调用、500000 个累计输入/输出 token 和 3600 秒运行时间。通过契约的 `limits` 调整，单个字段设为 `null` 可关闭对应上限。旧版平铺的 `max_steps` / `max_model_calls` / `max_output_tokens` / `deadline_seconds` 仅用于读取已保存的任务记录，执行上限统一取 `limits`。累计用量在调用和行动前检查：一次进行中的请求可能越过 token 上限，提供方未返回用量时只能累计调用次数。等待输入或审批也计入任务超时。连续无进展达到 `max_no_progress` 后，先携带交接摘要进行一轮策略恢复。重新读取已移出近期记忆的文件、目录或网页不计为停滞，每份证据限一次，紧接着重复读取仍计为停滞；恢复后再次持续停滞才等待补充信息。单次请求的超时和响应大小限制继续用于处理服务故障和模型上下文。取消阻止后续动作；已发生的写入不会自动撤回，正在进行的请求仍可能计费。
+新任务默认最多 100 个规划步骤、150 次模型调用、500000 个累计输入/输出 token 和 3600 秒运行时间。通过契约的 `limits` 调整，单个字段设为 `null` 可关闭对应上限。旧版平铺的 `max_steps` / `max_model_calls` / `max_output_tokens` / `deadline_seconds` 仅用于读取已保存的任务记录，执行上限统一取 `limits`。累计用量在调用和行动前检查：一次进行中的请求可能越过 token 上限，提供方未返回用量时只能累计调用次数。等待补充信息或审批的时间不计入任务时限：时限只约束 Rocky 自己工作的时间，任务等你时不调用模型、不耗 token。连续无进展达到 `max_no_progress` 后，先携带交接摘要进行一轮策略恢复。重新读取已移出近期记忆的文件、目录或网页不计为停滞，每份证据限一次，紧接着重复读取仍计为停滞；恢复后再次持续停滞才等待补充信息。单次请求的超时和响应大小限制继续用于处理服务故障和模型上下文。取消阻止后续动作；已发生的写入不会自动撤回，正在进行的请求仍可能计费。
+
+合同 API：`POST /goal-contract` 由模型根据目标拟定合同，返回 `{"contract": …, "warnings": […]}`，不会创建任务；`warnings` 里 `concern` 是模型指出的问题（无法核验的标准、拿不到的资料等），`model_calls_low` / `token_budget_low` / `time_limit_low` 是预算检查及建议值。确认后把 `contract` 原样提交到 `POST /goals`。`POST /goal-contract/check` 对修改过的合同只做预算检查，不调用模型。
 
 任务管理 API：`GET /goals` 默认排除存档任务，`GET /goals?archived=true` 查看存档；`POST /goals/{id}/archive` 存档、`POST /goals/{id}/restore` 恢复、`DELETE /goals/{id}` 删除已结束任务及执行记录，并删除其工作区、回执和 Cookie 会话。进行中、休眠和等待输入的任务不能存档或删除。
 

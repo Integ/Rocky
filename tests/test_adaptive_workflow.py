@@ -216,9 +216,9 @@ async def test_tool_error_code_and_repair_hint_reach_the_next_model_turn(tempora
         assert "Install the missing fixture dependency" in text
 
 
-async def test_waiting_for_approval_obeys_the_absolute_task_timeout(temporal_env, tmp_path):
+async def test_waiting_for_approval_pauses_the_task_timeout(temporal_env, tmp_path):
     settings = Settings(workspace_root=tmp_path / "approval-timeout")
-    run = request(limits=ExecutionLimits(timeout_seconds=1))
+    run = request(limits=ExecutionLimits(timeout_seconds=5))
     activities = ApprovalActivities(
         decisions=[
             Decision(
@@ -230,33 +230,43 @@ async def test_waiting_for_approval_obeys_the_absolute_task_timeout(temporal_env
         workspace_tools=WorkspaceTools(settings),
     )
     async with worker(temporal_env, run, activities):
-        result = await asyncio.wait_for(
-            temporal_env.client.execute_workflow(
-                GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
-            ),
-            timeout=20,
+        handle = await temporal_env.client.start_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
         )
-    assert result.status == "deadline_exceeded"
-    assert result.pending_approval is None
-    assert len(activities.plans) == len(activities.tools) == 1
-    assert activities.verifications == 0
+        await asyncio.wait_for(activities.blocked.wait(), timeout=15)
+        # Far past the 5-second limit, but the clock stops while the owner decides.
+        await temporal_env.sleep(120)
+        state = await handle.query(GoalWorkflow.state)
+        assert state.status == "blocked" and state.pending_approval is not None
+        assert state.wake_at == state.pending_approval.expires_at
+        await handle.signal(
+            GoalWorkflow.approval_command,
+            WakeCommand(command_id="deny-1", message="deny:" + state.pending_approval.fingerprint),
+        )
+        result = await asyncio.wait_for(handle.result(), timeout=20)
+    assert result.status == "succeeded"
+    assert len(activities.tools) == 1
+    assert activities.verifications == 1
     assert not (settings.workspace_root / run.goal_id / "mutation.txt").exists()
 
 
-async def test_blocked_task_obeys_the_absolute_timeout_without_replanning(temporal_env):
+async def test_blocked_question_pauses_the_task_timeout_without_replanning(temporal_env):
     activities = Activities(decisions=[Decision(kind="blocked", reason="Missing source")])
-    run = request(limits=ExecutionLimits(timeout_seconds=1))
+    run = request(limits=ExecutionLimits(timeout_seconds=5))
     async with worker(temporal_env, run, activities):
-        result = await asyncio.wait_for(
-            temporal_env.client.execute_workflow(
-                GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
-            ),
-            timeout=20,
+        handle = await temporal_env.client.start_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
         )
-    assert result.status == "deadline_exceeded"
-    assert len(activities.plans) == result.model_calls == 1
+        await asyncio.wait_for(activities.blocked.wait(), timeout=15)
+        await temporal_env.sleep(120)
+        state = await handle.query(GoalWorkflow.state)
+        assert state.status == "blocked" and state.wake_at is None
+        assert len(activities.plans) == state.model_calls == 1
+        await handle.signal(GoalWorkflow.wake, "The source is attached")
+        result = await asyncio.wait_for(handle.result(), timeout=20)
+    assert result.status == "succeeded"
     assert not activities.tools
-    assert activities.verifications == 0
+    assert activities.plans[1].feedback == "The source is attached"
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt execution requires macOS")

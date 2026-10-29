@@ -38,7 +38,8 @@ class Settings(BaseSettings):
     # Seatbelt without approval. The owner can change this in the app.
     auto_approve_read_only: bool = True
     # Unanswered approval requests are declined, never approved, after this
-    # many minutes; 0 waits until the task deadline. Editable in the app.
+    # many minutes; 0 waits for the owner. Owner waits do not use the
+    # task deadline. Editable in the app.
     approval_timeout_minutes: int = Field(default=30, ge=0, le=10_080)
     # Per-request response caps. Reasoning tokens count toward them.
     plan_response_tokens: int = Field(default=16_384, ge=1_024, le=128_000)
