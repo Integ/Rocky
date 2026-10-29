@@ -17,6 +17,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import Field
 from sqlalchemy.exc import IntegrityError
 
+from rocky import __version__
 from rocky.approval_policy import ApprovalRule, ApprovalSettings
 from rocky.config import Settings
 from rocky.credentials import CredentialError, CredentialStore
@@ -204,7 +205,7 @@ def create_app(
 
     app = FastAPI(
         title="Rocky",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
         description="Durable execution of long-running goals.",
         docs_url=None,

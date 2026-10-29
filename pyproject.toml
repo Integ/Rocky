@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rocky-agent"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Rocky — a durable, goal-driven autonomous digital agent"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,6 +23,9 @@ dev = [
 
 [project.scripts]
 rocky = "rocky.cli:main"
+
+[tool.hatch.version]
+path = "src/rocky/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rocky"]
