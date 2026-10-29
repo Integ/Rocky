@@ -101,11 +101,33 @@ struct APIClient {
         let _: Receipt = try await request("/goals/\(id)/\(kind)", method: "POST", body: body)
     }
     func approve(_ id: String, fingerprint: String, forTask: Bool = false) async throws {
+        try await approve(id, fingerprint: fingerprint, scope: forTask ? .task : .action)
+    }
+    func approve(_ id: String, fingerprint: String, scope: ApprovalScope) async throws {
         struct Receipt: Decodable { var status: String }
         var payload = ["fingerprint": fingerprint]
-        if forTask { payload["scope"] = "task" }
+        if scope != .action { payload["scope"] = scope.rawValue }
         let body = try JSONEncoder().encode(payload)
         let _: Receipt = try await request("/goals/\(id)/approve", method: "POST", body: body)
+    }
+    /// Answers several requests at once; returns how many were accepted.
+    func approveBatch(_ items: [ApprovalItem], scope: ApprovalScope) async throws -> Int {
+        struct Item: Encodable { var goal_id: String; var fingerprint: String; var scope: String }
+        struct Batch: Encodable { var items: [Item] }
+        struct Result: Decodable { var status: String }
+        struct Response: Decodable { var results: [Result] }
+        let body = try JSONEncoder().encode(Batch(items: items.map {
+            Item(goal_id: $0.goal.id, fingerprint: $0.approval.fingerprint, scope: scope.rawValue)
+        }))
+        let response: Response = try await request("/approvals/batch", method: "POST", body: body)
+        return response.results.filter { $0.status == "queued" }.count
+    }
+    func approvalPolicy() async throws -> ApprovalPolicy { try await request("/approval-policy") }
+    func saveApprovalSettings(_ settings: ApprovalSettings) async throws -> ApprovalPolicy {
+        try await request("/approval-policy", method: "PUT", body: JSONEncoder().encode(settings))
+    }
+    func deleteApprovalRule(_ id: String) async throws {
+        _ = try await rawRequest("/approval-rules/\(id)", method: "DELETE")
     }
     func artifact(_ id: String, path: String) async throws -> ArtifactContent {
         var parts = URLComponents()

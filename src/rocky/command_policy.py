@@ -164,7 +164,8 @@ _READ_ONLY_PROGRAMS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "stat": (frozenset(), frozenset()),
     "strings": (frozenset(), frozenset()),
     "tail": (frozenset("fF"), frozenset({"follow", "retry"})),
-    "tree": (frozenset("o"), frozenset()),
+    # -R reruns tree and writes 00Tree.html files.
+    "tree": (frozenset("oR"), frozenset()),
     "uname": (frozenset(), frozenset()),
     "wc": (frozenset(), frozenset()),
     "which": (frozenset(), frozenset()),

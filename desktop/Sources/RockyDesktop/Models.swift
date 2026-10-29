@@ -115,6 +115,8 @@ struct RunState: Codable, Equatable {
     var observations: [ToolObservation]?
     var wake_at: String?
     var pending_approval: PendingApproval?
+    /// Requests declined because no one answered in time; the owner may still approve them.
+    var deferred_approvals: [PendingApproval]?
 
     var isTerminal: Bool {
         ["succeeded", "failed", "cancelled", "budget_exhausted", "deadline_exceeded"].contains(status)
@@ -142,11 +144,72 @@ struct PendingApproval: Codable, Equatable {
     var reason: String
     /// Leading command words the owner may approve for the rest of the task.
     var command_prefix: [String]?
+    /// HTTP method and origin the owner may approve for the rest of the task.
+    var http_scope: HttpScope?
+    /// When an unanswered request is declined; nil waits for the owner.
+    var expires_at: String?
 
     var commandPrefixText: String? {
         guard let command_prefix, !command_prefix.isEmpty else { return nil }
         return command_prefix.joined(separator: " ")
     }
+    /// What a task-wide or permanent approval of this request would cover.
+    var reusableScopeText: String? {
+        if let prefix = commandPrefixText { return "以 \(prefix) 开头的简单命令" }
+        if let http_scope { return "\(http_scope.method) \(http_scope.origin)" }
+        return nil
+    }
+    var expiryDate: Date? {
+        guard let expires_at else { return nil }
+        // Python writes microseconds; whole seconds are precise enough here.
+        let trimmed = expires_at.replacingOccurrences(of: #"\.[0-9]+"#, with: "", options: .regularExpression)
+        return ISO8601DateFormatter().date(from: trimmed)
+    }
+    var summary: String {
+        [action.tool, action.path, action.url, action.content].compactMap { $0 }.joined(separator: "\n")
+    }
+}
+
+struct HttpScope: Codable, Equatable {
+    var method: String
+    var origin: String
+}
+
+/// How the owner answers an approval request.
+enum ApprovalScope: String {
+    case action, task, always, deny, deferred, dismiss
+}
+
+/// One pending or declined request in the cross-task approval list.
+struct ApprovalItem: Identifiable, Equatable {
+    var goal: Goal
+    var approval: PendingApproval
+    var deferred: Bool
+    var id: String { "\(goal.id):\(approval.fingerprint)" }
+}
+
+struct ApprovalSettings: Codable, Equatable {
+    var read_only_commands: Bool
+    var timeout_minutes: Int
+}
+
+struct ApprovalRule: Codable, Equatable, Identifiable {
+    var rule_id: String
+    var kind: String
+    var command: String?
+    var methods: [String]
+    var origin: String?
+    var path_prefix: String
+    var id: String { rule_id }
+    var summary: String {
+        kind == "command" ? "命令 \(command ?? "")" : "\(methods.joined(separator: "/")) \(origin ?? "")\(path_prefix == "/" ? "" : path_prefix)"
+    }
+}
+
+struct ApprovalPolicy: Codable, Equatable {
+    var settings: ApprovalSettings
+    var rules: [ApprovalRule]
+    var allowlist: [String]
 }
 
 struct ProposedAction: Codable, Equatable {

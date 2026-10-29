@@ -80,6 +80,7 @@ def test_read_only_catalog_accepts_plain_reads(command):
         "tail -f log.txt",
         "tail --follow log.txt",
         "tree -o listing.txt",
+        "tree -R",
         "git status",
         "git diff",
         "sed -i s/a/b/ file",
@@ -150,6 +151,9 @@ def test_read_only_program_must_not_resolve_inside_a_workspace(tools, monkeypatc
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{planted}{os.pathsep}{os.environ['PATH']}")
     assert tools.execute(command_input("cat notes.txt")).error_code == "approval_required"
+    monkeypatch.setenv("PATH", f".{os.pathsep}{os.environ['PATH'].split(os.pathsep, 1)[1]}")
+    request = command_input("cat notes.txt", operation_id="step-0002")
+    assert tools.execute(request).error_code == "approval_required"
     assert tools.dispatched == []
 
 

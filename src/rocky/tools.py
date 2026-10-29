@@ -519,11 +519,15 @@ class WorkspaceTools:
         words = command_words(command)
         if not words:
             return False
-        found = shutil.which(words[0])
-        if not found or not os.path.isabs(found):
+        # Relative entries resolve against the command's working directory.
+        entries = os.environ.get("PATH", "").split(os.pathsep)
+        if any(
+            not entry or not os.path.isabs(entry) or Path(entry).resolve().is_relative_to(self.root)
+            for entry in entries
+        ):
             return False
-        resolved = Path(found).resolve()
-        return not resolved.is_relative_to(self.root)
+        found = shutil.which(words[0])
+        return bool(found) and not Path(found).resolve().is_relative_to(self.root)
 
     def _execute(self, request: ToolInput, goal_fd: int) -> ToolResult:
         if self.full_access:

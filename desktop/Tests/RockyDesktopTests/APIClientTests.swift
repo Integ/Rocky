@@ -133,6 +133,67 @@ final class APIClientTests: XCTestCase {
         try await api.approve("goal-1", fingerprint: fingerprint, forTask: true)
     }
 
+    private static func body(_ request: URLRequest) throws -> Data {
+        if let body = request.httpBody { return body }
+        let stream = try XCTUnwrap(request.httpBodyStream)
+        stream.open()
+        defer { stream.close() }
+        var bytes = [UInt8](repeating: 0, count: 4096)
+        let count = stream.read(&bytes, maxLength: bytes.count)
+        return Data(bytes.prefix(max(0, count)))
+    }
+
+    func testPermanentApprovalAndDenialSendTheirScopes() async throws {
+        let fingerprint = String(repeating: "c", count: 64)
+        for scope in [ApprovalScope.always, .deny] {
+            InterceptingProtocol.handle = { request in
+                XCTAssertEqual(request.url?.path, "/goals/goal-1/approve")
+                let payload = try JSONSerialization.jsonObject(with: Self.body(request)) as! [String: String]
+                XCTAssertEqual(payload, ["fingerprint": fingerprint, "scope": scope.rawValue])
+                return (202, Data(#"{"status":"queued"}"#.utf8))
+            }
+            try await api.approve("goal-1", fingerprint: fingerprint, scope: scope)
+        }
+    }
+
+    func testBatchApprovalSendsEachTaskAndCountsAcceptedAnswers() async throws {
+        let goal = try JSONDecoder().decode(Goal.self, from: Data(DesktopContractTests.goalJSON.utf8))
+        let approval = PendingApproval(fingerprint: String(repeating: "d", count: 64), operation_id: "step-0001", action: ProposedAction(tool: "run_command", content: "make deploy"), reason: "review")
+        InterceptingProtocol.handle = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.path, "/approvals/batch")
+            let payload = try JSONSerialization.jsonObject(with: Self.body(request)) as! [String: [[String: String]]]
+            XCTAssertEqual(payload["items"], [["goal_id": goal.goal_id, "fingerprint": approval.fingerprint, "scope": "deferred"]])
+            return (202, Data(#"{"results":[{"status":"queued"}]}"#.utf8))
+        }
+        let accepted = try await api.approveBatch([ApprovalItem(goal: goal, approval: approval, deferred: true)], scope: .deferred)
+        XCTAssertEqual(accepted, 1)
+    }
+
+    func testApprovalPolicyDecodesRulesAndSavesSettings() async throws {
+        let policy = #"{"settings":{"read_only_commands":true,"timeout_minutes":30},"rules":[{"rule_id":"r1","kind":"http","command":null,"methods":["POST"],"origin":"https://api.example.com","path_prefix":"/v1/","note":"","created_at":"2026-10-29T00:00:00+00:00"}],"allowlist":["git status"]}"#
+        InterceptingProtocol.handle = { request in
+            XCTAssertEqual(request.url?.path, "/approval-policy")
+            if request.httpMethod == "PUT" {
+                let payload = try JSONSerialization.jsonObject(with: Self.body(request)) as! [String: Any]
+                XCTAssertEqual(payload["timeout_minutes"] as? Int, 0)
+                XCTAssertEqual(payload["read_only_commands"] as? Bool, false)
+            }
+            return (200, Data(policy.utf8))
+        }
+        let loaded = try await api.approvalPolicy()
+        XCTAssertEqual(loaded.rules.first?.summary, "POST https://api.example.com/v1/")
+        XCTAssertEqual(loaded.allowlist, ["git status"])
+        _ = try await api.saveApprovalSettings(ApprovalSettings(read_only_commands: false, timeout_minutes: 0))
+    }
+
+    func testPendingApprovalDescribesReusableScopeAndExpiry() throws {
+        let json = #"{"fingerprint":"e","operation_id":"step-1","action":{"tool":"http_request","url":"https://hooks.example.com/a","content":"{}","sandbox":true},"reason":"review","command_prefix":null,"http_scope":{"method":"POST","origin":"https://hooks.example.com"},"requested_at":"2026-10-29T04:00:00+00:00","expires_at":"2026-10-29T04:30:00.250000+00:00"}"#
+        let approval = try JSONDecoder().decode(PendingApproval.self, from: Data(json.utf8))
+        XCTAssertEqual(approval.reusableScopeText, "POST https://hooks.example.com")
+        XCTAssertNotNil(approval.expiryDate)
+    }
+
     func testArchiveRestoreAndDeleteUseLifecycleEndpoints() async throws {
         for archived in [true, false] {
             InterceptingProtocol.handle = { request in
