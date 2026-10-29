@@ -87,8 +87,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func select(_ id: String?) {
-        guard id != selectedID else { return }
+    /// Returns the selection load so callers can wait for its requests to finish.
+    @discardableResult
+    func select(_ id: String?) -> Task<Void, Never>? {
+        guard id != selectedID else { return nil }
         selectedID = id
         selectionGeneration += 1
         input = ""
@@ -100,7 +102,7 @@ final class AppModel: ObservableObject {
         artifactErrors = [:]
         pendingCommand = nil
         error = nil
-        Task { await loadSelection() }
+        return Task { await loadSelection() }
     }
 
     func newTask() {

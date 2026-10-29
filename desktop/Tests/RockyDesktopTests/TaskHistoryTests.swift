@@ -76,11 +76,13 @@ final class TaskHistoryTests: XCTestCase {
         XCTAssertFalse(model.canManageHistory(completed))
         await model.delete(completed)
         XCTAssertEqual(model.goals.count, 2)
-        model.select(other.id)
+        let selection = model.select(other.id)
         var archived = completed
         archived.archived = true
         try XCTUnwrap(respond)(200, JSONEncoder().encode(archived))
         await action.value
+        // Drain the implicit load before invalidating its URLSession.
+        await selection?.value
         XCTAssertEqual(model.selectedID, other.id)
         XCTAssertEqual(model.visibleGoals.map(\.id), [other.id])
         XCTAssertTrue(model.historyUpdates.isEmpty)
@@ -103,10 +105,11 @@ final class TaskHistoryTests: XCTestCase {
         let action = Task { await model.delete(completed) }
         await fulfillment(of: [started], timeout: 2)
         model.showHistory(archived: true)
-        model.select(archived.id)
+        let selection = model.select(archived.id)
         model.isConnected = false
         try XCTUnwrap(respond)(200, Data(#"{"deleted":true}"#.utf8))
         await action.value
+        await selection?.value
         XCTAssertEqual(model.selectedID, archived.id)
         XCTAssertEqual(model.visibleGoals.map(\.id), [archived.id])
         XCTAssertEqual(model.goals.map(\.id), [archived.id])
