@@ -6,6 +6,7 @@ from datetime import timedelta
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from rocky.approval_policy import ApprovalPolicy
 from rocky.evidence import (
     audit_review,
     collect_review_evidence,
@@ -88,6 +89,8 @@ class Activities:
         await self.check_cancelled(request.run.goal_id)
         request = request.model_copy(deep=True)
         request.memory = await asyncio.to_thread(self.memory.build, request)
+        policy = await asyncio.to_thread(self.approval_policy)
+        request.approvals = policy.planning_context()
         await self.check_cancelled(request.run.goal_id)
         try:
             return await self.planner.plan(request)
@@ -109,7 +112,13 @@ class Activities:
     @activity.defn(name="rocky.execute")
     async def execute(self, request: ToolInput) -> ToolResult:
         await self.check_cancelled(request.run.goal_id)
-        return await asyncio.to_thread(self.tools.execute, request)
+        policy = await asyncio.to_thread(self.approval_policy)
+        return await asyncio.to_thread(self.tools.execute, request, policy)
+
+    def approval_policy(self) -> ApprovalPolicy:
+        """The owner's current rules; environment settings are the defaults."""
+        default = getattr(self.tools, "default_approval_policy", ApprovalPolicy)
+        return self.store.approval_policy(default())
 
     @activity.defn(name="rocky.verify")
     async def verify(self, request: VerifyInput) -> VerificationResult:

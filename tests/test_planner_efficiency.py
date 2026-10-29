@@ -244,7 +244,9 @@ class FailingPlanner:
 
 
 def activities(error):
-    store = SimpleNamespace(is_cancel_requested=lambda goal_id: False)
+    store = SimpleNamespace(
+        is_cancel_requested=lambda goal_id: False, approval_policy=lambda default: default
+    )
     tools = SimpleNamespace(
         verify_files=lambda run: VerificationResult(passed=True, feedback="ok"),
         review_text=lambda run: "artifact",

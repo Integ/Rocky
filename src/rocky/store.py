@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import re
+import shlex
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -29,6 +30,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from rocky.approval_policy import MAX_RULES, ApprovalPolicy, ApprovalRule, ApprovalSettings
 from rocky.inference import ModelSettings
 from rocky.models import GoalContract, GoalView, RunState
 
@@ -113,6 +115,26 @@ class GoalModelSettingsRow(Base):
     __tablename__ = "goal_model_settings"
     goal_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     settings: Mapped[dict] = mapped_column(JSON)
+
+
+class ApprovalSettingsRow(Base):
+    __tablename__ = "approval_settings"
+    key: Mapped[str] = mapped_column(String(32), primary_key=True)
+    settings: Mapped[dict] = mapped_column(JSON)
+
+
+class ApprovalRuleRow(Base):
+    """Persistent owner grants. Only authenticated owner requests write rows."""
+
+    __tablename__ = "approval_rules"
+    sequence_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    rule_id: Mapped[str] = mapped_column(String(64), unique=True)
+    rule: Mapped[dict] = mapped_column(JSON)
+
+
+# Owner answers to a pending or declined approval request. Rejections of the
+# current request ("deny") and of a declined one ("dismiss") never authorize.
+APPROVAL_SCOPES = ("", "task", "always", "deny", "deferred", "dismiss")
 
 
 class GoalLifecycleRow(Base):
@@ -302,6 +324,102 @@ class Store:
                 except IntegrityError:
                     session.execute(statement)
         return value.model_copy(deep=True)
+
+    def get_approval_settings(self, fallback: ApprovalSettings) -> ApprovalSettings:
+        with self.sessions() as session:
+            row = session.get(ApprovalSettingsRow, "default")
+            return (
+                ApprovalSettings.model_validate(row.settings)
+                if row
+                else fallback.model_copy(deep=True)
+            )
+
+    def set_approval_settings(self, value: ApprovalSettings) -> ApprovalSettings:
+        data = value.model_dump(mode="json")
+        with self.sessions.begin() as session:
+            statement = (
+                update(ApprovalSettingsRow)
+                .where(ApprovalSettingsRow.key == "default")
+                .values(settings=data)
+            )
+            if not session.execute(statement).rowcount:
+                try:
+                    with session.begin_nested():
+                        session.add(ApprovalSettingsRow(key="default", settings=data))
+                        session.flush()
+                except IntegrityError:
+                    session.execute(statement)
+        return value.model_copy(deep=True)
+
+    def approval_rules(self) -> list[ApprovalRule]:
+        with self.sessions() as session:
+            return [
+                ApprovalRule.model_validate(row.rule)
+                for row in session.scalars(
+                    select(ApprovalRuleRow).order_by(ApprovalRuleRow.sequence_id).limit(MAX_RULES)
+                )
+            ]
+
+    @staticmethod
+    def _add_approval_rule(session: Session, rule: ApprovalRule) -> ApprovalRule:
+        rows = list(session.scalars(select(ApprovalRuleRow)))
+        for row in rows:
+            existing = ApprovalRule.model_validate(row.rule)
+            if existing.describe() == rule.describe():
+                return existing
+        if len(rows) >= MAX_RULES:
+            raise ValueError(f"At most {MAX_RULES} approval rules can be kept; remove unused ones")
+        rule = rule.model_copy(
+            update={"rule_id": uuid4().hex[:16], "created_at": datetime.now(UTC).isoformat()}
+        )
+        session.add(ApprovalRuleRow(rule_id=rule.rule_id, rule=rule.model_dump(mode="json")))
+        return rule
+
+    def add_approval_rule(self, rule: ApprovalRule) -> ApprovalRule:
+        with self.sessions.begin() as session:
+            return self._add_approval_rule(session, rule)
+
+    def delete_approval_rule(self, rule_id: str) -> None:
+        with self.sessions.begin() as session:
+            if not session.execute(
+                delete(ApprovalRuleRow).where(ApprovalRuleRow.rule_id == rule_id)
+            ).rowcount:
+                raise KeyError(rule_id)
+
+    def approval_policy(self, fallback: ApprovalPolicy) -> ApprovalPolicy:
+        return fallback.model_copy(
+            update={
+                "settings": self.get_approval_settings(fallback.settings),
+                "rules": self.approval_rules(),
+            }
+        )
+
+    def approvals(self, limit: int = 200) -> list[dict]:
+        """Pending and declined approval requests across unfinished tasks."""
+        with self.sessions() as session:
+            views = self._views(
+                session,
+                GoalRow.state["status"].as_string().not_in(TERMINAL_STATUSES),
+                GoalLifecycleRow.deleted.is_not(True),
+                order_by=GoalRow.created_at,
+                limit=1000,
+            )
+        result = []
+        for view in views:
+            requests = (
+                [("pending", view.state.pending_approval)] if view.state.pending_approval else []
+            )
+            requests += [("deferred", item) for item in reversed(view.state.deferred_approvals)]
+            for status, item in requests:
+                result.append(
+                    {
+                        "goal_id": view.goal_id,
+                        "objective": view.contract.objective[:300],
+                        "status": status,
+                        "approval": item.model_dump(mode="json"),
+                    }
+                )
+        return result[:limit]
 
     def create_goal(
         self,
@@ -671,21 +789,37 @@ class Store:
             if row.state["status"] in TERMINAL_STATUSES:
                 raise ValueError("Goal has already ended")
             if kind == "approve":
-                pending = row.state.get("pending_approval") or {}
                 scope, _, fingerprint = payload.rpartition(":")
-                if (
-                    not pending
-                    or fingerprint != pending.get("fingerprint")
-                    or scope not in {"", "task"}
-                ):
-                    raise ValueError("Approval must match the task's current pending action")
-                if scope == "task" and (
-                    not pending.get("command_prefix")
-                    or not pending.get("action", {}).get("sandbox", True)
-                ):
-                    raise ValueError(
-                        "This action can only be approved once; it has no reusable command prefix"
-                    )
+                if scope not in APPROVAL_SCOPES:
+                    raise ValueError("Unsupported approval scope")
+                if scope in {"deferred", "dismiss"}:
+                    if not any(
+                        item.get("fingerprint") == fingerprint
+                        for item in row.state.get("deferred_approvals") or []
+                    ):
+                        raise ValueError("Approval must match one of the task's declined actions")
+                else:
+                    pending = row.state.get("pending_approval") or {}
+                    if not pending or fingerprint != pending.get("fingerprint"):
+                        raise ValueError("Approval must match the task's current pending action")
+                    if scope in {"task", "always"}:
+                        sandboxed = pending.get("action", {}).get("sandbox", True)
+                        prefix = pending.get("command_prefix") if sandboxed else None
+                        http = pending.get("http_scope")
+                        if not prefix and not http:
+                            raise ValueError(
+                                "This action can only be approved once; it has no reusable "
+                                "command prefix or HTTP scope"
+                            )
+                    if scope == "always":
+                        self._add_approval_rule(
+                            session,
+                            ApprovalRule(kind="command", command=shlex.join(prefix))
+                            if prefix
+                            else ApprovalRule(
+                                kind="http", methods=[http["method"]], origin=http["origin"]
+                            ),
+                        )
             if kind == "cancel":
                 row.cancel_requested = True
             command_id = str(uuid4())

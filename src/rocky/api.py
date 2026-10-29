@@ -17,6 +17,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import Field
 from sqlalchemy.exc import IntegrityError
 
+from rocky.approval_policy import ApprovalRule, ApprovalSettings
 from rocky.config import Settings
 from rocky.credentials import CredentialError, CredentialStore
 from rocky.inference import ModelSettings, model_catalog
@@ -150,10 +151,32 @@ class MemoryRequest(Model):
     expected_revision: int | None = Field(default=None, ge=0)
 
 
+ApprovalScope = Literal["action", "task", "always", "deny", "deferred", "dismiss"]
+
+
 class ApprovalRequest(Model):
     fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
-    # "task" also approves later simple commands with the pending command prefix.
-    scope: Literal["action", "task"] = "action"
+    # "task" also approves later simple commands with the pending command
+    # prefix, or HTTP requests with the pending method and origin; "always"
+    # saves that as a rule for every task. "deny" declines the pending action.
+    # "deferred" approves an action declined after a timeout; "dismiss" drops it.
+    scope: ApprovalScope = "action"
+
+
+class BatchApprovalItem(ApprovalRequest):
+    goal_id: str = Field(min_length=1, max_length=128)
+
+
+class BatchApprovalRequest(Model):
+    items: list[BatchApprovalItem] = Field(min_length=1, max_length=50)
+
+
+def _approval_payload(request: ApprovalRequest) -> str:
+    return (
+        request.fingerprint
+        if request.scope == "action"
+        else f"{request.scope}:{request.fingerprint}"
+    )
 
 
 def create_app(
@@ -511,9 +534,66 @@ def create_app(
 
     @app.post("/goals/{goal_id}/approve", status_code=202, dependencies=auth)
     def approve_goal(goal_id: str, request: ApprovalRequest):
-        payload = (
-            request.fingerprint if request.scope == "action" else "task:" + request.fingerprint
+        return command(goal_id, "approve", _approval_payload(request))
+
+    def default_approval_settings() -> ApprovalSettings:
+        return ApprovalSettings(
+            read_only_commands=settings.auto_approve_read_only,
+            timeout_minutes=settings.approval_timeout_minutes,
         )
-        return command(goal_id, "approve", payload)
+
+    @app.get("/approvals", dependencies=auth)
+    def list_approvals():
+        """Pending and timed-out approval requests across unfinished tasks."""
+        return database.approvals()
+
+    @app.post("/approvals/batch", status_code=202, dependencies=auth)
+    def batch_approvals(request: BatchApprovalRequest):
+        results = []
+        for item in request.items:
+            try:
+                command_id = database.enqueue_command(
+                    item.goal_id, "approve", _approval_payload(item)
+                )
+                results.append(
+                    {"goal_id": item.goal_id, "command_id": command_id, "status": "queued"}
+                )
+            except KeyError:
+                results.append(
+                    {"goal_id": item.goal_id, "status": "error", "detail": "Goal not found"}
+                )
+            except ValueError as exc:
+                results.append({"goal_id": item.goal_id, "status": "error", "detail": str(exc)})
+        return {"results": results}
+
+    @app.get("/approval-policy", dependencies=auth)
+    def get_approval_policy():
+        return {
+            "settings": database.get_approval_settings(default_approval_settings()),
+            "rules": database.approval_rules(),
+            "allowlist": settings.auto_approve_commands,
+        }
+
+    @app.put("/approval-policy", dependencies=auth)
+    def put_approval_policy(value: ApprovalSettings):
+        database.set_approval_settings(value)
+        return get_approval_policy()
+
+    @app.post("/approval-rules", status_code=201, dependencies=auth)
+    def create_approval_rule(rule: ApprovalRule):
+        try:
+            return database.add_approval_rule(
+                rule.model_copy(update={"rule_id": "", "created_at": ""})
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @app.delete("/approval-rules/{rule_id}", status_code=204, dependencies=auth)
+    def delete_approval_rule(rule_id: str):
+        try:
+            database.delete_approval_rule(rule_id)
+        except KeyError:
+            raise HTTPException(404, "Approval rule not found") from None
+        return Response(status_code=204)
 
     return app

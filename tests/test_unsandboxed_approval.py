@@ -128,7 +128,6 @@ def test_unsandboxed_command_needs_exact_approval_even_when_prefix_is_granted(
     assert denial.error_code == "approval_required"
     assert denial.approval_required == approval_fingerprint(request)
     assert denial.approval_command_prefix == []
-    assert not tools._prefix_approved(request)
     assert dispatched == []
     assert not list((tmp_path / ".rocky" / request.run.goal_id).glob("*.json"))
 
