@@ -16,7 +16,7 @@ macOS 原生应用是 Rocky 唯一的客户端，使用 SwiftUI 提供任务历�
 - SQL 提交/命令 outbox：API 接受目标后，worker 尚未运行也保留任务。
 - 单调版本检查点、工具幂等回执、重复唤醒去重。
 - 自动滚动 Temporal 执行历史，保留累计进度与待处理消息；引擎异常终止会同步到任务状态。
-- 完整工具权限：文件、HTTP、持久登录会话和 Shell；严格校验参数，命令与非安全 HTTP 请求默认先审批。
+- 完整工具权限：文件、HTTP、持久登录会话和 Shell；严格校验参数，命令与非安全 HTTP 请求默认先审批。分级审批让沙箱内只读命令和所有者规则覆盖的操作直接执行，无人回应的请求超时后拒绝并留待补批，长期运行不会被单条审批卡住。
 - 确定性文件检查和独立模型语义审查，通过核验后才报告成功。审查同时看到系统从执行记录和磁盘收集的证据：任务读取过的源文件（是否读全）、交付物以外改动过的文件、每个交付物由哪一步写入，以及工具操作记录。审查需逐条列出交付物中的数字和事实并引用证据原文；Rocky 自动核对每条引用，任何一条无据、引文不符或漏查都会否决“通过”。
 - 供 macOS 客户端使用的本地 API、开发用命令行工具、事件记录、Docker Compose 和 CI。
 
@@ -140,7 +140,14 @@ macOS 上的 `run_command` 默认通过 `/usr/bin/sandbox-exec -p <按 goal 生�
 
 `http_request` 的 `content` 为 JSON 配置，例如 `{"method":"POST","data":{"username":"…","password":"…"},"session":"platform"}`；后续请求使用相同 `session` 自动携带 Cookie。可用 `headers` / `json` / `body` / `auth` 配置其他认证方式，`path` 保存完整响应文件。会话按任务和名称隔离，私有持久存储，重启后可复用。`run_command` 的 `content` 为 Shell 命令，`path` 可指定工作目录。单次请求或命令最多 30 秒，较长计算可作为后台作业运行并在后续步骤查看文件结果。
 
-`ROCKY_APPROVAL_MODE=required` 是默认值：每条 Shell 命令，以及 GET/HEAD/OPTIONS 以外的 HTTP 请求，在执行前保存具体操作并等待用户批准。审批绑定任务、操作 ID 和完整参数，普通唤醒消息或网页中的“已批准”不会授权。原生客户端提供审批按钮；API 使用 `POST /goals/{id}/approve` 和 `{"fingerprint":"当前 pending_approval.fingerprint"}`。待批准的简单命令会附带同类前缀（如 `uv run pytest`），客户端的“本任务内批准同类命令”或 API 的 `{"fingerprint":"…","scope":"task"}` 会让本任务后续以该前缀开头的简单命令直接执行。`ROCKY_AUTO_APPROVE_COMMANDS=ls,git status,uv run pytest` 可配置对所有任务生效的前缀白名单。含 `;`、`&&`、`|`、重定向、`$`、反引号或换行的命令永远需要逐条批准，`sudo`/`env`/`xargs` 等包装命令和 `python -c` 这类内联代码不会提供同类批准。明确接受命令自行执行的单机所有者可配置 `ROCKY_APPROVAL_MODE=trusted`；完整工具权限本身不会关闭审批。此门禁按工具/方法分类，不能识别具有副作用的 GET 接口，文件写入仍按完整文件权限执行。
+`ROCKY_APPROVAL_MODE=required` 是默认值：每条 Shell 命令，以及 GET/HEAD/OPTIONS 以外的 HTTP 请求，都要先经过分级审批。审批绑定任务、操作 ID 和完整参数，普通唤醒消息或网页中的“已批准”不会授权。依次检查：
+
+1. **只读命令**：在 Seatbelt 内运行的简单只读命令直接执行，包括 `ls`、`cat`、`head`、`tail`、`wc`、`grep`、`rg`、`find`、`stat`、`du`、`diff`、`jq` 等；会写文件或执行其他程序的参数（`find -exec/-delete`、`sort -o`、`tail -f`、`rg --pre` 等）、未加引号的通配符和 `~` 展开仍需批准。程序必须解析到任务工作区之外。`git` 不在其中，因为仓库配置（如 `core.fsmonitor`、diff 驱动）可以执行任意程序，而任务能写这些配置。`ROCKY_AUTO_APPROVE_READ_ONLY=false` 或客户端“审批”页可关闭。
+2. **所有者规则**：命令前缀（如 `uv run pytest`），或某个精确来源上的 HTTP 方法（如 `POST https://api.example.com`，可限定路径前缀）。规则保存在 Rocky 数据库，命令和文件工具都无法改写；客户端审批卡片的“以后始终允许”或 `POST /approval-rules` 添加，`DELETE /approval-rules/{id}` 删除。`ROCKY_AUTO_APPROVE_COMMANDS=ls,git status,uv run pytest` 仍可配置环境变量白名单。
+3. **本任务授权**：“本任务内批准同类”或 API 的 `{"fingerprint":"…","scope":"task"}` 让本任务后续同前缀的简单命令，或同方法、同来源的 HTTP 请求直接执行。
+4. **等待所有者**：其余操作暂停等待批准。`POST /goals/{id}/approve` 接受 `scope` 为 `action`（默认）、`task`、`always`、`deny`。`GET /approvals` 列出所有未结束任务的待批与超时未批请求，`POST /approvals/batch` 一次处理多条。
+
+无人回应的请求在 `ROCKY_APPROVAL_TIMEOUT_MINUTES`（默认 30，0 表示一直等待，客户端可改）后**只会被拒绝，绝不会自动批准**：操作不执行，模型收到 `approval_timeout` 并改做不需要审批的工作，该请求进入任务的“超时未批”列表。所有者之后用 `scope` 为 `deferred` 批准它，任务会被唤醒，并可原样执行这一操作一次；`dismiss` 将其移除。连续 3 次超时后任务转为等待输入。含 `;`、`&&`、`|`、重定向、`$`、反引号或换行的命令永远不匹配前缀与只读规则，`sudo`/`env`/`xargs` 等包装命令和 `python -c` 这类内联代码不会提供同类批准。执行记录中的 `approved_by` 注明每个免审操作由哪一级放行（`read_only`、`allowlist`、`rule:<id>`、`task`、`deferred:…`、`owner`、`trusted`）。明确接受命令自行执行的单机所有者可配置 `ROCKY_APPROVAL_MODE=trusted`；完整工具权限本身不会关闭审批。此门禁按工具/方法分类，不能识别具有副作用的 GET 接口，文件写入仍按完整文件权限执行。
 
 浏览器自动化或需要写工作区外部文件的特殊命令可设置 `{"tool":"run_command","content":"…","path":"…","sandbox":false}`。这一出口始终需要用户逐次批准完整操作，即使使用 `trusted`、全局前缀白名单或本任务同类授权也不能跳过；审批界面会明确提示以当前用户权限在 Seatbelt 外运行。无沙箱命令不再具有任务文件隔离保证。更改命令、工作目录或 `sandbox` 值都会使原审批失效。
 

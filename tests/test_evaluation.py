@@ -597,7 +597,7 @@ def inspect_command() -> Decision:
     return Decision(
         kind="act",
         reason="Inspect the data",
-        action=Action(tool="run_command", content="head -3 sales.csv"),
+        action=Action(tool="run_command", content="awk 'NR <= 3' sales.csv"),
     )
 
 

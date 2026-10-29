@@ -260,6 +260,36 @@ explicit `ROCKY_APPROVAL_MODE=trusted` configuration bypasses the gate. The gate
 classifies tool/method, so it cannot recognize a mutating GET endpoint; ordinary
 file writes retain the selected filesystem policy.
 
+Before pausing, a gated action passes through approval tiers
+(`rocky/approval_policy.py`), evaluated by the execute Activity against the
+owner's current policy in the database:
+
+1. **Read-only commands** (`command_policy.read_only_command`): sandboxed simple
+   commands from a fixed catalog (`ls`, `cat`, `grep`, `rg`, `find`, `stat`,
+   `jq`, ...) with per-program denied options (`find -exec/-delete`, `sort -o`,
+   `tail -f`, `rg --pre`, GNU long-option abbreviations included), no unquoted
+   glob or leading `~`/`=`, and a program that resolves outside the workspace
+   root. `git` is excluded because repository config can run programs.
+   `ROCKY_AUTO_APPROVE_READ_ONLY` sets the default.
+2. **Owner rules** (`approval_rules` table): command prefixes, or non-GET
+   methods at an exact origin under a path prefix (dot segments and encoded
+   slashes never match). Rules are written only through the authenticated API
+   (`/approval-rules`, or `"scope": "always"` on an approval), never by tools.
+3. **Task grants**: command prefixes and, now, HTTP method + origin approved
+   with `"scope": "task"`.
+
+`ToolResult.approved_by` records which tier let an action run. Unsandboxed
+commands skip every tier. An unanswered request is declined, never approved,
+after `approval_timeout_seconds` (from `ROCKY_APPROVAL_TIMEOUT_MINUTES` or the
+stored policy, reported on the gated result so the workflow stays
+deterministic). The workflow returns an `approval_timeout` result to the
+planner and keeps the request in `deferred_approvals`. `"scope": "deferred"`
+later records the action's identity (goal + action content, without the
+operation ID) in `preapproved_actions` and wakes the task; the next identical
+action runs once. Three consecutive timeouts put the task in `blocked`.
+`"scope": "deny"` declines the pending action. `GET /approvals` and
+`POST /approvals/batch` list and answer requests across tasks.
+
 A decision may carry `actions`: up to 8 independent read-only actions
 (`read_file`, `list_files`, `fetch_url`, GET/HEAD/OPTIONS `http_request` without
 a download path). They run as concurrent Activities with operation IDs

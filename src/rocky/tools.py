@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -26,7 +27,13 @@ from urllib.parse import urlsplit
 
 from sqlalchemy.engine import make_url
 
-from rocky.command_policy import command_class, matches_prefix
+from rocky.approval_policy import (
+    ApprovalPolicy,
+    ApprovalSettings,
+    automatic_approval,
+    http_scope,
+)
+from rocky.command_policy import command_class, command_words
 from rocky.config import Settings
 from rocky.http_tools import HTTPToolError, request_http
 from rocky.models import (
@@ -41,6 +48,7 @@ from rocky.network import FetchError, fetch_public_text
 from rocky.seatbelt import SandboxUnavailable, prepare_sandbox
 from rocky.tool_contracts import (
     ActionValidationError,
+    action_identity,
     approval_fingerprint,
     parse_edits,
     parse_read_range,
@@ -281,6 +289,10 @@ class WorkspaceTools:
         self.approval_mode = getattr(settings, "approval_mode", "required")
         prefixes = getattr(settings, "auto_approved_prefixes", None)
         self.auto_approved_prefixes = prefixes() if callable(prefixes) else []
+        self.approval_settings = ApprovalSettings(
+            read_only_commands=getattr(settings, "auto_approve_read_only", True),
+            timeout_minutes=getattr(settings, "approval_timeout_minutes", 30),
+        )
         # The configured base holds default working directories and private receipts.
         self.root = settings.workspace_root.expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -352,7 +364,13 @@ class WorkspaceTools:
             fcntl.flock(lock_fd, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
             yield goal_fd, receipt_fd
 
-    def execute(self, request: ToolInput) -> ToolResult:
+    def default_approval_policy(self) -> ApprovalPolicy:
+        return ApprovalPolicy(
+            settings=self.approval_settings.model_copy(),
+            allowlist=[list(prefix) for prefix in self.auto_approved_prefixes],
+        )
+
+    def execute(self, request: ToolInput, policy: ApprovalPolicy | None = None) -> ToolResult:
         try:
             if not request.operation_id or len(request.operation_id) > 256:
                 raise ToolError("Invalid operation identifier")
@@ -393,13 +411,24 @@ class WorkspaceTools:
                 # outcome or a permanently cached denial.
                 options = validate_action(request.action, full_access=self.full_access)
                 unsandboxed = request.action.tool == "run_command" and not request.action.sandbox
+                approved_by = ""
                 if unsandboxed or (
-                    self.approval_mode != "trusted"
-                    and requires_approval(request.action, options)
-                    and not self._prefix_approved(request)
+                    self.approval_mode != "trusted" and requires_approval(request.action, options)
                 ):
+                    policy = policy or self.default_approval_policy()
                     approval = approval_fingerprint(request)
-                    if approval not in request.approved_action_fingerprints:
+                    identity = action_identity(request.run.goal_id, request.action)
+                    if approval in request.approved_action_fingerprints:
+                        approved_by = "owner"
+                    elif identity in request.preapproved_actions:
+                        approved_by = "deferred:" + identity
+                    elif not unsandboxed:
+                        approved_by = automatic_approval(request, options, policy)
+                        if approved_by == "read_only" and not self._system_program(
+                            request.action.content
+                        ):
+                            approved_by = ""
+                    if not approved_by:
                         return ToolResult(
                             success=False,
                             content=(
@@ -415,7 +444,11 @@ class WorkspaceTools:
                                 if request.action.tool == "run_command" and not unsandboxed
                                 else []
                             ),
+                            approval_http_scope=http_scope(request, options),
+                            approval_timeout_seconds=policy.settings.timeout_minutes * 60,
                         )
+                elif requires_approval(request.action, options):
+                    approved_by = "trusted"
                 if request.action.tool in _DISPATCH_MARKED or (
                     self.full_access and request.action.tool == "fetch_url"
                 ):
@@ -453,6 +486,7 @@ class WorkspaceTools:
                     )
                 except OSError as exc:
                     result = _path_failure(exc)
+                result.approved_by = approved_by
                 _atomic_write(
                     receipts_fd,
                     receipt_name,
@@ -476,16 +510,24 @@ class WorkspaceTools:
                 hint="Ask the owner to inspect the workspace receipt storage; do not repeat an external effect with a different identifier.",
             )
 
-    def _prefix_approved(self, request: ToolInput) -> bool:
-        """Owner allowlist or a task-scoped grant covers this simple command."""
-        return (
-            request.action.tool == "run_command"
-            and request.action.sandbox
-            and matches_prefix(
-                request.action.content,
-                [*self.auto_approved_prefixes, *request.approved_command_prefixes],
-            )
-        )
+    def _system_program(self, command: str | None) -> bool:
+        """The read-only program resolves outside every task workspace.
+
+        A PATH entry such as "." could otherwise run a file the task wrote
+        under the name of a catalog program.
+        """
+        words = command_words(command)
+        if not words:
+            return False
+        # Relative entries resolve against the command's working directory.
+        entries = os.environ.get("PATH", "").split(os.pathsep)
+        if any(
+            not entry or not os.path.isabs(entry) or Path(entry).resolve().is_relative_to(self.root)
+            for entry in entries
+        ):
+            return False
+        found = shutil.which(words[0])
+        return bool(found) and not Path(found).resolve().is_relative_to(self.root)
 
     def _execute(self, request: ToolInput, goal_fd: int) -> ToolResult:
         if self.full_access:

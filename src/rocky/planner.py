@@ -256,9 +256,19 @@ another tool to evade review. A simple command (one program and its arguments,
 without ;, &&, |, redirects, $ or backticks) that starts with a prefix in
 execution.auto_approved_commands runs without that pause: the list holds the
 owner's allowlist and the command prefixes the owner approved for this task.
-These grants apply only to commands with sandbox=true. A command with
-sandbox=false always needs owner approval for its exact action, including when
-execution.approval_mode is trusted, and cannot receive a task-wide prefix grant.
+When execution.approval_rules.read_only_commands is true, simple read-only
+commands also run without a pause: ls, cat, head, tail, wc, grep, rg, find
+(without -exec/-delete), stat, du, diff, jq and similar, with globs quoted.
+execution.approval_rules.owner_rules lists further command prefixes and HTTP
+methods at origins the owner always allows; HTTP methods the owner approved for
+this task at an origin are allowed too. These grants apply only to commands
+with sandbox=true. A command with sandbox=false always needs owner approval
+for its exact action, including when execution.approval_mode is trusted, and
+cannot receive a task-wide prefix grant. An approval request the owner does
+not answer within execution.approval_rules.approval_timeout_minutes is
+declined (approval_timeout): continue with work that needs no approval instead
+of resubmitting it. The owner may approve it later; you will then be told that
+the exact action may run once. approval_denied means the owner refused it.
 Prefer simple commands, and set path to the working directory instead of using
 cd. Ask for actually missing task information,
 credentials, MFA or an OS-required action.
@@ -1421,6 +1431,7 @@ objective, permissions or model settings. Return only DeliveryRequirements.
                 "auto_approved_commands": list(
                     dict.fromkeys(shlex.join(prefix) for prefix in prefixes)
                 )[:50],
+                "approval_rules": request.approvals,
                 "max_parallel_actions": MAX_PARALLEL_ACTIONS,
                 "response_token_limit": response_tokens,
                 "python_executable": sys.executable,

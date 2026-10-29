@@ -38,6 +38,7 @@ with workflow.unsafe.imports_passed_through():
         WakeCommand,
         read_only_action,
     )
+    from rocky.tool_contracts import action_identity
 
 # A streamed model response may take up to the planner's 900-second total limit.
 # Heartbeats detect a lost worker sooner than that. Rate limits, overload and
@@ -55,6 +56,8 @@ _MODEL_RETRY = RetryPolicy(
     non_retryable_error_types=["ModelDecisionError", "GoalCancelled"],
 )
 _REPORTED_MODEL_ERRORS = {"ModelDecisionError", "ModelTransientError"}
+# Consecutive unanswered approval requests before the task waits for input.
+_MAX_APPROVAL_TIMEOUTS = 3
 _BLOCKED_REASON_ERROR = (
     "A blocked decision requires the concrete missing information or dependency."
 )
@@ -81,6 +84,7 @@ class GoalWorkflow:
         self._run_start_cycle = 0
         self._limits = run.contract.limits
         self._approved_action = ""
+        self._denied_action = ""
         # Restore before signal handlers can run in a continued execution. A
         # duplicated wake delivered at startup must see its prior command ID.
         if checkpoint := run.checkpoint:
@@ -173,17 +177,64 @@ class GoalWorkflow:
     def approval_command(self, command: WakeCommand) -> None:
         # This signal is dispatched only from the authenticated owner outbox.
         # Ordinary wake text and model/tool output can never authorize a tool.
-        # "task:<fingerprint>" also approves the pending command's prefix for
-        # later simple commands in this task; the tool layer matches it.
-        pending = self._state.pending_approval
+        # "task:<fingerprint>" (and "always:", whose persistent rule the store
+        # records) also approves the pending command's prefix or HTTP method
+        # and origin for later actions in this task; the tool layer matches it.
+        # "deny:" declines the pending action. "deferred:" approves an action
+        # declined after a timeout so the task may repeat it once; "dismiss:"
+        # drops it.
         scope, _, fingerprint = command.message.rpartition(":")
-        if pending is None or fingerprint != pending.fingerprint or scope not in {"", "task"}:
-            return
-        if scope == "task":
-            if not pending.action.sandbox or not pending.command_prefix:
+        if scope in {"deferred", "dismiss"}:
+            item = next(
+                (
+                    entry
+                    for entry in self._state.deferred_approvals
+                    if entry.fingerprint == fingerprint
+                ),
+                None,
+            )
+            if item is None:
                 return
-            if pending.command_prefix not in self._state.approved_command_prefixes:
-                self._state.approved_command_prefixes.append(list(pending.command_prefix))
+            self._state.deferred_approvals = [
+                entry for entry in self._state.deferred_approvals if entry is not item
+            ]
+            if scope == "deferred":
+                identity = action_identity(self._state.goal_id, item.action)
+                if identity not in self._state.preapproved_actions:
+                    self._state.preapproved_actions = [
+                        *self._state.preapproved_actions[-19:],
+                        identity,
+                    ]
+                summary = " ".join(
+                    part
+                    for part in (item.action.path, item.action.url, item.action.content)
+                    if part
+                )[:1500]
+                self.wake(
+                    f"The owner approved the earlier declined {item.action.tool} action: "
+                    f"{summary}. Repeat exactly that action if it is still needed; it runs once "
+                    "without another approval."
+                )
+            return
+        pending = self._state.pending_approval
+        if (
+            pending is None
+            or fingerprint != pending.fingerprint
+            or scope not in {"", "task", "always", "deny"}
+        ):
+            return
+        if scope == "deny":
+            self._denied_action = pending.fingerprint
+            return
+        if scope in {"task", "always"}:
+            if pending.action.sandbox and pending.command_prefix:
+                if pending.command_prefix not in self._state.approved_command_prefixes:
+                    self._state.approved_command_prefixes.append(list(pending.command_prefix))
+            elif pending.http_scope is not None:
+                if pending.http_scope not in self._state.approved_http_scopes:
+                    self._state.approved_http_scopes.append(pending.http_scope.model_copy())
+            else:
+                return
         self._approved_action = pending.fingerprint
 
     def _append_observation(self, observation: Observation) -> None:
@@ -226,6 +277,7 @@ class GoalWorkflow:
             pass
         self._guard_dispatch()
         self._no_progress = 0
+        self._state.approval_timeouts = 0
         self._state.status = "running"
         self._state.wake_at = None
         return self._take_wake_feedback() or "External input received; reconsider the goal."
@@ -309,6 +361,10 @@ class GoalWorkflow:
                 approved_command_prefixes=[
                     list(prefix) for prefix in self._state.approved_command_prefixes
                 ],
+                approved_http_scopes=[
+                    scope.model_copy() for scope in self._state.approved_http_scopes
+                ],
+                preapproved_actions=list(self._state.preapproved_actions),
             ),
             result_type=ToolResult,
             start_to_close_timeout=self._timeout(45),
@@ -468,24 +524,48 @@ class GoalWorkflow:
                 "budget_exhausted", "The task's cumulative token limit has been reached."
             )
 
-    async def _await_approval(self, decision: Decision, result: ToolResult) -> None:
+    async def _await_approval(self, decision: Decision, result: ToolResult) -> str:
+        """Wait for the owner; return "approved", "denied" or "expired".
+
+        An unanswered request is declined after the configured timeout, never
+        approved. It stays listed so the owner can still approve it later.
+        """
         assert decision.action is not None
-        self._state.pending_approval = PendingApproval(
-            fingerprint=result.approval_required,
+        fingerprint = result.approval_required
+        now = workflow.now()
+        expiry = (
+            timedelta(seconds=result.approval_timeout_seconds)
+            if result.approval_timeout_seconds > 0
+            else None
+        )
+        pending = PendingApproval(
+            fingerprint=fingerprint,
             operation_id=f"step-{self._state.steps:04d}",
             action=decision.action,
             reason=result.content,
             command_prefix=result.approval_command_prefix or None,
+            http_scope=result.approval_http_scope,
+            requested_at=now.isoformat(),
+            expires_at=(now + expiry).isoformat() if expiry else None,
         )
+        self._state.pending_approval = pending
         self._state.status = "blocked"
         self._state.reason = result.content
-        self._state.wake_at = self._state.deadline_at
+        self._state.wake_at = pending.expires_at or self._state.deadline_at
+        self._denied_action = ""
         await self._persist()
         self._guard_dispatch()
+        timeout = self._timeout(86400 * 365) if self._state.deadline_at else None
+        if expiry is not None:
+            timeout = min(timeout, expiry) if timeout is not None else expiry
         try:
             await workflow.wait_condition(
-                lambda: self._cancel_requested or self._approved_action == result.approval_required,
-                timeout=self._timeout(86400 * 365) if self._state.deadline_at else None,
+                lambda: (
+                    self._cancel_requested
+                    or self._approved_action == fingerprint
+                    or self._denied_action == fingerprint
+                ),
+                timeout=timeout,
             )
         except TimeoutError:
             pass
@@ -493,6 +573,35 @@ class GoalWorkflow:
         self._state.status = "running"
         self._state.pending_approval = None
         self._state.wake_at = None
+        if self._approved_action == fingerprint:
+            self._state.approval_timeouts = 0
+            return "approved"
+        if self._denied_action == fingerprint:
+            self._denied_action = ""
+            return "denied"
+        self._state.approval_timeouts += 1
+        self._state.deferred_approvals = [*self._state.deferred_approvals[-19:], pending]
+        return "expired"
+
+    def _declined(self, outcome: str, result: ToolResult) -> ToolResult:
+        if outcome == "denied":
+            return ToolResult(
+                success=False,
+                content="The owner declined this action. It was not dispatched.",
+                error_code="approval_denied",
+                retry_hint="Do not repeat it. Choose another approach, or report blocked if the goal cannot be met without it.",
+            )
+        minutes = max(1, result.approval_timeout_seconds // 60)
+        return ToolResult(
+            success=False,
+            content=(
+                f"The owner did not answer within {minutes} minutes, so this action was "
+                "declined and not dispatched. It stays listed for the owner, who may still "
+                "approve it later; you will be told if they do."
+            ),
+            error_code="approval_timeout",
+            retry_hint="Do not resubmit it now. Continue with work that needs no approval: file tools, GET requests, read-only commands or other remaining criteria.",
+        )
 
     async def _harness_action(self, run: RunInput, cycle: "_Cycle") -> dict:
         decision = cycle.decision
@@ -524,13 +633,27 @@ class GoalWorkflow:
             return await self._harness_batch(run, cycle, decision.actions)
         cycle.result = await self._execute(run, decision.action)
         if cycle.result.approval_required:
-            await self._await_approval(decision, cycle.result)
-            cycle.result = await self._execute(run, decision.action)
-            self._approved_action = ""
-            if cycle.result.approval_required:
-                cycle.error = (
-                    "Approval no longer matches the operation. Request a new action for review."
-                )
+            outcome = await self._await_approval(decision, cycle.result)
+            if outcome == "approved":
+                cycle.result = await self._execute(run, decision.action)
+                self._approved_action = ""
+                if cycle.result.approval_required:
+                    cycle.error = (
+                        "Approval no longer matches the operation. Request a new action for review."
+                    )
+            else:
+                cycle.result = self._declined(outcome, cycle.result)
+                if outcome == "expired" and self._state.approval_timeouts >= _MAX_APPROVAL_TIMEOUTS:
+                    cycle.blocked_reason = (
+                        f"{self._state.approval_timeouts} approval requests in a row went "
+                        "unanswered. Review the declined actions in Rocky, or send a message "
+                        "to resume."
+                    )
+        if cycle.result.approved_by.startswith("deferred:"):
+            identity = cycle.result.approved_by.removeprefix("deferred:")
+            self._state.preapproved_actions = [
+                item for item in self._state.preapproved_actions if item != identity
+            ]
         self._guard_dispatch()
         result = cycle.result
         assert decision.action is not None

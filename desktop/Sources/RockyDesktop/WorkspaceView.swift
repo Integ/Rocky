@@ -40,6 +40,7 @@ struct WorkspaceView: View {
         }
         .tint(.rockyAccent)
         .sheet(isPresented: $model.showSettings) { SettingsView(model: model) }
+        .sheet(isPresented: $model.showApprovals) { ApprovalsView(model: model) }
         .confirmationDialog("停止这个任务？已经完成的文件会保留。", isPresented: $confirmStop, titleVisibility: .visible) {
             Button("停止任务", role: .destructive) { Task { await model.cancel() } }
         }
@@ -98,6 +99,19 @@ struct WorkspaceView: View {
             }
             Spacer(minLength: 8)
             Divider().padding(.horizontal, 18)
+            Button { model.showApprovals = true } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "hand.raised").font(.system(size: 15))
+                    Text("审批").font(.system(size: 12, weight: .medium))
+                    Spacer()
+                    let count = model.approvalItems.count
+                    if count > 0 {
+                        Text("\(count)").font(.system(size: 10, weight: .semibold)).foregroundStyle(.white)
+                            .padding(.horizontal, 6).padding(.vertical, 2).background(Color.orange, in: Capsule())
+                    }
+                    Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.tertiary)
+                }.padding(.horizontal, 10).padding(.vertical, 9)
+            }.buttonStyle(HoverButtonStyle(cornerRadius: 9)).padding(.horizontal, 10).padding(.top, 8).disabled(!runtime.isReady)
             Button { model.showSettings = true } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "slider.horizontal.3").font(.system(size: 15))
@@ -212,22 +226,35 @@ struct WorkspaceView: View {
                             if let approval = goal.state.pending_approval {
                                 VStack(alignment: .leading, spacing: 10) {
                                     Label("操作需要批准", systemImage: "hand.raised").font(.system(size: 12, weight: .medium))
-                                    Text([approval.action.tool, approval.action.path, approval.action.url, approval.action.content].compactMap { $0 }.joined(separator: "\n"))
+                                    Text(approval.summary)
                                         .font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
                                     HStack {
                                         Button("批准此操作") { Task { await model.approve() } }
                                             .buttonStyle(.borderedProminent)
-                                        if let prefix = approval.commandPrefixText {
-                                            Button("本任务内批准同类命令") { Task { await model.approve(forTask: true) } }
-                                                .help("本任务中以 \(prefix) 开头、且不含 ; && | > $ 等 Shell 操作符的命令将直接执行")
+                                        if let scope = approval.reusableScopeText {
+                                            Button("本任务内批准同类") { Task { await model.approve(scope: .task) } }
+                                                .help("本任务中的\(scope)将直接执行；命令不能含 ; && | > $ 等 Shell 操作符")
+                                            Button("以后始终允许") { Task { await model.approve(scope: .always) } }
+                                                .help("保存为审批规则：所有任务中的\(scope)都将直接执行，可在“审批”中删除")
                                         }
+                                        Button("拒绝") { Task { await model.approve(scope: .deny) } }
+                                            .help("不执行此操作，Rocky 会改用其他办法")
                                         Button("停止任务", role: .cancel) { Task { await model.cancel() } }
                                     }.disabled(model.pendingCommand != nil || !model.isConnected)
-                                    if let prefix = approval.commandPrefixText {
-                                        Text("同类命令：以 \(prefix) 开头的简单命令").font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                                    if let scope = approval.reusableScopeText {
+                                        Text("同类操作：\(scope)").font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                                    }
+                                    if let expiry = approval.expiryDate {
+                                        Text("无人回应将于 \(expiry.formatted(date: .omitted, time: .shortened)) 自动拒绝，任务会继续其他工作").font(.system(size: 10)).foregroundStyle(.secondary)
                                     }
                                 }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
                                     .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                            }
+                            if let declined = goal.state.deferred_approvals, !declined.isEmpty, !goal.state.isTerminal {
+                                Button { model.showApprovals = true } label: {
+                                    Label("\(declined.count) 项操作超时未批，已改用其他办法；点此查看并补批", systemImage: "clock.badge.exclamationmark")
+                                        .font(.system(size: 11))
+                                }.buttonStyle(.link)
                             }
                             if !executionEntries.isEmpty {
                                 DisclosureGroup {

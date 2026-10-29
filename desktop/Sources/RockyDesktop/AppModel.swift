@@ -14,6 +14,8 @@ final class AppModel: ObservableObject {
     @Published var truncatedArtifacts: Set<String> = []
     @Published var provider: ProviderSettings?
     @Published var showSettings = false
+    @Published var showApprovals = false
+    @Published var approvalPolicy: ApprovalPolicy?
     @Published var showInspector = false
     @Published var input = ""
     @Published var error: String?
@@ -270,15 +272,68 @@ final class AppModel: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
 
-    func approve(forTask: Bool = false) async {
+    func approve(scope: ApprovalScope = .action) async {
         guard let selected, let approval = selected.state.pending_approval,
               pendingCommand == nil, isConnected else { return }
         let generation = selectionGeneration
         do {
-            try await api.approve(selected.id, fingerprint: approval.fingerprint, forTask: forTask)
+            try await api.approve(selected.id, fingerprint: approval.fingerprint, scope: scope)
             if generation == selectionGeneration, selectedID == selected.id {
-                pendingCommand = forTask ? "已批准本任务中的同类命令，等待执行" : "已批准此操作，等待执行"
+                switch scope {
+                case .task: pendingCommand = "已批准本任务中的同类操作，等待执行"
+                case .always: pendingCommand = "已保存为审批规则并批准，等待执行"
+                case .deny: pendingCommand = "已拒绝此操作，Rocky 会改用其他办法"
+                default: pendingCommand = "已批准此操作，等待执行"
+                }
             }
+            if scope == .always { approvalPolicy = try? await api.approvalPolicy() }
+        } catch { self.error = error.localizedDescription }
+    }
+
+    /// Pending and timed-out requests of every unfinished task, oldest task first.
+    var approvalItems: [ApprovalItem] {
+        var items: [ApprovalItem] = []
+        for goal in goals where !goal.state.isTerminal {
+            if let pending = goal.state.pending_approval {
+                items.append(ApprovalItem(goal: goal, approval: pending, deferred: false))
+            }
+            for declined in (goal.state.deferred_approvals ?? []).reversed() {
+                items.append(ApprovalItem(goal: goal, approval: declined, deferred: true))
+            }
+        }
+        return items
+    }
+
+    /// Answers the given requests together. Declined requests take "deferred"
+    /// (approve) or "dismiss" (ignore); pending ones take "action" or "deny".
+    func answer(_ items: [ApprovalItem], approve: Bool) async {
+        guard isConnected, !items.isEmpty else { return }
+        do {
+            var accepted = 0
+            for deferred in [false, true] {
+                let group = items.filter { $0.deferred == deferred }
+                guard !group.isEmpty else { continue }
+                let scope: ApprovalScope = deferred ? (approve ? .deferred : .dismiss) : (approve ? .action : .deny)
+                accepted += try await api.approveBatch(group, scope: scope)
+            }
+            if accepted < items.count { self.error = "有 \(items.count - accepted) 项状态已变化，请刷新后重试。" }
+            await refresh()
+        } catch { self.error = error.localizedDescription }
+    }
+
+    func loadApprovalPolicy() async {
+        guard runtime.isReady else { return }
+        do { approvalPolicy = try await api.approvalPolicy() } catch { self.error = error.localizedDescription }
+    }
+
+    func saveApprovalSettings(_ settings: ApprovalSettings) async {
+        do { approvalPolicy = try await api.saveApprovalSettings(settings) } catch { self.error = error.localizedDescription }
+    }
+
+    func deleteApprovalRule(_ rule: ApprovalRule) async {
+        do {
+            try await api.deleteApprovalRule(rule.rule_id)
+            approvalPolicy = try await api.approvalPolicy()
         } catch { self.error = error.localizedDescription }
     }
 

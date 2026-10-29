@@ -206,6 +206,14 @@ class ExecutionStep(Model):
     completed_at: str | None = None
 
 
+class HttpScope(Model):
+    """One method at one origin; the unit of a task-wide HTTP approval."""
+
+    method: str = Field(pattern=r"^[A-Z]{1,16}$")
+    # scheme://host[:port], lower case, without a path.
+    origin: str = Field(min_length=1, max_length=300)
+
+
 class PendingApproval(Model):
     fingerprint: str
     operation_id: str
@@ -213,6 +221,11 @@ class PendingApproval(Model):
     reason: str
     # Leading command words the owner may approve for the rest of the task.
     command_prefix: list[str] | None = None
+    # Method and origin the owner may approve for the rest of the task.
+    http_scope: HttpScope | None = None
+    requested_at: str | None = None
+    # When an unanswered request is declined; None waits for the owner.
+    expires_at: str | None = None
 
 
 class RunState(Model):
@@ -240,6 +253,14 @@ class RunState(Model):
     pending_approval: PendingApproval | None = None
     deadline_at: str | None = None
     approved_command_prefixes: list[list[str]] = Field(default_factory=list)
+    approved_http_scopes: list[HttpScope] = Field(default_factory=list)
+    # Requests declined because the owner did not answer in time. The owner may
+    # still approve one later; the task can then repeat that exact action once.
+    deferred_approvals: list[PendingApproval] = Field(default_factory=list, max_length=20)
+    # Identities (see action_identity) of deferred actions the owner approved.
+    preapproved_actions: list[str] = Field(default_factory=list, max_length=20)
+    # Consecutive approval requests that expired without an answer.
+    approval_timeouts: int = 0
 
 
 class PlanInput(Model):
@@ -247,6 +268,8 @@ class PlanInput(Model):
     state: RunState
     feedback: str = ""
     memory: dict[str, Any] = Field(default_factory=dict)
+    # Owner approval rules in effect, added by the planning Activity.
+    approvals: dict[str, Any] = Field(default_factory=dict)
 
 
 class PlanResult(Model):
@@ -264,6 +287,8 @@ class ToolInput(Model):
     approved_action_fingerprints: list[str] = Field(default_factory=list)
     # Owner grants from task-scoped approvals; only owner signals add entries.
     approved_command_prefixes: list[list[str]] = Field(default_factory=list)
+    approved_http_scopes: list[HttpScope] = Field(default_factory=list)
+    preapproved_actions: list[str] = Field(default_factory=list)
 
 
 class ToolResult(Model):
@@ -275,6 +300,12 @@ class ToolResult(Model):
     retry_hint: str = ""
     approval_required: str = ""
     approval_command_prefix: list[str] = Field(default_factory=list)
+    approval_http_scope: HttpScope | None = None
+    # Seconds to wait for the owner before declining; 0 waits indefinitely.
+    approval_timeout_seconds: int = 0
+    # What let a gated action run without a pause, for the execution record:
+    # read_only, allowlist, rule:<id>, task, deferred:<identity> or trusted.
+    approved_by: str = ""
     # Files the action created or modified: goal-relative inside the workspace,
     # otherwise absolute. Commands report changes under their working directory.
     changed_paths: list[str] = Field(default_factory=list, max_length=200)

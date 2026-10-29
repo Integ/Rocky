@@ -124,3 +124,110 @@ def matches_prefix(command: str | None, prefixes: list[list[str]]) -> bool:
     if words is None:
         return False
     return any(prefix and words[: len(prefix)] == prefix for prefix in prefixes)
+
+
+# Programs that only read files or report system facts. Each maps to options
+# that make it write, follow forever or run another program. A read-only class
+# applies only inside Seatbelt, which already confines writes to the task.
+# git is deliberately absent: repository config such as core.fsmonitor or a
+# diff driver runs arbitrary programs, and Rocky can write that config itself.
+_READ_ONLY_PROGRAMS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    # program: (denied short option letters, denied long option names)
+    "basename": (frozenset(), frozenset()),
+    "cat": (frozenset(), frozenset()),
+    "cmp": (frozenset(), frozenset()),
+    "cut": (frozenset(), frozenset()),
+    "df": (frozenset(), frozenset()),
+    "diff": (frozenset(), frozenset()),
+    "dirname": (frozenset(), frozenset()),
+    "du": (frozenset(), frozenset()),
+    "file": (frozenset("C"), frozenset({"compile"})),
+    "grep": (frozenset(), frozenset()),
+    "egrep": (frozenset(), frozenset()),
+    "fgrep": (frozenset(), frozenset()),
+    "head": (frozenset(), frozenset()),
+    "hexdump": (frozenset(), frozenset()),
+    "jq": (frozenset(), frozenset()),
+    "ls": (frozenset(), frozenset()),
+    "md5": (frozenset(), frozenset()),
+    "md5sum": (frozenset(), frozenset()),
+    "nl": (frozenset(), frozenset()),
+    "od": (frozenset(), frozenset()),
+    "pwd": (frozenset(), frozenset()),
+    "readlink": (frozenset(), frozenset()),
+    "realpath": (frozenset(), frozenset()),
+    "rg": (frozenset(), frozenset({"pre", "pre-glob"})),
+    "sha1sum": (frozenset(), frozenset()),
+    "sha256sum": (frozenset(), frozenset()),
+    "shasum": (frozenset(), frozenset()),
+    "sort": (frozenset("oT"), frozenset({"output", "compress-program", "temporary-directory"})),
+    "stat": (frozenset(), frozenset()),
+    "strings": (frozenset(), frozenset()),
+    "tail": (frozenset("fF"), frozenset({"follow", "retry"})),
+    # -R reruns tree and writes 00Tree.html files.
+    "tree": (frozenset("oR"), frozenset()),
+    "uname": (frozenset(), frozenset()),
+    "wc": (frozenset(), frozenset()),
+    "which": (frozenset(), frozenset()),
+    "whoami": (frozenset(), frozenset()),
+}
+# find spells its actions as single-dash words, never as option clusters.
+_FIND_DENIED = frozenset(
+    {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fls", "-fprint", "-fprint0", "-fprintf"}
+)
+READ_ONLY_PROGRAMS = tuple(sorted({*_READ_ONLY_PROGRAMS, "find"}))
+_GLOB = frozenset("*?[]{}")
+
+
+def _unquoted_expansion(command: str) -> bool:
+    """Whether the shell could expand a word into other words or option names.
+
+    An unquoted glob can expand to a file named like a denied option, and a
+    leading ~ or = (zsh) expands to a path. Quoted text is literal.
+    """
+    lexer = shlex.shlex(command, posix=False, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return True
+    for token in tokens:
+        if token[:1] in {"~", "="}:
+            return True
+        quote = ""
+        escaped = False
+        for character in token:
+            if escaped:
+                escaped = False
+            elif character == "\\" and quote != "'":
+                escaped = True
+            elif quote:
+                if character == quote:
+                    quote = ""
+            elif character in {"'", '"'}:
+                quote = character
+            elif character in _GLOB:
+                return True
+    return False
+
+
+def read_only_command(command: str | None) -> bool:
+    """Whether a simple command only reads, so Seatbelt may run it unreviewed."""
+    words = command_words(command)
+    if words is None or words[0] not in READ_ONLY_PROGRAMS or _unquoted_expansion(command):
+        return False
+    if words[0] == "find":
+        return not any(word in _FIND_DENIED for word in words[1:])
+    short, long = _READ_ONLY_PROGRAMS[words[0]]
+    for word in words[1:]:
+        if word == "--":
+            break
+        if word.startswith("--"):
+            name = word[2:].partition("=")[0]
+            # GNU tools accept any unambiguous abbreviation of a long option.
+            if name and any(option.startswith(name) for option in long):
+                return False
+        elif word.startswith("-") and short.intersection(word[1:]):
+            return False
+    return True

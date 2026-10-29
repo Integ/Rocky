@@ -41,6 +41,20 @@ def approval_fingerprint(request: ToolInput) -> str:
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
+def action_identity(goal_id: str, action: Action) -> str:
+    """Identify an action's content in a task, independent of its operation ID.
+
+    An owner who approves a declined request reviewed exactly this content, so
+    the task may repeat the identical action once under a new operation ID.
+    """
+    payload = {
+        "goal_id": goal_id,
+        "action": action.model_dump(include={"tool", "path", "url", "content", "sandbox"}),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
 def _json_object(content: str | None) -> dict:
     def unique_pairs(pairs):
         result = {}
