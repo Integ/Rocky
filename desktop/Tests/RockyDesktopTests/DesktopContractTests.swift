@@ -18,6 +18,17 @@ final class DesktopContractTests: XCTestCase {
         }
     }
 
+    func testApprovalMarksOnlyCommandsThatLeaveTheSandbox() throws {
+        func action(_ json: String) throws -> ProposedAction {
+            try JSONDecoder().decode(ProposedAction.self, from: Data(json.utf8))
+        }
+        XCTAssertTrue(try action(#"{"tool":"run_command","content":"make","sandbox":false}"#).isUnsandboxed)
+        XCTAssertFalse(try action(#"{"tool":"run_command","content":"make","sandbox":true}"#).isUnsandboxed)
+        // Histories written before the field existed are sandboxed commands.
+        XCTAssertFalse(try action(#"{"tool":"run_command","content":"make"}"#).isUnsandboxed)
+        XCTAssertFalse(try action(#"{"tool":"write_file","path":"/tmp/x","content":"x","sandbox":true}"#).isUnsandboxed)
+    }
+
     func testInvalidObjectivesAreRejectedBeforeModelCall() {
         for objective in ["   ", String(repeating: "字", count: 8001)] {
             XCTAssertThrowsError(try GoalDraft(objective: objective))

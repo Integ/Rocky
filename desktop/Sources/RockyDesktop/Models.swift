@@ -217,6 +217,10 @@ struct ProposedAction: Codable, Equatable {
     var path: String?
     var url: String?
     var content: String?
+    /// false: the command runs outside Seatbelt with the owner's full privileges.
+    var sandbox: Bool?
+
+    var isUnsandboxed: Bool { tool == "run_command" && sandbox == false }
 }
 
 struct Goal: Codable, Identifiable, Equatable {

@@ -42,7 +42,9 @@ struct ApprovalsView: View {
                                     Text(item.deferred ? "超时未批，已改用其他办法" : "等待批准")
                                         .font(.system(size: 10)).foregroundStyle(item.deferred ? Color.secondary : Color.orange)
                                 }
-                                Text(item.approval.summary).font(.system(size: 11, design: .monospaced)).lineLimit(4).textSelection(.enabled)
+                                if item.approval.action.isUnsandboxed { UnsandboxedWarning() }
+                                // Never truncate: the owner approves exactly what is shown.
+                                Text(item.approval.summary).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
                                 if !item.deferred, let expiry = item.approval.expiryDate {
                                     Text("无人回应将于 \(expiry.formatted(date: .omitted, time: .shortened)) 自动拒绝").font(.system(size: 10)).foregroundStyle(.secondary)
                                 }
@@ -120,5 +122,13 @@ struct ApprovalsView: View {
         if minutes == 0 { return "一直等待" }
         if minutes % 60 == 0 { return "\(minutes / 60) 小时后拒绝" }
         return "\(minutes) 分钟后拒绝"
+    }
+}
+
+/// Marks a command that would run outside Seatbelt with the owner's privileges.
+struct UnsandboxedWarning: View {
+    var body: some View {
+        Label("在沙箱外运行：拥有你的全部权限，可读写这台 Mac 上你能访问的任何文件", systemImage: "exclamationmark.shield.fill")
+            .font(.system(size: 11, weight: .semibold)).foregroundStyle(.red)
     }
 }

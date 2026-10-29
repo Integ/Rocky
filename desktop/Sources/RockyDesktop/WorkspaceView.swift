@@ -226,6 +226,7 @@ struct WorkspaceView: View {
                             if let approval = goal.state.pending_approval {
                                 VStack(alignment: .leading, spacing: 10) {
                                     Label("操作需要批准", systemImage: "hand.raised").font(.system(size: 12, weight: .medium))
+                                    if approval.action.isUnsandboxed { UnsandboxedWarning() }
                                     Text(approval.summary)
                                         .font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
                                     HStack {

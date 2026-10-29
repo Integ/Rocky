@@ -257,8 +257,20 @@ or a newline always needs exact approval, and wrappers such as `sudo`, `env` or
 A prefix approves what follows it: `python3 build.py` approves any arguments to
 that script, including after the script changes. Only the owner's
 explicit `ROCKY_APPROVAL_MODE=trusted` configuration bypasses the gate. The gate
-classifies tool/method, so it cannot recognize a mutating GET endpoint; ordinary
-file writes retain the selected filesystem policy.
+classifies tool/method, so it cannot recognize a mutating GET endpoint.
+
+Full-access file tools do not run inside Seatbelt, so they have their own gate.
+A write, append, edit or HTTP download whose resolved path (after symlinks) is
+outside the task directory, and a read or listing of a credential store
+(`tools.SENSITIVE_HOME_PATHS`: `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.netrc`,
+`~/.config/gh`, keychains, browser profiles, ...), needs the owner's exact
+approval, like an unsandboxed command: owner rules and task grants never match
+it, and it offers no reusable scope. Seatbelt denies reads of the same
+credential stores, so commands that need them must request `sandbox=false`.
+`rocky serve` state (API token, Temporal database, `run/` and log directories)
+is protected like the credential file and SQLite database: no file tool or
+sandboxed command can read or write it. `trusted` mode bypasses the file gate
+but not these protections.
 
 Before pausing, a gated action passes through approval tiers
 (`rocky/approval_policy.py`), evaluated by the execute Activity against the
@@ -279,7 +291,7 @@ owner's current policy in the database:
    with `"scope": "task"`.
 
 `ToolResult.approved_by` records which tier let an action run. Unsandboxed
-commands skip every tier. An unanswered request is declined, never approved,
+commands and file access outside the task skip every tier. An unanswered request is declined, never approved,
 after `approval_timeout_seconds` (from `ROCKY_APPROVAL_TIMEOUT_MINUTES` or the
 stored policy, reported on the gated result so the workflow stays
 deterministic). The workflow returns an `approval_timeout` result to the

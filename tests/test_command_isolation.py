@@ -218,7 +218,7 @@ def test_default_dispatch_passes_profile_argv_environment_and_closes_control_des
     assert "(deny default)" in profile
     assert f"(subpath {seatbelt._quote(tasks.tools.root)})" in profile
     assert f"(allow file-write* (subpath {seatbelt._quote(tasks.goal)}))" in profile
-    for target in tasks.tools.protected_paths:
+    for target in (*tasks.tools.protected_paths, *tasks.tools.sensitive_paths):
         assert f"(deny file-read* file-write* (subpath {seatbelt._quote(target)}))" in profile
     for port in tasks.tools.control_ports:
         assert f'(deny network-outbound (remote ip "*:{port}"))' in profile

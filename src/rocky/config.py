@@ -17,6 +17,12 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/rocky.db"
     workspace_root: Path = Path("./data/workspaces")
     credential_path: Path = Path("./data/credentials.json")
+    # Service state written by `rocky serve`. Tools and commands can neither
+    # read nor change it; unset values default to the database directory.
+    api_token_file: Path | None = None
+    temporal_db: Path | None = None
+    run_dir: Path | None = None
+    log_dir: Path | None = None
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "default"
     task_queue: str = "rocky-goals"

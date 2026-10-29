@@ -64,6 +64,35 @@ MAX_EDIT_BYTES = 20_000_000
 _DISPATCH_MARKED = {"http_request", "run_command", "append_file", "edit_file"}
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
+_FILE_WRITE_TOOLS = frozenset({"write_file", "append_file", "edit_file"})
+# Credential stores below the owner's home. Full-access file tools need exact
+# owner approval to read them, and Seatbelt commands cannot read them at all:
+# a command that needs one (git over SSH, gh, aws) must request sandbox=false.
+SENSITIVE_HOME_PATHS = (
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".azure",
+    ".kube",
+    ".netrc",
+    ".git-credentials",
+    ".npmrc",
+    ".pypirc",
+    ".gem/credentials",
+    ".docker/config.json",
+    ".config/gh",
+    ".config/gcloud",
+    "Library/Keychains",
+    "Library/Cookies",
+    "Library/Safari",
+    "Library/Mail",
+    "Library/Messages",
+    "Library/Application Support/Google/Chrome",
+    "Library/Application Support/BraveSoftware",
+    "Library/Application Support/Microsoft Edge",
+    "Library/Application Support/Arc",
+    "Library/Application Support/Firefox",
+)
 
 
 class ToolError(ValueError):
@@ -103,6 +132,11 @@ def _clip(value: str) -> str:
 def _path_key(text: str) -> str:
     """Compare paths the way the macOS filesystem does: case and Unicode insensitive."""
     return unicodedata.normalize("NFD", text).casefold() if sys.platform == "darwin" else text
+
+
+def _inside(path: Path, parent: Path) -> bool:
+    target, base = _path_key(str(path)), _path_key(str(parent))
+    return target == base or target.startswith(base.rstrip("/") + "/")
 
 
 def _digest(content: bytes) -> str:
@@ -313,7 +347,21 @@ class WorkspaceTools:
             protected.extend(
                 Path(str(filename) + suffix) for suffix in ("", "-wal", "-shm", "-journal")
             )
-        self.protected_paths = tuple(protected)
+            # `rocky serve` keeps its token and status next to the database.
+            protected += [filename.parent / "api-token", filename.parent / "run"]
+        for name in ("api_token_file", "temporal_db", "run_dir", "log_dir"):
+            if (path := getattr(settings, name, None)) is not None:
+                path = Path(path).expanduser().resolve()
+                protected.append(path)
+                if name == "temporal_db":
+                    protected += [
+                        Path(f"{path}{suffix}") for suffix in ("-wal", "-shm", "-journal")
+                    ]
+        self.protected_paths = tuple(dict.fromkeys(protected))
+        home = Path.home()
+        self.sensitive_paths = tuple(
+            dict.fromkeys((home / path).resolve() for path in SENSITIVE_HOME_PATHS)
+        )
         self.protected_write_paths = tuple(
             {
                 Path(__file__).resolve().parent,
@@ -411,8 +459,12 @@ class WorkspaceTools:
                 # outcome or a permanently cached denial.
                 options = validate_action(request.action, full_access=self.full_access)
                 unsandboxed = request.action.tool == "run_command" and not request.action.sandbox
+                file_access = self._file_access(request)
+                # Like an unsandboxed command, these reach the owner's files
+                # outside the task, so only an exact approval lets them run.
+                exact = unsandboxed or (bool(file_access) and self.approval_mode != "trusted")
                 approved_by = ""
-                if unsandboxed or (
+                if exact or (
                     self.approval_mode != "trusted" and requires_approval(request.action, options)
                 ):
                     policy = policy or self.default_approval_policy()
@@ -422,7 +474,7 @@ class WorkspaceTools:
                         approved_by = "owner"
                     elif identity in request.preapproved_actions:
                         approved_by = "deferred:" + identity
-                    elif not unsandboxed:
+                    elif not exact:
                         approved_by = automatic_approval(request, options, policy)
                         if approved_by == "read_only" and not self._system_program(
                             request.action.content
@@ -434,6 +486,8 @@ class WorkspaceTools:
                             content=(
                                 "Owner approval is required to run this command outside Seatbelt with the current user's privileges. The operation has not been dispatched."
                                 if unsandboxed
+                                else f"Owner approval is required to {file_access}. The operation has not been dispatched."
+                                if exact
                                 else "Owner approval is required before running this shell command or potentially mutating HTTP request. The operation has not been dispatched."
                             ),
                             error_code="approval_required",
@@ -444,10 +498,10 @@ class WorkspaceTools:
                                 if request.action.tool == "run_command" and not unsandboxed
                                 else []
                             ),
-                            approval_http_scope=http_scope(request, options),
+                            approval_http_scope=None if exact else http_scope(request, options),
                             approval_timeout_seconds=policy.settings.timeout_minutes * 60,
                         )
-                elif requires_approval(request.action, options):
+                elif file_access or requires_approval(request.action, options):
                     approved_by = "trusted"
                 if request.action.tool in _DISPATCH_MARKED or (
                     self.full_access and request.action.tool == "fetch_url"
@@ -509,6 +563,27 @@ class WorkspaceTools:
                 code="operation_storage_unavailable",
                 hint="Ask the owner to inspect the workspace receipt storage; do not repeat an external effect with a different identifier.",
             )
+
+    def _file_access(self, request: ToolInput) -> str:
+        """Describe a full-access file operation that needs the owner, or return ''.
+
+        Writes outside the task directory could change startup files, other
+        projects or Rocky itself; credential stores could be read and sent on
+        with an unreviewed GET. Neither runs inside Seatbelt.
+        """
+        action = request.action
+        if not self.full_access or not action.path:
+            return ""
+        goal_id = request.run.goal_id
+        if action.tool in _FILE_WRITE_TOOLS or action.tool in {"fetch_url", "http_request"}:
+            target = self._resolve_path(goal_id, action.path, write=True)
+            if not _inside(target, self.root / goal_id):
+                return f"write {target} outside this task's directory"
+        elif action.tool in {"read_file", "list_files"}:
+            target = self._resolve_path(goal_id, action.path)
+            if any(_inside(target, path) for path in self.sensitive_paths):
+                return f"read the credential store {target}"
+        return ""
 
     def _system_program(self, command: str | None) -> bool:
         """The read-only program resolves outside every task workspace.
@@ -635,12 +710,9 @@ class WorkspaceTools:
 
     def _check_path(self, goal_id: str, path: Path, *, write: bool = False) -> None:
         """Full access never includes another goal or the private control tree."""
-        # Normalize the candidate once; the fixed root and protected keys are cached.
-        target = _path_key(str(path))
 
         def inside(parent: Path) -> bool:
-            base = _path_key(str(parent))
-            return target == base or target.startswith(base.rstrip("/") + "/")
+            return _inside(path, parent)
 
         if inside(self.root) and not inside(self.root / goal_id):
             raise ToolError(
@@ -793,7 +865,7 @@ class WorkspaceTools:
                     self.root,
                     request.run.goal_id,
                     self.root / request.run.goal_id,
-                    protected_paths=self.protected_paths,
+                    protected_paths=self.protected_paths + self.sensitive_paths,
                     blocked_ports=self.control_ports,
                 )
                 command = [*prefix, *command]

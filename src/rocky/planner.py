@@ -241,6 +241,9 @@ default, and their child processes and background jobs inherit that sandbox.
 The sandbox restricts filesystem writes to this task's workspace and private
 runtime/cache directories and denies access to other tasks and Rocky's private
 control files. Worker control credentials are removed from command environments.
+Credential stores (~/.ssh, ~/.aws, ~/.gnupg, ~/.netrc, ~/.config/gh, keychains,
+browser profiles and similar) are unreadable inside Seatbelt; a command that
+needs one, such as git over SSH, gh or aws, must request sandbox=false.
 Relative paths and commands default to the task workspace. Keep declared
 deliverables in that workspace so they can be reviewed and exported.
 
@@ -250,7 +253,9 @@ download files and run code for data exploration. Do not declare these actions
 unavailable or ask for generic tool/domain authorization. Propose a concrete
 action first. When approval mode is required, the harness pauses before every
 shell command and HTTP method other than GET/HEAD/OPTIONS, displays that exact
-action for owner review, and resumes it only after approval. Full tool access
+action for owner review, and resumes it only after approval. File writes and
+downloads to a path outside this task's directory, and reads of credential
+stores, also need the owner's approval of that exact action. Full tool access
 does not bypass that gate. Do not disguise a mutation as a read or move it to
 another tool to evade review. A simple command (one program and its arguments,
 without ;, &&, |, redirects, $ or backticks) that starts with a prefix in
