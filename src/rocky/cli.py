@@ -36,8 +36,14 @@ def main() -> None:
 
         # Local access checks need the actual socket peer and scheme, rather
         # than values supplied by forwarding headers from a loopback proxy.
+        # The desktop client polls every few seconds; an access log of those
+        # requests would grow without bound in a long-running service.
         uvicorn.run(
-            create_app(settings), host=settings.host, port=settings.port, proxy_headers=False
+            create_app(settings),
+            host=settings.host,
+            port=settings.port,
+            proxy_headers=False,
+            access_log=False,
         )
         return
     if args.command == "worker":

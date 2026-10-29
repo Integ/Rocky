@@ -261,6 +261,16 @@ final class AppModel: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
 
+    func recover(_ goal: Goal) async {
+        guard goal.state.status == "failed", isConnected, pendingCommand == nil else { return }
+        do {
+            let recovered = try await api.recoverGoal(goal.id)
+            if let index = goals.firstIndex(where: { $0.id == goal.id }) { goals[index] = recovered }
+            if selectedID == goal.id { showArchived = false }
+            await refresh()
+        } catch { self.error = error.localizedDescription }
+    }
+
     func cancel() async {
         guard let selected, !selected.state.isTerminal, pendingCommand == nil, isConnected else { return }
         let generation = selectionGeneration

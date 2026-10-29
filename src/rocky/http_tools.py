@@ -16,6 +16,8 @@ from pathlib import Path
 
 import httpx
 
+from rocky.models import SAFE_HTTP_METHODS
+
 MAX_TEXT = 16_000
 MAX_INLINE_BYTES = 1_000_000
 _COOKIE_FIELDS = (
@@ -324,6 +326,14 @@ async def _send_http(
             parsed.host,
             parsed.port,
         ):
+            # A 307/308 resends the method and body. Approval of a mutation
+            # covers its reviewed origin only, so never carry it elsewhere.
+            if outgoing.method.upper() not in SAFE_HTTP_METHODS:
+                raise HTTPToolError(
+                    f"The server redirected this {outgoing.method} request to another origin; "
+                    "the redirect was not followed. Review the destination and request it "
+                    "explicitly if it is intended"
+                )
             for name in request["headers"]:
                 if name.lower() not in {
                     "accept",

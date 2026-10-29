@@ -354,3 +354,18 @@ def test_worker_code_and_runtime_remain_readable(tmp_path, monkeypatch, tool, lo
     assert result.success, result.content
     expected = "inspectable worker code" if tool == "read_file" else "module.py"
     assert expected in result.content
+
+
+def test_unsandboxed_commands_do_not_inherit_the_worker_control_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("ROCKY_API_TOKEN", "owner-control-token")
+    monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", "/worker/.venv")
+    monkeypatch.setenv("OWNER_TOOL_SETTING", "kept")
+    tools = WorkspaceTools(Settings(workspace_root=tmp_path / "workspaces"))
+    request = command_request(sandbox=False)
+    request.action = request.action.model_copy(update={"content": "env"})
+    request.approved_action_fingerprints = [approval_fingerprint(request)]
+    result = tools.execute(request)
+    assert result.success, result.content
+    assert "owner-control-token" not in result.content
+    assert "/worker/.venv" not in result.content
+    assert "OWNER_TOOL_SETTING=kept" in result.content

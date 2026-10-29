@@ -65,4 +65,6 @@ def test_api_command_disables_proxy_header_rewriting(monkeypatch):
     monkeypatch.setattr(uvicorn, "run", runner)
     monkeypatch.setattr(sys, "argv", ["rocky", "api"])
     main()
-    runner.assert_called_once_with(app, host="127.0.0.1", port=8000, proxy_headers=False)
+    runner.assert_called_once_with(
+        app, host="127.0.0.1", port=8000, proxy_headers=False, access_log=False
+    )

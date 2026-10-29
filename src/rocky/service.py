@@ -15,7 +15,7 @@ from temporalio.worker import Worker
 
 from rocky.activities import Activities
 from rocky.config import Settings
-from rocky.models import GoalView, RunInput, RunState, WakeCommand
+from rocky.models import GoalView, RunCheckpoint, RunInput, RunState, WakeCommand
 from rocky.planner import OpenAIPlanner
 from rocky.store import TERMINAL_STATUSES, Store
 from rocky.tools import WorkspaceTools
@@ -41,6 +41,11 @@ _CLOSED_REASONS = {
         "the task from its saved state before resuming."
     ),
 }
+_RECOVERY_FEEDBACK = (
+    "Rocky's execution engine stopped this task unexpectedly and the owner recovered it "
+    "from its saved progress. An operation that was in progress may or may not have taken "
+    "effect: inspect the current state before repeating it, then continue the task."
+)
 _HISTORY_LIMIT_REASON = (
     "The execution service stopped this task because its workflow history reached the size "
     "limit. Its workspace and saved progress are preserved. Update the worker with history "
@@ -155,6 +160,7 @@ class Dispatcher:
     async def tick(self) -> None:
         for goal in await asyncio.to_thread(self.store.pending_goals):
             try:
+                recovery = await asyncio.to_thread(self.store.recovery_requested, goal.goal_id)
                 try:
                     await self.client.start_workflow(
                         "RockyGoal",
@@ -162,10 +168,18 @@ class Dispatcher:
                             goal_id=goal.goal_id,
                             contract=goal.contract,
                             model_settings=goal.model_settings,
+                            # A recovered goal continues its counters, step
+                            # numbers and progress from the saved projection.
+                            checkpoint=RunCheckpoint(state=goal.state, feedback=_RECOVERY_FEEDBACK)
+                            if recovery
+                            else None,
                         ),
                         id=goal.goal_id,
                         task_queue=self.settings.task_queue,
-                        id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+                        # Only an owner recovery may start a closed goal again.
+                        id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE
+                        if recovery
+                        else WorkflowIDReusePolicy.REJECT_DUPLICATE,
                     )
                 except WorkflowAlreadyStartedError:
                     pass
@@ -175,13 +189,7 @@ class Dispatcher:
         for item in await asyncio.to_thread(self.store.pending_commands):
             try:
                 goal = await asyncio.to_thread(self.store.get_goal, item["goal_id"])
-                if goal is None or goal.state.status in (
-                    "succeeded",
-                    "failed",
-                    "cancelled",
-                    "budget_exhausted",
-                    "deadline_exceeded",
-                ):
+                if goal is None or goal.state.status in TERMINAL_STATUSES:
                     await asyncio.to_thread(self.store.mark_command_sent, item["command_id"])
                     continue
                 handle = self.client.get_workflow_handle(item["goal_id"])

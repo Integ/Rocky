@@ -155,6 +155,20 @@ def _profile(
 """
 
 
+def worker_free_environment() -> dict[str, str]:
+    """The worker's environment without Rocky's control token or its Python setup.
+
+    Unsandboxed commands get this too: the owner approved the command, not
+    access to Rocky's API token or the worker's virtual environment.
+    """
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if not name.upper().startswith(("ROCKY_", "TEMPORAL_"))
+        and name.upper() not in _WORKER_ENV_NAMES
+    }
+
+
 def prepare_sandbox(
     root: Path,
     goal_id: str,
@@ -188,10 +202,8 @@ def prepare_sandbox(
     # environment intact while dropping Rocky/Temporal and common API secrets.
     env = {
         name: value
-        for name, value in os.environ.items()
-        if not name.upper().startswith(("ROCKY_", "TEMPORAL_"))
-        and name.upper() not in _PRIVATE_ENV_NAMES
-        and name.upper() not in _WORKER_ENV_NAMES
+        for name, value in worker_free_environment().items()
+        if name.upper() not in _PRIVATE_ENV_NAMES
         and not name.upper().endswith(_PRIVATE_ENV_SUFFIXES)
     }
     env.update(

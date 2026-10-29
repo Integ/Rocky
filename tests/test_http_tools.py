@@ -70,6 +70,10 @@ def http_server():
                         )
                     ],
                 )
+            elif self.path == "/redirect-host-307":
+                self.respond(
+                    307, headers=[("Location", f"http://localhost:{self.server.server_port}/echo")]
+                )
             elif self.path == "/redirect-host":
                 self.respond(
                     302, headers=[("Location", f"http://localhost:{self.server.server_port}/echo")]
@@ -234,6 +238,18 @@ def test_redirect_to_another_host_does_not_forward_request_credentials(http_serv
     headers = json.loads(result["text"])["headers"]
     for name in ["authorization", "x-api-key", "x-custom-secret", "cookie"]:
         assert name not in headers
+
+
+def test_mutations_are_never_redirected_to_another_origin(http_server, tmp_path):
+    with pytest.raises(HTTPToolError, match="another origin"):
+        request_http(
+            http_server + "/redirect-host-307",
+            {"method": "POST", "json": {"payment": 100}},
+            tmp_path / "sessions",
+        )
+    # A read may follow the same redirect.
+    result = request_http(http_server + "/redirect-host-307", {}, tmp_path / "sessions")
+    assert result["status_code"] == 200
 
 
 def test_basic_auth_and_json_null_are_sent(http_server, tmp_path):

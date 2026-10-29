@@ -64,6 +64,10 @@ struct APIClient {
     func setArchived(_ id: String, archived: Bool) async throws -> Goal {
         try await request("/goals/\(id)/\(archived ? "archive" : "restore")", method: "POST")
     }
+    /// Continues a goal that failed in the execution engine from its saved progress.
+    func recoverGoal(_ id: String) async throws -> Goal {
+        try await request("/goals/\(id)/recover", method: "POST")
+    }
     func deleteGoal(_ id: String) async throws {
         _ = try await rawRequest("/goals/\(id)", method: "DELETE")
     }

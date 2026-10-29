@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 import uuid
 from collections.abc import Callable, Iterator
@@ -45,7 +46,7 @@ from rocky.models import (
     read_only_action,
 )
 from rocky.network import FetchError, fetch_public_text
-from rocky.seatbelt import SandboxUnavailable, prepare_sandbox
+from rocky.seatbelt import SandboxUnavailable, prepare_sandbox, worker_free_environment
 from rocky.tool_contracts import (
     ActionValidationError,
     action_identity,
@@ -149,6 +150,9 @@ _UNTRACKED_DIRECTORIES = frozenset(
     | {".mypy_cache", ".pytest_cache", ".ruff_cache", ".rocky-sandbox"}
 )
 _SNAPSHOT_LIMIT = 5000
+# Two snapshots and a 30-second command must fit the 45-second Activity attempt,
+# even when the working directory is a large tree outside the workspace.
+_SNAPSHOT_SECONDS = 5.0
 
 
 def _snapshot(
@@ -156,7 +160,10 @@ def _snapshot(
 ) -> tuple[dict[str, tuple[int, int, int]], bool]:
     """Stat regular files below directory, in a stable order; report completeness."""
     entries: dict[str, tuple[int, int, int]] = {}
+    deadline = time.monotonic() + _SNAPSHOT_SECONDS
     for current, folders, files in os.walk(directory):
+        if time.monotonic() > deadline:
+            return entries, False
         folders[:] = sorted(
             name
             for name in folders
@@ -369,6 +376,17 @@ class WorkspaceTools:
                 Path(sys.base_prefix).resolve(),
             }
         )
+
+    def delete_goal_files(self, goal_id: str) -> None:
+        """Remove a deleted goal's workspace, receipts and cookie sessions."""
+        if not _IDENTIFIER.fullmatch(goal_id):
+            raise ToolError("Invalid goal identifier")
+        for path in (self.root / goal_id, self.root / ".rocky" / goal_id):
+            # Never follow a link: remove the link itself, not what it points to.
+            if path.is_symlink():
+                path.unlink()
+            elif path.exists():
+                shutil.rmtree(path)
 
     def read_artifact(self, goal_id: str, path: str) -> str:
         """Read a declared UI artifact inside its goal's export directory."""
@@ -859,7 +877,7 @@ class WorkspaceTools:
                 raise ToolError("The command working directory does not exist")
             shell = "/bin/zsh" if Path("/bin/zsh").exists() else "/bin/sh"
             command = [shell, "-c", action.content]
-            environment = None
+            environment = worker_free_environment()
             if action.sandbox:
                 prefix, environment = prepare_sandbox(
                     self.root,

@@ -2,6 +2,7 @@
 
 import asyncio
 import ipaddress
+import logging
 import os
 import re
 import secrets
@@ -28,6 +29,7 @@ from rocky.providers import PRESETS, ProviderUpdate, credential_id, provider_mod
 from rocky.store import MemoryConflictError, Store, equivalent_contracts
 from rocky.tools import ToolError, WorkspaceTools
 
+log = logging.getLogger(__name__)
 _IPV6_AUTHORITY = re.compile(r"\[([0-9a-fA-F:.]+)\](?::([0-9]{1,5}))?\Z")
 
 
@@ -424,6 +426,17 @@ def create_app(
     def restore_completed_goal(goal_id: str):
         return archive_goal(goal_id, False)
 
+    @app.post(
+        "/goals/{goal_id}/recover", response_model=GoalView, status_code=202, dependencies=auth
+    )
+    def recover_failed_goal(goal_id: str):
+        try:
+            return database.recover_goal(goal_id)
+        except KeyError:
+            raise HTTPException(404, "Goal not found") from None
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+
     @app.delete("/goals/{goal_id}", dependencies=auth)
     def delete_completed_goal(goal_id: str):
         try:
@@ -432,6 +445,11 @@ def create_app(
             raise HTTPException(404, "Goal not found") from None
         except ValueError:
             raise HTTPException(409, "Only completed goals can be deleted") from None
+        try:
+            WorkspaceTools(settings).delete_goal_files(goal_id)
+        except (OSError, ToolError):
+            # The record is gone either way; leftover files only cost disk space.
+            log.warning("Could not remove a deleted goal's files")
         return {"goal_id": goal_id, "deleted": True}
 
     @app.get("/goals/{goal_id}/events", dependencies=auth)

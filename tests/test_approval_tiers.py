@@ -364,6 +364,22 @@ def test_batch_answers_pending_and_declined_requests_across_tasks(control):
     )
 
 
+def test_an_approval_that_arrives_after_the_timeout_approves_the_declined_action(control):
+    client, store = control
+    declined = Action(tool="run_command", content="make deploy")
+    store.save_state(
+        RunState(
+            goal_id="other",
+            revision=1,
+            status="running",
+            deferred_approvals=[pending("b" * 64, declined)],
+        )
+    )
+    answer = client.post("/goals/other/approve", headers=AUTH, json={"fingerprint": "b" * 64})
+    assert answer.status_code == 202
+    assert [item["payload"] for item in store.pending_commands()] == ["deferred:" + "b" * 64]
+
+
 class Paused(Exception):
     pass
 
@@ -468,6 +484,24 @@ async def test_owner_denial_declines_without_deferring(monkeypatch):
     state = goal.state()
     assert state.deferred_approvals == [] and state.approval_timeouts == 0
     assert any("approval_denied" in item.content for item in state.observations)
+    assert len(executed) == 1
+
+
+async def test_owner_message_withdraws_a_pending_request(monkeypatch):
+    def message(goal):
+        goal.wake_command(WakeCommand(command_id="w1", message="Use make check instead"))
+
+    run, goal, executed, _ = offline_goal(
+        monkeypatch, [act("make deploy")], [gated("a" * 64)], waits=[message]
+    )
+    with pytest.raises(Paused):
+        await goal.run(run)
+    state = goal.state()
+    assert state.pending_approval is None
+    assert state.deferred_approvals == [] and state.approval_timeouts == 0
+    assert any("approval_superseded" in item.content for item in state.observations)
+    # The next planning round received the owner's message.
+    assert goal._consumed_wake_generation == goal._wake_generation == 1
     assert len(executed) == 1
 
 

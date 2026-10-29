@@ -7,8 +7,10 @@ CACHE="$ROOT/desktop/.runtime-cache"
 DIST="$ROOT/dist"
 mkdir -p "$CACHE" "$DIST"
 case "$(uname -m)" in
-  arm64) ARCH=arm64; UV_ARCH=aarch64; TEMPORAL_SHA=41e0425378fcb4fb5766340b97435e20fe47bbff2d7bf644ec2d51f7662b7c56 ;;
-  x86_64) ARCH=amd64; UV_ARCH=x86_64; TEMPORAL_SHA=48cdd6c84c56e27ae8e4d9a47052b89289a9c552dee029b49dd312c6fb72873f ;;
+  arm64) ARCH=arm64; UV_ARCH=aarch64; TEMPORAL_SHA=41e0425378fcb4fb5766340b97435e20fe47bbff2d7bf644ec2d51f7662b7c56
+         UV_SHA=e0b1d4743ce64c55d9f0f4a444afa6b81125680070ee04e853fcd0f6c1ebf8f1 ;;
+  x86_64) ARCH=amd64; UV_ARCH=x86_64; TEMPORAL_SHA=48cdd6c84c56e27ae8e4d9a47052b89289a9c552dee029b49dd312c6fb72873f
+          UV_SHA=7be2dcd316122f4b3e5a0a7889f6248266c14425374e105ff7dc9779184603a6 ;;
   *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 TEMPORAL_VERSION=1.9.1
@@ -57,9 +59,7 @@ else
   UV_PATH="$CACHE/$UV_VERSION-$UV_ARCHIVE"
   UV_BASE="https://github.com/astral-sh/uv/releases/download/$UV_VERSION"
   if [[ ! -f "$UV_PATH" ]]; then curl --proto '=https' --tlsv1.2 -fsSL --retry 2 "$UV_BASE/$UV_ARCHIVE" -o "$UV_PATH"; fi
-  curl --proto '=https' --tlsv1.2 -fsSL --retry 2 "$UV_BASE/$UV_ARCHIVE.sha256" -o "$UV_PATH.sha256"
-  UV_SHA="$(awk '{print $1}' "$UV_PATH.sha256")"
-  [[ "$UV_SHA" =~ ^[a-f0-9]{64}$ ]] || { echo 'Invalid uv checksum file' >&2; exit 1; }
+  # Pinned like Temporal: a checksum fetched beside the archive proves nothing.
   verify_sha "$UV_PATH" "$UV_SHA"
   tar -xzf "$UV_PATH" -C "$STAGE" "uv-$UV_ARCH-apple-darwin/uv"
   cp "$STAGE/uv-$UV_ARCH-apple-darwin/uv" "$RESOURCES/runtime/bin/uv"

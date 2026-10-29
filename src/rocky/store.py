@@ -5,6 +5,7 @@ import json
 import math
 import re
 import shlex
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -21,11 +22,12 @@ from sqlalchemy import (
     event,
     exists,
     func,
+    inspect,
     or_,
     select,
     update,
 )
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -146,6 +148,14 @@ class GoalLifecycleRow(Base):
     deleted: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class GoalRecoveryRow(Base):
+    """An owner request to restart a failed goal's execution from its projection."""
+
+    __tablename__ = "goal_recoveries"
+    goal_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    requested_at: Mapped[str] = mapped_column(String(64))
+
+
 class CommandRow(Base):
     __tablename__ = "commands"
     command_id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -227,6 +237,26 @@ class MemoryRow(Base):
     updated_at: Mapped[str] = mapped_column(String(64))
 
 
+class SchemaVersionRow(Base):
+    """The schema revision a database was last upgraded to."""
+
+    __tablename__ = "schema_version"
+    key: Mapped[str] = mapped_column(String(16), primary_key=True)
+    version: Mapped[int] = mapped_column(Integer)
+
+
+# create_all adds missing tables, never columns or constraints. A change to an
+# existing table increments SCHEMA_VERSION and registers the step that upgrades
+# a database from the previous version: MIGRATIONS[n] upgrades n - 1 to n, runs
+# in the same transaction as the version update, and must leave data intact.
+SCHEMA_VERSION = 1
+MIGRATIONS: dict[int, Callable[[Connection], None]] = {}
+
+
+class SchemaTooNewError(RuntimeError):
+    """The database was upgraded by a newer Rocky; refuse to run older code on it."""
+
+
 class Store:
     def __init__(self, database_url: str):
         url = make_url(database_url)
@@ -254,7 +284,46 @@ class Store:
         self.sessions = sessionmaker(self.engine, expire_on_commit=False)
 
     def initialize(self) -> None:
+        existing = inspect(self.engine).has_table(GoalRow.__tablename__)
         Base.metadata.create_all(self.engine)
+        for attempt in range(2):
+            try:
+                with self.engine.begin() as connection:
+                    self._migrate(connection, existing)
+                return
+            except IntegrityError:
+                # The API and worker initialize concurrently; the other wrote first.
+                if attempt:
+                    raise
+
+    @staticmethod
+    def _migrate(connection: Connection, existing: bool) -> None:
+        version = connection.scalar(
+            select(SchemaVersionRow.version).where(SchemaVersionRow.key == "schema")
+        )
+        if version is None:
+            # Databases from before versioning have the version 1 schema; new
+            # ones were just created at the current version.
+            version = 1 if existing else SCHEMA_VERSION
+            connection.execute(
+                SchemaVersionRow.__table__.insert().values(key="schema", version=version)
+            )
+        if version > SCHEMA_VERSION:
+            raise SchemaTooNewError(
+                f"The database uses schema version {version}, newer than this Rocky "
+                f"({SCHEMA_VERSION}); install the newer version or restore a backup"
+            )
+        for target in range(version + 1, SCHEMA_VERSION + 1):
+            MIGRATIONS[target](connection)
+            connection.execute(
+                update(SchemaVersionRow)
+                .where(SchemaVersionRow.key == "schema")
+                .values(version=target)
+            )
+
+    def schema_version(self) -> int:
+        with self.sessions() as session:
+            return session.get(SchemaVersionRow, "schema").version
 
     def close(self) -> None:
         self.engine.dispose()
@@ -526,6 +595,63 @@ class Store:
             row = session.get(GoalRow, goal_id)
             if row:
                 row.dispatched = True
+            session.execute(delete(GoalRecoveryRow).where(GoalRecoveryRow.goal_id == goal_id))
+
+    def recovery_requested(self, goal_id: str) -> bool:
+        with self.sessions() as session:
+            return session.get(GoalRecoveryRow, goal_id) is not None
+
+    def recover_goal(self, goal_id: str) -> GoalView:
+        """Queue a failed goal to continue from its saved projection.
+
+        Only an engine failure ends a goal as "failed"; the task's own limits
+        end it as budget_exhausted or deadline_exceeded. Usage counters and
+        step numbers carry over, so new operation IDs never reuse old receipts.
+        The wall-clock limit restarts: the engine was down, not the task slow.
+        """
+        with self.sessions.begin() as session:
+            changed = session.execute(
+                update(GoalRow)
+                .where(
+                    GoalRow.goal_id == goal_id,
+                    GoalRow.state["status"].as_string() == "failed",
+                    GoalRow.cancel_requested.is_(False),
+                    ~exists().where(
+                        GoalLifecycleRow.goal_id == GoalRow.goal_id,
+                        GoalLifecycleRow.deleted.is_(True),
+                    ),
+                )
+                .values(revision=GoalRow.revision)
+            )
+            row = session.get(GoalRow, goal_id)
+            lifecycle = session.get(GoalLifecycleRow, goal_id)
+            if row is None or (lifecycle and lifecycle.deleted):
+                raise KeyError(goal_id)
+            if not changed.rowcount:
+                raise ValueError("Only goals that failed in the execution engine can be recovered")
+            state = RunState.model_validate(row.state)
+            if state.pending_approval is not None:
+                # The request was never dispatched; the owner can still approve it.
+                state.deferred_approvals = [
+                    *state.deferred_approvals[-19:],
+                    state.pending_approval,
+                ]
+                state.pending_approval = None
+            state.status = "queued"
+            state.reason = "Recovering from saved progress after an execution engine failure."
+            state.wake_at = None
+            state.deadline_at = None
+            state.revision = row.revision + 1
+            state.updated_at = datetime.now(UTC).isoformat()
+            data = state.model_dump(mode="json")
+            row.state, row.revision, row.dispatched = data, state.revision, False
+            if lifecycle is not None:
+                lifecycle.archived = False
+            if session.get(GoalRecoveryRow, goal_id) is None:
+                session.add(GoalRecoveryRow(goal_id=goal_id, requested_at=state.updated_at))
+            session.add(EventRow(goal_id=goal_id, state=_event_state(data)))
+            session.flush()
+            return self._view(row, session)
 
     def reconciliation_goals(self, after: str = "", limit: int = 100) -> list[GoalView]:
         """Bounded cursor scan of projections that may outlive their engine run."""
@@ -765,6 +891,7 @@ class Store:
             for table in (
                 EventRow,
                 CommandRow,
+                GoalRecoveryRow,
                 GoalModelSettingsRow,
                 MessageRow,
                 ExecutionStepRow,
@@ -792,14 +919,20 @@ class Store:
                 scope, _, fingerprint = payload.rpartition(":")
                 if scope not in APPROVAL_SCOPES:
                     raise ValueError("Unsupported approval scope")
+                pending = row.state.get("pending_approval") or {}
+                declined = row.state.get("deferred_approvals") or []
+                if (
+                    scope == ""
+                    and fingerprint != pending.get("fingerprint")
+                    and any(item.get("fingerprint") == fingerprint for item in declined)
+                ):
+                    # The request timed out while the owner was approving it.
+                    # Approve the declined action instead of dropping the answer.
+                    scope, payload = "deferred", "deferred:" + fingerprint
                 if scope in {"deferred", "dismiss"}:
-                    if not any(
-                        item.get("fingerprint") == fingerprint
-                        for item in row.state.get("deferred_approvals") or []
-                    ):
+                    if not any(item.get("fingerprint") == fingerprint for item in declined):
                         raise ValueError("Approval must match one of the task's declined actions")
                 else:
-                    pending = row.state.get("pending_approval") or {}
                     if not pending or fingerprint != pending.get("fingerprint"):
                         raise ValueError("Approval must match the task's current pending action")
                     if scope in {"task", "always"}:

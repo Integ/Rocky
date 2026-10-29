@@ -53,6 +53,25 @@ holds API projections and submission/command outboxes. Files and tool receipts
 live on a separate persistent workspace volume. Back up all three together;
 deleting any one cannot be repaired by merely restarting the worker.
 
+Projection writes (`rocky.persist`) are revision-fenced and therefore retried
+without limit: a full disk, a locked database or a sleeping Mac delays a task
+but never fails its Workflow. Only the engine itself ends a goal as `failed`
+(reconciliation of a failed, terminated or timed-out execution); the task's own
+limits end it as `budget_exhausted` or `deadline_exceeded`. `POST
+/goals/{id}/recover` queues a `failed` goal again: the dispatcher starts a new
+execution of the same workflow ID (`ALLOW_DUPLICATE`, only for a recovery
+request) with a checkpoint built from the projection. Usage counters, step
+numbers (so operation IDs never reuse old receipts), task progress, handoff
+summary and workspace carry over; an undispatched approval request moves to
+the declined list; the wall-clock limit restarts. The first planning round is
+told that an interrupted operation may have taken effect.
+
+`schema_version` records the SQL schema revision. `create_all` only adds
+tables; a change to an existing table increments `store.SCHEMA_VERSION` and
+registers `store.MIGRATIONS[n]`, which runs in one transaction with the version
+update. A database from before versioning is version 1. Older code refuses a
+database with a newer version.
+
 ## Single model-driven execution loop
 
 The adaptive loop is the only execution loop. The model chooses an action, wait,
@@ -83,7 +102,8 @@ a revision adds no duplicate events. `/steps` reads the mutable projection;
 polls that send it back with `If-None-Match` receive a bodiless 304 until a
 goal is created, advances, or is archived, restored or deleted. A file-backed
 SQLite store runs in WAL mode so API reads do not wait on worker commits. Deletion purges both with
-the existing task/outbox records, and tombstones prevent resurrection.
+the existing task/outbox records and removes the goal's workspace, receipts and
+cookie sessions; tombstones prevent resurrection.
 
 The contract and explicit `task_progress` (completed, pending, evidence) remain
 resident. The planner can update an accumulated `handoff_summary`; it retains
@@ -159,6 +179,8 @@ path; normal worker restart replays this version's durable execution history.
 - `blocked` waits for owner input or exact-operation approval; configured task
   deadlines still apply. No models run while waiting. A real wake resets the
   no-progress counter and preserves usage/history; wake does not grant approval.
+  A wake during an approval wait withdraws the request (`approval_superseded`)
+  so the next round follows the owner's message.
 - Terminal results: `succeeded`, `failed`, `cancelled`, `budget_exhausted` and
   `deadline_exceeded`. Terminal goals reject new commands; submit a new contract.
 - All planning rounds count as steps, including wait/finish requests. Verification
@@ -233,7 +255,9 @@ which defaults to `full`. In full mode all eight tools are available even when a
 existing goal records narrower legacy allowlists. File tools accept absolute,
 relative, hidden and symlink paths. Shell commands run as the current OS user.
 HTTP requests accept all methods and arbitrary HTTP(S) destinations, including
-private/local services and custom ports, and follow redirects. Named per-goal
+private/local services and custom ports, and follow redirects. A redirect to
+another origin is never followed for a method other than GET/HEAD/OPTIONS, since
+a 307/308 would resend an approved body to an origin nobody reviewed. Named per-goal
 cookie jars persist privately outside the task's artifact directory. Full tools
 can reach all locations the OS user can access; this is an execution policy, not
 an OS sandbox. Output excerpts remain bounded to fit model context.

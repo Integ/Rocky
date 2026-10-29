@@ -47,6 +47,7 @@ with workflow.unsafe.imports_passed_through():
 _MODEL_ATTEMPT_SECONDS = 930
 _MODEL_HEARTBEAT = timedelta(seconds=60)
 _MODEL_ATTEMPTS = 3
+_TOOL_HEARTBEAT = timedelta(seconds=30)
 _MODEL_TOTAL_SECONDS = _MODEL_ATTEMPT_SECONDS * _MODEL_ATTEMPTS + 120
 _MODEL_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=2),
@@ -54,6 +55,14 @@ _MODEL_RETRY = RetryPolicy(
     maximum_interval=timedelta(seconds=30),
     maximum_attempts=_MODEL_ATTEMPTS,
     non_retryable_error_types=["ModelDecisionError", "GoalCancelled"],
+)
+_PERSIST_RETRY = RetryPolicy(
+    initial_interval=timedelta(seconds=1),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=60),
+    maximum_attempts=0,
+    # Only a missing goal row is permanent; database errors are retried.
+    non_retryable_error_types=["ValueError"],
 )
 _REPORTED_MODEL_ERRORS = {"ModelDecisionError", "ModelTransientError"}
 # Consecutive unanswered approval requests before the task waits for input.
@@ -289,8 +298,10 @@ class GoalWorkflow:
             "rocky.persist",
             self._state.model_copy(deep=True),
             start_to_close_timeout=timedelta(seconds=15),
-            schedule_to_close_timeout=timedelta(seconds=45),
-            retry_policy=RetryPolicy(maximum_attempts=3),
+            # A revision-fenced write is idempotent. A full disk, a locked
+            # database or a sleeping Mac must delay the task, never fail it:
+            # an Activity failure raised here would end the Workflow for good.
+            retry_policy=_PERSIST_RETRY,
         )
 
     async def _complete(self, status: Status, reason: str) -> RunState:
@@ -369,6 +380,8 @@ class GoalWorkflow:
             result_type=ToolResult,
             start_to_close_timeout=self._timeout(45),
             schedule_to_close_timeout=self._timeout(150),
+            # A lost worker is noticed in seconds instead of after the full attempt.
+            heartbeat_timeout=_TOOL_HEARTBEAT,
             retry_policy=RetryPolicy(
                 initial_interval=timedelta(seconds=1),
                 maximum_interval=timedelta(seconds=5),
@@ -525,10 +538,11 @@ class GoalWorkflow:
             )
 
     async def _await_approval(self, decision: Decision, result: ToolResult) -> str:
-        """Wait for the owner; return "approved", "denied" or "expired".
+        """Wait for the owner; return "approved", "denied", "redirected" or "expired".
 
         An unanswered request is declined after the configured timeout, never
-        approved. It stays listed so the owner can still approve it later.
+        approved. It stays listed so the owner can still approve it later. A
+        message from the owner withdraws the request so the task can follow it.
         """
         assert decision.action is not None
         fingerprint = result.approval_required
@@ -558,12 +572,16 @@ class GoalWorkflow:
         timeout = self._timeout(86400 * 365) if self._state.deadline_at else None
         if expiry is not None:
             timeout = min(timeout, expiry) if timeout is not None else expiry
+        generation = self._wake_generation
+        # Earlier histories kept waiting through a wake; replay them unchanged.
+        interruptible = workflow.patched("approval-wake-v1")
         try:
             await workflow.wait_condition(
                 lambda: (
                     self._cancel_requested
                     or self._approved_action == fingerprint
                     or self._denied_action == fingerprint
+                    or (interruptible and self._wake_generation != generation)
                 ),
                 timeout=timeout,
             )
@@ -579,11 +597,21 @@ class GoalWorkflow:
         if self._denied_action == fingerprint:
             self._denied_action = ""
             return "denied"
+        if interruptible and self._wake_generation != generation:
+            self._state.approval_timeouts = 0
+            return "redirected"
         self._state.approval_timeouts += 1
         self._state.deferred_approvals = [*self._state.deferred_approvals[-19:], pending]
         return "expired"
 
     def _declined(self, outcome: str, result: ToolResult) -> ToolResult:
+        if outcome == "redirected":
+            return ToolResult(
+                success=False,
+                content="The owner sent a message instead of answering this approval request, so the action was not dispatched.",
+                error_code="approval_superseded",
+                retry_hint="Follow the owner's message. Propose the action again only if it is still needed.",
+            )
         if outcome == "denied":
             return ToolResult(
                 success=False,

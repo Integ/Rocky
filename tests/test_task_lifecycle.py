@@ -34,10 +34,35 @@ CONTRACT = GoalContract(
 @pytest.fixture
 def api(tmp_path):
     store = Store(f"sqlite:///{tmp_path}/lifecycle.db")
-    settings = Settings(auth_mode="token", api_token="lifecycle-test-token")
+    settings = Settings(
+        auth_mode="token",
+        api_token="lifecycle-test-token",
+        workspace_root=tmp_path / "workspaces",
+    )
     with TestClient(create_app(settings, store)) as client:
         yield client, store
     store.close()
+
+
+def test_deleting_a_task_removes_its_workspace_and_receipts(api, tmp_path):
+    client, store = api
+    goal_id = submit(client, "files")
+    workspace = tmp_path / "workspaces" / goal_id
+    receipts = tmp_path / "workspaces" / ".rocky" / goal_id
+    (workspace / "notes").mkdir(parents=True)
+    (workspace / "notes" / "report.md").write_text("report")
+    receipts.mkdir(parents=True)
+    (receipts / "receipt.json").write_text("{}")
+    outside = tmp_path / "owner-project"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep")
+    (workspace / "linked").symlink_to(outside, target_is_directory=True)
+    finish(store, goal_id)
+
+    assert client.delete(f"/goals/{goal_id}", headers=AUTH).status_code == 200
+
+    assert not workspace.exists() and not receipts.exists()
+    assert (outside / "keep.txt").read_text() == "keep"
 
 
 def submit(client, key="lifecycle"):

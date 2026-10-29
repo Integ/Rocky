@@ -113,7 +113,7 @@ class Activities:
     async def execute(self, request: ToolInput) -> ToolResult:
         await self.check_cancelled(request.run.goal_id)
         policy = await asyncio.to_thread(self.approval_policy)
-        return await asyncio.to_thread(self.tools.execute, request, policy)
+        return await _with_heartbeat(asyncio.to_thread(self.tools.execute, request, policy))
 
     def approval_policy(self) -> ApprovalPolicy:
         """The owner's current rules; environment settings are the defaults."""

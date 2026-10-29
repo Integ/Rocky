@@ -281,6 +281,13 @@ struct WorkspaceView: View {
                                     .disabled(!model.isConnected || model.isSubmitting || model.provider?.isConfigured != true)
                                     .help("沿用原目标和验收标准，预算翻倍后创建新任务；保留原任务记录。")
                             }
+                            if goal.state.status == "failed" {
+                                Button { Task { await model.recover(goal) } } label: {
+                                    Label("从保存的进度恢复", systemImage: "arrow.uturn.forward")
+                                }.buttonStyle(.borderedProminent)
+                                    .disabled(!model.isConnected || model.pendingCommand != nil)
+                                    .help("执行引擎意外停止了这个任务。恢复后沿用已有进度、用量和工作区，运行时间重新计算。")
+                            }
                             Button { model.newTask(); composerFocused = true } label: { Label("开始新任务", systemImage: "plus") }.buttonStyle(.bordered)
                         }.padding(.leading, 41)
                     }

@@ -24,7 +24,9 @@ import httpx
 
 from rocky.config import Settings
 
-ACTIVE_STATUSES = {"queued", "running"}
+# A waiting task's durable timer only fires while the Mac is awake. Blocked
+# tasks wait for the owner, who wakes the Mac anyway.
+ACTIVE_STATUSES = {"queued", "running", "waiting"}
 _TOKEN_BYTES = 32
 _STOP_GRACE_SECONDS = 10.0
 
@@ -292,7 +294,7 @@ class Supervisor:
 
     def _has_active_goals(self) -> bool:
         try:
-            response = self._get("/goals", timeout=5)
+            response = self._get("/goals?limit=100", timeout=5)
             goals = response.json() if response.status_code == 200 else []
         except (httpx.HTTPError, ValueError):
             return False
