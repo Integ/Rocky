@@ -473,7 +473,8 @@ class WorkspaceTools:
         exit_path.unlink(missing_ok=True)
         # The wrapper records the exit status where the task can read it.
         # A subshell, so `exit` in the command still reaches the status line.
-        script = '(eval "$1"); status=$?; printf "%s\\n" "$status" > "$2"'
+        # (zsh reserves $status, hence the plain name.)
+        script = '(eval "$1"); code=$?; printf "%s\\n" "$code" > "$2"'
         argv = [*prefix, script, "rocky-job", request.action.content, str(exit_path)]
         with open(log_path, "wb") as log:
             process = subprocess.Popen(

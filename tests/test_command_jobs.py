@@ -66,7 +66,17 @@ def test_processes_left_by_a_finished_command_are_stopped(tools):
     assert not marker.exists()
 
 
-def test_background_job_reports_its_output_and_exit_status(tools):
+@pytest.mark.parametrize("shell", ["/bin/sh", "/bin/zsh"])
+def test_background_job_reports_its_output_and_exit_status(tools, monkeypatch, shell):
+    if not os.path.exists(shell):
+        pytest.skip(f"{shell} is not installed")
+    real_exists = tools_module.Path.exists
+    # The command shell is zsh where it exists, else sh; test both.
+    monkeypatch.setattr(
+        tools_module.Path,
+        "exists",
+        lambda self: (shell == "/bin/zsh") if str(self) == "/bin/zsh" else real_exists(self),
+    )
     result = run(tools, "job", "echo started; sleep 0.2; echo finished; exit 3", background=True)
     assert result.success, result.content
     job_id = result.progress_key.removeprefix("job:")
