@@ -6,7 +6,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
-from rocky.inference import ModelID, ModelSettings, ReasoningEffort, model_catalog
+from rocky.inference import DEFAULT_MODEL, ModelID, ModelSettings, ReasoningEffort, model_catalog
 
 Provider = Literal["openai", "openai-compatible", "anthropic", "ollama"]
 
@@ -22,7 +22,7 @@ PRESETS = [
         "preset": "openai",
         "label": "OpenAI",
         "base_url": "https://api.openai.com/v1",
-        "model": "gpt-4.1-mini",
+        "model": DEFAULT_MODEL,
         "requires_api_key": True,
         "models": model_catalog(),
     },
@@ -45,13 +45,13 @@ PRESETS = [
         "preset": "openrouter",
         "label": "OpenRouter",
         "base_url": "https://openrouter.ai/api/v1",
-        "model": "anthropic/claude-sonnet-4.5",
+        "model": "anthropic/claude-sonnet-5.5",
         "requires_api_key": True,
-        # https://openrouter.ai/anthropic/claude-sonnet-4.5
-        # https://openrouter.ai/openai/gpt-4.1-mini
+        # https://openrouter.ai/anthropic/claude-sonnet-5.5
+        # https://openrouter.ai/openai/gpt-6.1-sol
         "models": _model_choices(
-            ("anthropic/claude-sonnet-4.5", "Claude Sonnet 4.5"),
-            ("openai/gpt-4.1-mini", "GPT-4.1 mini"),
+            ("anthropic/claude-sonnet-5.5", "Claude Sonnet 5.5"),
+            ("openai/gpt-6.1-sol", "GPT-6.1 Sol"),
         ),
     },
     {
@@ -59,12 +59,13 @@ PRESETS = [
         "preset": "anthropic",
         "label": "Anthropic",
         "base_url": "https://api.anthropic.com/v1",
-        "model": "claude-sonnet-4-5",
+        "model": "claude-sonnet-5-5",
         "requires_api_key": True,
         # https://platform.claude.com/docs/en/about-claude/models/overview
         "models": _model_choices(
-            ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
-            ("claude-haiku-4-5", "Claude Haiku 4.5"),
+            ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+            ("claude-opus-5-5", "Claude Opus 5.5"),
+            ("claude-haiku-5-5", "Claude Haiku 5.5"),
         ),
     },
     {

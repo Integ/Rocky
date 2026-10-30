@@ -92,7 +92,7 @@ uv run rocky cancel GOAL_ID
 macOS 后台服务固定使用回环地址和保存在 `data/api-token`（权限 0600）的持久 API 令牌。
 
 首次启动、尚未保存模型设置时，`ROCKY_MODEL` 与可选的 `ROCKY_REASONING_EFFORT`
-提供后端初始默认值。旧版任务未记录模型配置时继续使用 worker 的环境配置；
+提供后端初始默认值（未设置时为 `gpt-6.1-sol`；设置页另有 Claude 5.5、DeepSeek、OpenRouter 和 Ollama 预设）。已保存的旧模型 ID（如 `gpt-4.1-mini`、`claude-sonnet-4-5`）继续可用。旧版任务未记录模型配置时继续使用 worker 的环境配置；
 单独调试时请为 API 和 worker 设置相同的初始值。
 
 ## 后端 Docker Compose

@@ -8,7 +8,7 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from rocky.command_policy import parse_prefix
-from rocky.inference import ModelSettings, ReasoningEffort
+from rocky.inference import DEFAULT_MODEL, ModelSettings, ReasoningEffort
 
 
 class Settings(BaseSettings):
@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "default"
     task_queue: str = "rocky-goals"
-    model: str = "gpt-4.1-mini"
+    model: str = DEFAULT_MODEL
     reasoning_effort: ReasoningEffort | None = None
     tool_access: Literal["full", "scoped"] = "full"
     approval_mode: Literal["required", "trusted"] = "required"

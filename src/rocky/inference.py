@@ -16,17 +16,19 @@ ModelID = Annotated[
 ]
 
 _THINKING = ("low", "medium", "high", "xhigh", "max")
+DEFAULT_MODEL = "gpt-6.1-sol"
 _CATALOG = (
+    ("gpt-6.1-sol", "GPT-6.1 Sol", _THINKING),
+    ("gpt-6-luna", "GPT-6 Luna", ("none", *_THINKING)),
+    ("gpt-6-astra", "GPT-6 Astra", _THINKING),
+    ("gpt-6-sol", "GPT-6 Sol", ("none", *_THINKING)),
+    # Older generation, kept for goals and settings saved with it.
     ("gpt-4.1-mini", "GPT-4.1 mini", ()),
     ("gpt-4.1", "GPT-4.1", ()),
-    ("gpt-6-luna", "GPT-6 Luna", ("none", *_THINKING)),
-    ("gpt-6-sol", "GPT-6 Sol", ("none", *_THINKING)),
-    ("gpt-6.1-sol", "GPT-6.1 Sol", _THINKING),
-    ("gpt-6-astra", "GPT-6 Astra", _THINKING),
 )
 
 
-def model_catalog(configured_model: str = "gpt-4.1-mini") -> list[dict]:
+def model_catalog(configured_model: str = DEFAULT_MODEL) -> list[dict]:
     """Return fresh objects, including a legacy/custom deployment's model.
 
     An unknown configured model remains usable without an effort parameter;
