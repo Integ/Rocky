@@ -1,5 +1,7 @@
 # 三项评测失败调查与最小修复
 
+> 状态：文中补丁随 PR #6（[`da97713`](https://github.com/Integ/Rocky/commit/da97713)）合并。文中的 `auto/beam-free` 网关模型后来已不可用。
+
 调查日期：2026-10-27。检查对象：`Integ/Rocky` 的 `main`，
 `49d6a3c0824e4794e921c52e97b69e86e0442e69`。
 
@@ -211,9 +213,9 @@ Swift 桌面测试。没有执行真实模型评测，没有宣称三项失败�
 ## 原始来源与实现位置
 
 - [检查的提交](https://github.com/Integ/Rocky/commit/49d6a3c0824e4794e921c52e97b69e86e0442e69)
-- [保存基线](../evals/baselines/auto-beam-free.json)；[评测说明](../evals/README.md)
-- [missing-info 定义](../evals/tasks/missing-info/task.json)；[原始目标文件](../evals/tasks/missing-info/fixtures/finance/targets.md)
-- [add-feature 定义](../evals/tasks/add-feature/task.json)；[long-guide 定义](../evals/tasks/long-guide/task.json)
-- [规划器](../src/rocky/planner.py)；[工作流](../src/rocky/workflow.py)；[Activities](../src/rocky/activities.py)
-- [工具执行](../src/rocky/tools.py)；[工具契约](../src/rocky/tool_contracts.py)；[上下文管理](../src/rocky/memory.py)
-- [证据审计](../src/rocky/evidence.py)；[评测及门槛](../src/rocky/evaluation.py)；[评测 CLI](../scripts/run_evals.py)
+- [保存基线](../../evals/baselines/auto-beam-free.json)；[评测说明](../../evals/README.md)
+- [missing-info 定义](../../evals/tasks/missing-info/task.json)；[原始目标文件](../../evals/tasks/missing-info/fixtures/finance/targets.md)
+- [add-feature 定义](../../evals/tasks/add-feature/task.json)；[long-guide 定义](../../evals/tasks/long-guide/task.json)
+- [规划器](../../src/rocky/planner.py)；[工作流](../../src/rocky/workflow.py)；[Activities](../../src/rocky/activities.py)
+- [工具执行](../../src/rocky/tools.py)；[工具契约](../../src/rocky/tool_contracts.py)；[上下文管理](../../src/rocky/memory.py)
+- [证据审计](../../src/rocky/evidence.py)；[评测及门槛](../../src/rocky/evaluation.py)；[评测 CLI](../../scripts/run_evals.py)

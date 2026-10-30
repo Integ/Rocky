@@ -90,7 +90,7 @@ uv run python scripts/run_evals.py compare baseline.json current.json --fail-on-
 成本检查发生在运行结束后，**不会限制执行时的花费**；硬上限由 `contract.limits` 决定。
 
 排查这三项失败的证据、离线测试和分阶段复测方法见
-[`docs/eval-failure-investigation.md`](../docs/eval-failure-investigation.md)。
+[`docs/reports/2026-10-27-eval-failure-investigation.md`](../docs/reports/2026-10-27-eval-failure-investigation.md)。
 
 仓库中的基线：
 

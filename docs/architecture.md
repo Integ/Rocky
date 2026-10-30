@@ -1,6 +1,6 @@
 # Execution architecture
 
-Rocky v0.1 targets one owner and one host. The model proposes one step at a time;
+Rocky targets one owner on one Mac (current version 0.2.0). The model proposes one step at a time;
 ordinary code owns state, execution scope, usage and completion gates.
 
 ## Durable boundaries
@@ -18,7 +18,10 @@ ordinary code owns state, execution scope, usage and completion gates.
    Responses stream: a request fails after 300 seconds without any received
    bytes or 900 seconds in total, so a long answer that keeps arriving is not
    cut off. Model Activities heartbeat, so a lost worker is noticed within a
-   minute despite the 930-second attempt timeout. A gateway that ignores
+   minute despite the 930-second attempt timeout. Planning and verification Activities run
+   on their own task queue (`<queue>-model`, named per run in
+   `RunInput.model_task_queue`), so long model calls never take the slots that
+   tool execution and projection writes need. A gateway that ignores
    `stream: true` and returns one JSON body is also accepted. The response cap
    (`ROCKY_PLAN_RESPONSE_TOKENS`, default 16384, doubled for high reasoning effort)
    includes reasoning tokens, and hitting it returns actionable feedback.
@@ -146,8 +149,8 @@ The durable handoff approach is informed by Anthropic's
 [long-running agent harness](https://www.anthropic.com/research/effective-harnesses-for-long-running-agents)
 and extension hooks by LangChain's
 [custom harness middleware](https://www.langchain.com/blog/how-to-build-a-custom-agent-harness).
-This v0.1 release does not support replaying unfinished Temporal executions from
-the former legacy or six-phase loops, or earlier versions of the adaptive loop.
+The current release does not support replaying unfinished Temporal executions from
+the former legacy or six-phase loops of 0.1, or earlier versions of the adaptive loop.
 End old running, waiting or blocked executions before upgrading and submit new
 goals to continue their objectives. Stored task records remain readable. No
 automatic history migration is provided; records and workspace files are retained.
@@ -186,7 +189,14 @@ path; normal worker restart replays this version's durable execution history.
   A wake during an approval wait withdraws the request (`approval_superseded`)
   so the next round follows the owner's message.
 - Terminal results: `succeeded`, `failed`, `cancelled`, `budget_exhausted` and
-  `deadline_exceeded`. Terminal goals reject new commands; submit a new contract.
+  `deadline_exceeded`. Terminal goals reject wake and cancel commands. Three
+  explicit paths continue the same goal, workspace, progress and usage counters
+  under a new execution: `POST /goals/{id}/recover` for `failed`;
+  `POST /goals/{id}/extend` raises the limits of a `budget_exhausted` or
+  `deadline_exceeded` goal; `POST /goals/{id}/follow-up` folds an owner request
+  into the objective and criteria of a `succeeded`, `cancelled`,
+  `budget_exhausted` or `deadline_exceeded` goal and grants one more original
+  budget on top of usage so far. Each restarts the wall-clock limit.
 - All planning rounds count as steps, including wait/finish requests. Verification
   records an additional model call, including when deterministic file checks fail.
 - No-progress detection compares action parameters and result fingerprints, so
@@ -255,7 +265,7 @@ Review still cannot prove factual truth or browse sources independently;
 research deliverables require appropriate evidence and human review.
 
 External text never grants permissions. The owner configures `ROCKY_TOOL_ACCESS`,
-which defaults to `full`. In full mode all eight tools are available even when an
+which defaults to `full`. In full mode all nine tools are available even when an
 existing goal records narrower legacy allowlists. File tools accept absolute,
 relative, hidden and symlink paths. Shell commands run as the current OS user.
 HTTP requests accept all methods and arbitrary HTTP(S) destinations, including
@@ -263,8 +273,8 @@ private/local services and custom ports, and follow redirects. A redirect to
 another origin is never followed for a method other than GET/HEAD/OPTIONS, since
 a 307/308 would resend an approved body to an origin nobody reviewed. Named per-goal
 cookie jars persist privately outside the task's artifact directory. Full tools
-can reach all locations the OS user can access; this is an execution policy, not
-an OS sandbox. Output excerpts remain bounded to fit model context.
+can reach all locations the OS user can access, subject to the file gate below;
+this is an execution policy, not an OS sandbox. Output excerpts remain bounded to fit model context.
 
 `ROCKY_APPROVAL_MODE=required` is the default. Every shell command and HTTP
 method except GET/HEAD/OPTIONS returns a concrete approval requirement before
@@ -285,11 +295,27 @@ or a newline always needs exact approval, and wrappers such as `sudo`, `env` or
 A prefix approves what follows it: `python3 build.py` approves any arguments to
 that script, including after the script changes. Only the owner's
 explicit `ROCKY_APPROVAL_MODE=trusted` configuration bypasses the gate. The gate
-classifies tool/method, so it cannot recognize a mutating GET endpoint.
+classifies tool/method, so it cannot recognize a mutating GET endpoint. A
+GET/HEAD/OPTIONS request with a body or a URL longer than 2048 characters is
+gated like a write so file contents cannot ride along; a short GET can still
+carry a little data, which is why personal-file reads are gated.
+
+`run_command` waits 30 seconds by default; an action may request
+`timeout_seconds` up to 900, and processes left behind when it returns are
+killed. `background: true` starts a managed job instead: the call returns a job
+ID, output goes to `.rocky-jobs/<id>.log` and the exit code to
+`.rocky-jobs/<id>.exit`. A goal runs at most 4 jobs of at most 6 hours each,
+and all are stopped when the goal ends or is deleted. Both fields are part of
+the approved action.
 
 Full-access file tools do not run inside Seatbelt, so they have their own gate.
+A goal contract may grant existing folders (`folders`, read/write) and attach
+reference files (`files`, read-only); neither may be the root, the home
+directory itself, or overlap Rocky's own data, code or credential stores.
+Seatbelt also lets sandboxed commands write granted folders.
 A write, append, edit or HTTP download whose resolved path (after symlinks) is
-outside the task directory, and a read or listing of a credential store
+outside the task directory and granted folders, a read or listing of personal
+files under the home directory outside those places, and a read or listing of a credential store
 (`tools.SENSITIVE_HOME_PATHS`: `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.netrc`,
 `~/.config/gh`, keychains, browser profiles, ...), needs the owner's exact
 approval, like an unsandboxed command: owner rules and task grants never match
@@ -309,17 +335,19 @@ owner's current policy in the database:
    `jq`, ...) with per-program denied options (`find -exec/-delete`, `sort -o`,
    `tail -f`, `rg --pre`, GNU long-option abbreviations included), no unquoted
    glob or leading `~`/`=`, and a program that resolves outside the workspace
-   root. `git` is excluded because repository config can run programs.
+   root, with no argument or working directory pointing at personal files under
+   the home directory outside the task and granted folders. `git` is excluded
+   because repository config can run programs.
    `ROCKY_AUTO_APPROVE_READ_ONLY` sets the default.
 2. **Owner rules** (`approval_rules` table): command prefixes, or non-GET
    methods at an exact origin under a path prefix (dot segments and encoded
    slashes never match). Rules are written only through the authenticated API
    (`/approval-rules`, or `"scope": "always"` on an approval), never by tools.
-3. **Task grants**: command prefixes and, now, HTTP method + origin approved
+3. **Task grants**: command prefixes and HTTP method + origin approved
    with `"scope": "task"`.
 
 `ToolResult.approved_by` records which tier let an action run. Unsandboxed
-commands and file access outside the task skip every tier. An unanswered request is declined, never approved,
+commands and gated file access skip every tier. An unanswered request is declined, never approved,
 after `approval_timeout_seconds` (from `ROCKY_APPROVAL_TIMEOUT_MINUTES` or the
 stored policy, reported on the gated result so the workflow stays
 deterministic). The workflow returns an `approval_timeout` result to the
@@ -351,10 +379,14 @@ are never copied into error messages or HTTP response-header summaries.
 
 ## macOS client and local API boundary
 
-The SwiftUI macOS application is the only client. It bundles the Python backend,
-uv and Temporal, prepares a private runtime in Application Support, and owns the
-API, worker and Temporal processes it starts. It connects to a loopback API using
-a fresh Bearer token generated for each launch. The API serves JSON and task
+The SwiftUI macOS application is the only client. It bundles the Python backend
+with its locked dependencies, uv and Temporal, and registers the launchd user
+agent `dev.rocky.agent` through `SMAppService`. The agent prepares a private
+runtime in Application Support offline and runs `rocky serve`, which supervises
+Temporal, the API and the worker; launchd restarts it after a crash, and it
+keeps running when the window closes. The app connects to the loopback API with
+the persistent token in `data/api-token` (mode 0600; `rocky rotate-token`
+replaces it). The API serves JSON and task
 artifacts; it has no HTML entry point, static frontend or interactive API docs.
 `/openapi.json` remains available for development tooling.
 
@@ -395,8 +427,8 @@ sizes and context limits remain separate technical controls. Reaching a bound
 is an explicit terminal result rather than a retry loop.
 
 Ended tasks may be archived and restored through separate recent/archived lists.
-Deleting removes the API projection, events, commands and model snapshot while
-preserving user workspace files. A minimal identity tombstone prevents a late
+Deleting removes the API projection, events, commands and model snapshot, and
+the goal's workspace, receipts and cookie sessions. A minimal identity tombstone prevents a late
 activity or an old idempotency key from resurrecting a deleted task.
 
 An in-flight model request may incur cost after

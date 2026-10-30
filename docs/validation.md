@@ -1,4 +1,10 @@
-# v0.1 validation
+# Validation log
+
+Chronological record of what was checked at each stage. Entries describe the
+code at the time they were written; the first section covers the 0.1 foundation.
+See [CHANGELOG](../CHANGELOG.md) for what changed since.
+
+## v0.1 foundation
 
 Validated on 2026-10-20 (America/Vancouver), Python 3.12.15, with the committed
 `uv.lock` dependency set.
