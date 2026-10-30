@@ -91,7 +91,7 @@ final class AppModel: ObservableObject {
     var visibleGoals: [Goal] {
         goals.filter { $0.isArchived == showArchived && (showArchived || !onlyActive || !$0.state.isTerminal) && (search.isEmpty || $0.contract.objective.localizedCaseInsensitiveContains(search)) }
     }
-    var canSend: Bool { runtime.isReady && isConnected && !isSubmitting && !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (selected != nil || provider?.isConfigured == true) && selected?.state.isTerminal != true && pendingCommand == nil }
+    var canSend: Bool { runtime.isReady && isConnected && !isSubmitting && !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (selected != nil || provider?.isConfigured == true) && (selected.map { !$0.state.isTerminal || $0.state.acceptsFollowUp } ?? true) && pendingCommand == nil }
 
     func run() async {
         await runtime.start()
@@ -243,7 +243,16 @@ final class AppModel: ObservableObject {
         error = nil
         defer { isSubmitting = false; submissionStatus = nil }
         do {
-            if let selected {
+            if let selected, selected.state.acceptsFollowUp {
+                let message = input.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard message.count <= 2000 else { throw InputError.invalid("追加要求最多 2,000 个字符。") }
+                let continued = try await api.followUp(selected.id, message: message)
+                if let index = goals.firstIndex(where: { $0.id == selected.id }) { goals[index] = continued }
+                if generation == selectionGeneration, selectedID == selected.id {
+                    showArchived = false
+                    input = ""
+                }
+            } else if let selected {
                 let message = input.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard message.count <= 4000 else { throw InputError.invalid("补充信息最多 4,000 个字符。") }
                 try await api.command(selected.id, kind: "wake", message: message)

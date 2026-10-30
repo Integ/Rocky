@@ -17,7 +17,7 @@ from rocky.activities import Activities
 from rocky.config import Settings
 from rocky.models import GoalView, RunCheckpoint, RunInput, RunState, WakeCommand
 from rocky.planner import OpenAIPlanner
-from rocky.store import EXTENSION_REASON, TERMINAL_STATUSES, Store
+from rocky.store import EXTENSION_REASON, FOLLOW_UP_REASON, TERMINAL_STATUSES, Store
 from rocky.tools import WorkspaceTools
 from rocky.workflow import GoalWorkflow
 
@@ -51,6 +51,16 @@ _EXTENSION_FEEDBACK = (
     "continue. Its workspace, progress and handoff are unchanged. Pick up where it stopped, "
     "spend the new budget on the remaining work, and finish as soon as the criteria are met."
 )
+_FOLLOW_UP_FEEDBACK = (
+    "The task had ended, and the owner added a follow-up request: it is the last 追加要求 "
+    "section of the objective and the last acceptance criterion. The workspace, earlier "
+    "deliverables and handoff are unchanged. Do the follow-up on top of the earlier work, "
+    "update the deliverables it affects, and finish when every criterion is met."
+)
+_REQUEUE_FEEDBACK = {
+    EXTENSION_REASON: _EXTENSION_FEEDBACK,
+    FOLLOW_UP_REASON: _FOLLOW_UP_FEEDBACK,
+}
 _HISTORY_LIMIT_REASON = (
     "The execution service stopped this task because its workflow history reached the size "
     "limit. Its workspace and saved progress are preserved. Update the worker with history "
@@ -177,9 +187,9 @@ class Dispatcher:
                             # numbers and progress from the saved projection.
                             checkpoint=RunCheckpoint(
                                 state=goal.state,
-                                feedback=_EXTENSION_FEEDBACK
-                                if goal.state.reason == EXTENSION_REASON
-                                else _RECOVERY_FEEDBACK,
+                                feedback=_REQUEUE_FEEDBACK.get(
+                                    goal.state.reason, _RECOVERY_FEEDBACK
+                                ),
                             )
                             if recovery
                             else None,

@@ -44,6 +44,9 @@ TERMINAL_STATUSES = ("succeeded", "failed", "cancelled", "budget_exhausted", "de
 # Ends the owner can lift by giving the goal more budget or time.
 EXTENDABLE_STATUSES = ("budget_exhausted", "deadline_exceeded")
 EXTENSION_REASON = "Continuing from saved progress with a larger budget from the owner."
+# A finished or stopped goal the owner continues with a follow-up request.
+FOLLOW_UP_STATUSES = ("succeeded", "cancelled", "budget_exhausted", "deadline_exceeded")
+FOLLOW_UP_REASON = "Continuing with the owner's follow-up request."
 LEGACY_BUDGET_FIELDS = {"max_steps", "max_model_calls", "max_output_tokens", "deadline_seconds"}
 EVENT_STATE_FIELDS = (
     "goal_id",
@@ -663,12 +666,67 @@ class Store:
         counters, progress and handoff carry over and the wall clock restarts.
         The new limits replace the contract's and must leave room for work.
         """
+
+        def amend(contract: GoalContract, state: RunState) -> None:
+            used = state.input_tokens + state.output_tokens
+            for limit, usage in (
+                (limits.max_steps, state.steps),
+                (limits.max_model_calls, state.model_calls),
+                (limits.max_tokens, used),
+            ):
+                if limit is not None and limit <= usage:
+                    raise ValueError(
+                        "The new limits leave no room beyond what the goal already used"
+                    )
+            contract.limits = limits
+
+        return self._requeue(goal_id, EXTENDABLE_STATUSES, amend, EXTENSION_REASON)
+
+    def follow_up_goal(self, goal_id: str, message: str, *, at: str = "") -> GoalView:
+        """Continue an ended goal with an owner's follow-up request.
+
+        The request joins the objective and becomes an acceptance criterion,
+        so planning and independent review both cover it. The goal keeps its
+        workspace, progress and handoff, and gets its original allowance again
+        on top of what it has used.
+        """
+        message = message.strip()
+        if not message or len(message) > 2000:
+            raise ValueError("A follow-up request needs 1 to 2000 characters")
+
+        def amend(contract: GoalContract, state: RunState) -> None:
+            objective = (
+                f"{contract.objective}\n\n追加要求（{at or datetime.now(UTC).date()}）：{message}"
+            )
+            if len(objective) > 8000 or len(contract.acceptance_criteria) >= 20:
+                raise ValueError("This goal has no room for more requests; start a new goal")
+            contract.objective = objective
+            contract.acceptance_criteria = [
+                *contract.acceptance_criteria,
+                f"The follow-up request is fulfilled: {message}",
+            ][:20]
+            limits, used = contract.limits, state.input_tokens + state.output_tokens
+
+            def grow(limit: int | None, usage: int) -> int | None:
+                return None if limit is None else usage + limit
+
+            contract.limits = ExecutionLimits(
+                max_steps=grow(limits.max_steps, state.steps),
+                max_model_calls=grow(limits.max_model_calls, state.model_calls),
+                max_tokens=grow(limits.max_tokens, used),
+                timeout_seconds=limits.timeout_seconds,
+            )
+
+        return self._requeue(goal_id, FOLLOW_UP_STATUSES, amend, FOLLOW_UP_REASON)
+
+    def _requeue(self, goal_id: str, statuses, amend, reason: str) -> GoalView:
+        """Queue an ended goal to continue from its projection with an amended contract."""
         with self.sessions.begin() as session:
             changed = session.execute(
                 update(GoalRow)
                 .where(
                     GoalRow.goal_id == goal_id,
-                    GoalRow.state["status"].as_string().in_(EXTENDABLE_STATUSES),
+                    GoalRow.state["status"].as_string().in_(statuses),
                     GoalRow.cancel_requested.is_(False),
                     ~exists().where(
                         GoalLifecycleRow.goal_id == GoalRow.goal_id,
@@ -682,20 +740,10 @@ class Store:
             if row is None or (lifecycle and lifecycle.deleted):
                 raise KeyError(goal_id)
             if not changed.rowcount:
-                raise ValueError("Only goals that ran out of budget or time can be extended")
+                raise ValueError("This goal cannot be continued in its current state")
             state = RunState.model_validate(row.state)
-            used = state.input_tokens + state.output_tokens
-            for limit, usage in (
-                (limits.max_steps, state.steps),
-                (limits.max_model_calls, state.model_calls),
-                (limits.max_tokens, used),
-            ):
-                if limit is not None and limit <= usage:
-                    raise ValueError(
-                        "The new limits leave no room beyond what the goal already used"
-                    )
             contract = GoalContract.model_validate(row.contract)
-            contract.limits = limits
+            amend(contract, state)
             if state.pending_approval is not None:
                 state.deferred_approvals = [
                     *state.deferred_approvals[-19:],
@@ -703,7 +751,7 @@ class Store:
                 ]
                 state.pending_approval = None
             state.status = "queued"
-            state.reason = EXTENSION_REASON
+            state.reason = reason
             state.wake_at = None
             state.deadline_at = None
             state.revision = row.revision + 1

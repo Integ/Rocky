@@ -122,3 +122,92 @@ def test_extend_endpoint(store, tmp_path):
         assert response.json()["state"]["status"] == "queued"
         assert client.post("/goals/task/extend", headers=AUTH, json=body).status_code == 409
         assert client.post("/goals/missing/extend", headers=AUTH, json=body).status_code == 404
+
+
+def finished(store, goal_id="done"):
+    return exhausted(store, "succeeded", goal_id)
+
+
+def test_follow_up_amends_the_contract_and_restores_the_allowance(store):
+    before = finished(store)
+    continued = store.follow_up_goal("done", "  把第三节展开一点  ", at="2026-10-30")
+    contract = continued.contract
+    assert (
+        contract.objective
+        == before.contract.objective + "\n\n追加要求（2026-10-30）：把第三节展开一点"
+    )
+    assert (
+        contract.acceptance_criteria[-1] == "The follow-up request is fulfilled: 把第三节展开一点"
+    )
+    assert contract.acceptance_criteria[:-1] == before.contract.acceptance_criteria
+    # The original allowance again, on top of what the goal used.
+    assert contract.limits == ExecutionLimits(
+        max_steps=24, max_model_calls=34, max_tokens=82_000, timeout_seconds=600
+    )
+    state = continued.state
+    assert state.status == "queued" and state.steps == 12
+    assert state.handoff_summary.startswith("Draft is in report.md")
+
+
+@pytest.mark.parametrize("status", ["failed", "running", "blocked"])
+def test_follow_up_needs_an_ended_goal(store, status):
+    store.create_goal("task", CONTRACT)
+    store.save_state(RunState(goal_id="task", revision=1, status=status))
+    with pytest.raises(ValueError):
+        store.follow_up_goal("task", "再做一点")
+
+
+def test_follow_up_refuses_empty_or_overflowing_requests(store):
+    finished(store)
+    with pytest.raises(ValueError):
+        store.follow_up_goal("done", "   ")
+    with pytest.raises(ValueError):
+        store.follow_up_goal("done", "x" * 2001)
+    for index in range(19):
+        store.save_state(
+            store.get_goal("done").state.model_copy(
+                update={
+                    "status": "succeeded",
+                    "revision": store.get_goal("done").state.revision + 1,
+                }
+            )
+        )
+        store.follow_up_goal("done", f"request {index}")
+        state = store.get_goal("done").state
+        store.save_state(
+            state.model_copy(update={"status": "succeeded", "revision": state.revision + 1})
+        )
+    with pytest.raises(ValueError, match="no room"):
+        store.follow_up_goal("done", "one too many")
+
+
+async def test_dispatcher_tells_the_model_about_the_follow_up(store):
+    finished(store)
+    store.follow_up_goal("done", "加一张图")
+    starts = []
+
+    async def start(name, run, **kwargs):
+        starts.append((run, kwargs))
+
+    await Dispatcher(SimpleNamespace(start_workflow=start), store, Settings()).tick()
+    run, options = starts[0]
+    assert options["id_reuse_policy"] == WorkflowIDReusePolicy.ALLOW_DUPLICATE
+    assert "follow-up request" in run.checkpoint.feedback
+    assert run.contract.objective.endswith("加一张图")
+
+
+def test_follow_up_endpoint(store, tmp_path):
+    finished(store)
+    settings = Settings(
+        auth_mode="token", api_token="owner-token", workspace_root=tmp_path / "workspaces"
+    )
+    with TestClient(create_app(settings, store)) as client:
+        response = client.post("/goals/done/follow-up", headers=AUTH, json={"message": "加一节"})
+        assert response.status_code == 202
+        assert response.json()["state"]["status"] == "queued"
+        again = client.post("/goals/done/follow-up", headers=AUTH, json={"message": "加一节"})
+        assert again.status_code == 409
+        assert (
+            client.post("/goals/x/follow-up", headers=AUTH, json={"message": "a"}).status_code
+            == 404
+        )

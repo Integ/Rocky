@@ -175,6 +175,10 @@ struct RunState: Codable, Equatable {
     var isTerminal: Bool {
         ["succeeded", "failed", "cancelled", "budget_exhausted", "deadline_exceeded"].contains(status)
     }
+    /// An ended task the owner can continue with a follow-up request.
+    var acceptsFollowUp: Bool {
+        ["succeeded", "cancelled", "budget_exhausted", "deadline_exceeded"].contains(status)
+    }
     var statusLabel: String {
         switch status {
         case "queued": "等待执行"

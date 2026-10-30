@@ -148,6 +148,10 @@ class ContractReview(Model):
     warnings: list[ContractWarning] = Field(default_factory=list)
 
 
+class FollowUpRequest(Model):
+    message: str = Field(min_length=1, max_length=2000)
+
+
 class WakeRequest(Model):
     message: str = Field(min_length=1, max_length=4000)
 
@@ -475,6 +479,18 @@ def create_app(
         """Continue a goal that ran out of budget or time, from its saved progress."""
         try:
             return database.extend_goal(goal_id, limits)
+        except KeyError:
+            raise HTTPException(404, "Goal not found") from None
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @app.post(
+        "/goals/{goal_id}/follow-up", response_model=GoalView, status_code=202, dependencies=auth
+    )
+    def follow_up_goal(goal_id: str, request: FollowUpRequest):
+        """Continue an ended goal in place with a follow-up request."""
+        try:
+            return database.follow_up_goal(goal_id, request.message)
         except KeyError:
             raise HTTPException(404, "Goal not found") from None
         except ValueError as exc:

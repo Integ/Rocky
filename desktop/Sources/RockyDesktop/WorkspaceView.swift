@@ -320,12 +320,12 @@ struct WorkspaceView: View {
 
     private var composer: some View {
         VStack(spacing: 9) {
-            if model.selected?.state.isTerminal == true {
-                Text("这个任务已结束。新建任务，继续下一个想法。").font(.system(size: 11)).foregroundStyle(.secondary)
+            if let goal = model.selected, goal.state.isTerminal, !goal.state.acceptsFollowUp {
+                Text("这个任务已失败。可以从保存的进度恢复，或新建任务。").font(.system(size: 11)).foregroundStyle(.secondary)
                     .padding(.horizontal, 16).padding(.vertical, 10).floatingSurface(cornerRadius: 18)
             } else {
                 VStack(alignment: .leading, spacing: 12) {
-                    TextField(model.selected == nil ? "描述你想完成的事…" : "补充信息，或回复 Rocky…", text: $model.input, axis: .vertical)
+                    TextField(model.selected == nil ? "描述你想完成的事…" : model.selected?.state.isTerminal == true ? "追加要求，Rocky 会在这个任务上继续…" : "补充信息，或回复 Rocky…", text: $model.input, axis: .vertical)
                         .textFieldStyle(.plain).font(.system(size: 14)).lineLimit(3...7).focused($composerFocused).onSubmit { Task { await model.send() } }
                     if model.selected == nil, !model.draftFolders.isEmpty {
                         FlowFolders(folders: model.draftFolders) { path in model.draftFolders.removeAll { $0 == path } }
@@ -337,7 +337,7 @@ struct WorkspaceView: View {
                             Text(model.submissionStatus ?? (model.draftFolders.isEmpty ? "AI 自动设定交付要求和执行预算；可拖入项目文件夹授权修改" : "已授权的文件夹可直接修改，其他个人文件仍需批准"))
                                 .font(.system(size: 10)).foregroundStyle(.tertiary).lineLimit(1)
                         } else {
-                            Text(model.pendingCommand ?? "补充信息会保存到同一个任务").font(.system(size: 10)).foregroundStyle(.secondary)
+                            Text(model.pendingCommand ?? (model.selected?.state.isTerminal == true ? "沿用同一个工作区和进度，追加一份同样的预算" : "补充信息会保存到同一个任务")).font(.system(size: 10)).foregroundStyle(.secondary)
                         }
                         Spacer()
                         if let goal = model.selected, !goal.state.isTerminal {

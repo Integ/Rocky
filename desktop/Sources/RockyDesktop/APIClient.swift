@@ -72,6 +72,10 @@ struct APIClient {
     func extendGoal(_ id: String, limits: TaskLimits) async throws -> Goal {
         try await request("/goals/\(id)/extend", method: "POST", body: JSONEncoder().encode(limits))
     }
+    /// Continues an ended goal in place with the owner's follow-up request.
+    func followUp(_ id: String, message: String) async throws -> Goal {
+        try await request("/goals/\(id)/follow-up", method: "POST", body: JSONEncoder().encode(["message": message]))
+    }
     func deleteGoal(_ id: String) async throws {
         _ = try await rawRequest("/goals/\(id)", method: "DELETE")
     }

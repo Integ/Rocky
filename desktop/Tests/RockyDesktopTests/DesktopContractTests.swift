@@ -83,6 +83,15 @@ final class DesktopContractTests: XCTestCase {
         XCTAssertEqual(goal.model_settings?.provider, "openai-compatible")
         XCTAssertEqual(goal.state.artifacts.first?.sha256, "abc123")
         XCTAssertTrue(goal.state.isTerminal)
+        var ended = goal
+        for status in ["succeeded", "cancelled", "budget_exhausted", "deadline_exceeded"] {
+            ended.state.status = status
+            XCTAssertTrue(ended.state.acceptsFollowUp, status)
+        }
+        for status in ["failed", "running", "blocked"] {
+            ended.state.status = status
+            XCTAssertFalse(ended.state.acceptsFollowUp, status)
+        }
 
         let wrapper = try JSONSerialization.jsonObject(with: Data(Self.goalJSON.utf8)) as! [String: Any]
         let eventsData = try JSONSerialization.data(withJSONObject: [["event_id": 154, "state": wrapper["state"]!]])

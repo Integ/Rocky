@@ -159,7 +159,7 @@ macOS 上的 `run_command` 默认通过 `/usr/bin/sandbox-exec -p <按 goal 生�
 - `running`：规划、执行或核验。
 - `waiting`：定时休眠，可提前唤醒。
 - `blocked`：等待补充信息或具体操作审批；继续同一目标，沿用工作区和执行记录。
-- `succeeded` / `failed` / `cancelled` / `budget_exhausted` / `deadline_exceeded`：终态，支持存档和删除。`budget_exhausted` 和 `deadline_exceeded` 可用 `POST /goals/{id}/extend`（请求体为新的 `limits`，须超过已用量）或客户端的“加倍预算继续”在原任务上继续：沿用工作区、进度和用量，运行时间重新计算。其余终态继续工作需提交新目标。`failed` 只表示执行引擎意外停止了任务，可用 `POST /goals/{id}/recover` 或客户端的“从保存的进度恢复”继续：沿用已有进度、用量和工作区，运行时间重新计算。数据库暂时不可写（磁盘满、Mac 睡眠）只会推迟任务，不会使其失败。
+- `succeeded` / `failed` / `cancelled` / `budget_exhausted` / `deadline_exceeded`：终态，支持存档和删除。`budget_exhausted` 和 `deadline_exceeded` 可用 `POST /goals/{id}/extend`（请求体为新的 `limits`，须超过已用量）或客户端的“加倍预算继续”在原任务上继续：沿用工作区、进度和用量，运行时间重新计算。`succeeded`、`cancelled` 和这两种终态还可用 `POST /goals/{id}/follow-up`（请求体 `{"message": "..."}`，最多 2,000 字）或在客户端输入框写追加要求：要求并入目标和验收标准，沿用工作区和进度，在已用量之上再给一份原预算。`failed` 只表示执行引擎意外停止了任务，可用 `POST /goals/{id}/recover` 或客户端的“从保存的进度恢复”继续：沿用已有进度、用量和工作区，运行时间重新计算。数据库暂时不可写（磁盘满、Mac 睡眠）只会推迟任务，不会使其失败。
 
 等待审批时发送消息会撤回这条审批请求，任务按消息继续。审批请求超时后才点批准，会自动按“补批”处理。GET/HEAD/OPTIONS 以外的请求不会跟随重定向到其他来源。
 
