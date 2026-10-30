@@ -33,10 +33,11 @@ struct WorkspaceView: View {
             Button("停止任务", role: .destructive) { Task { await model.cancel() } }
         }
         .confirmationDialog("删除这个任务？", isPresented: Binding(get: { deletingGoal != nil }, set: { if !$0 { deletingGoal = nil } }), titleVisibility: .visible, presenting: deletingGoal) { goal in
-            Button("删除任务", role: .destructive) { Task { await model.delete(goal) } }
+            Button("删除任务和文件", role: .destructive) { Task { await model.delete(goal) } }
+            Button("在 Finder 中查看文件") { model.openWorkspace(goal) }
             Button("取消", role: .cancel) { deletingGoal = nil }
         } message: { goal in
-            Text("将删除“\(goal.title)”及其执行记录，此操作无法撤销。工作区文件会保留。")
+            Text("将删除“\(goal.title)”的执行记录和工作区文件（包括交付物），此操作无法撤销。只想移出列表可以改用存档。")
         }
     }
 

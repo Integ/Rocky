@@ -384,9 +384,9 @@ final class AppModel: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
 
-    func openWorkspace() {
-        guard let selected, UUID(uuidString: selected.id) != nil else { return }
-        NSWorkspace.shared.open(runtime.workspaceURL.appendingPathComponent(selected.id, isDirectory: true))
+    func openWorkspace(_ goal: Goal? = nil) {
+        guard let goal = goal ?? selected, UUID(uuidString: goal.id) != nil else { return }
+        NSWorkspace.shared.open(runtime.workspaceURL.appendingPathComponent(goal.id, isDirectory: true))
     }
 
     func export(_ path: String) {
