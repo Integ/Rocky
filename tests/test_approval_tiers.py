@@ -3,6 +3,7 @@
 import json
 import os
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -433,6 +434,9 @@ def offline_goal(
     monkeypatch.setattr("rocky.workflow.workflow.execute_activity", dispatch)
     monkeypatch.setattr("rocky.workflow.workflow.wait_condition", wait_condition)
     monkeypatch.setattr("rocky.workflow.workflow.patched", lambda _: True)
+    monkeypatch.setattr(
+        "rocky.workflow.workflow.info", lambda: SimpleNamespace(task_queue="rocky-goals")
+    )
     monkeypatch.setattr(goal, "_should_continue_as_new", lambda: False)
     return run, goal, executed, snapshots
 

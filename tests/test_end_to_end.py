@@ -11,7 +11,6 @@ import pytest
 import test_workflow as workflow_tests
 from fastapi.testclient import TestClient
 from openai_stream import with_stream
-from temporalio.worker import Worker
 
 from rocky.activities import Activities
 from rocky.api import create_app
@@ -26,10 +25,9 @@ from rocky.models import (
     RunState,
 )
 from rocky.planner import OpenAIPlanner
-from rocky.service import Dispatcher
+from rocky.service import Dispatcher, goal_workers
 from rocky.store import Store
 from rocky.tools import WorkspaceTools
-from rocky.workflow import GoalWorkflow
 
 temporal_env = workflow_tests.temporal_env
 
@@ -118,18 +116,7 @@ def components(tmp_path):
 
 
 def actual_worker(env, settings, activities):
-    return Worker(
-        env.client,
-        task_queue=settings.task_queue,
-        workflows=[GoalWorkflow],
-        activities=[
-            activities.plan,
-            activities.execute,
-            activities.verify,
-            activities.persist,
-            activities.phase,
-        ],
-    )
+    return goal_workers(env.client, settings.task_queue, activities.registered())
 
 
 async def test_api_submission_runs_actual_tools_and_independent_review(temporal_env, components):

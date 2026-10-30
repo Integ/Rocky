@@ -8,7 +8,7 @@ import pytest
 from temporalio import activity
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import ApplicationError
-from temporalio.worker import Replayer, Worker
+from temporalio.worker import Replayer
 from test_workflow import Activities, act, finish, request
 from test_workflow import temporal_env as _temporal_env
 
@@ -24,6 +24,7 @@ from rocky.models import (
     ToolResult,
     WakeCommand,
 )
+from rocky.service import goal_workers
 from rocky.tools import WorkspaceTools
 from rocky.workflow import GoalWorkflow
 
@@ -32,11 +33,11 @@ temporal_env = _temporal_env
 
 
 def worker(env, run, activities, workflow_type=GoalWorkflow):
-    return Worker(
+    return goal_workers(
         env.client,
-        task_queue=run.goal_id,
+        run.goal_id,
+        activities.registered(),
         workflows=[workflow_type],
-        activities=activities.registered(),
         # Worker replacement in the approval test must replay durable history.
         max_cached_workflows=0,
     )

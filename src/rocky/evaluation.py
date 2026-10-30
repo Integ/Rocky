@@ -38,16 +38,14 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from temporalio.client import Client
-from temporalio.worker import Worker
 
 from rocky.activities import Activities
 from rocky.config import Settings
 from rocky.inference import ModelSettings
 from rocky.models import ExecutionLimits, GoalContract
-from rocky.service import Dispatcher
+from rocky.service import Dispatcher, goal_workers
 from rocky.store import Store
 from rocky.tools import WorkspaceTools
-from rocky.workflow import GoalWorkflow
 
 TASKS_DIR = Path(__file__).resolve().parents[2] / "evals" / "tasks"
 # Generous enough for real work, bounded so one runaway task cannot spend the
@@ -741,18 +739,12 @@ async def run_suite(
     dispatcher = Dispatcher(client, store, settings)
     results = []
     try:
-        async with Worker(
+        async with goal_workers(
             client,
-            task_queue=settings.task_queue,
-            workflows=[GoalWorkflow],
-            activities=[
-                activities.plan,
-                activities.execute,
-                activities.verify,
-                activities.persist,
-                activities.phase,
-            ],
-            max_concurrent_activities=settings.max_concurrent_activities,
+            settings.task_queue,
+            activities.registered(),
+            tool_slots=settings.max_concurrent_activities,
+            model_slots=settings.max_concurrent_model_calls,
         ):
             for task in tasks:
                 for attempt in range(1, repeat + 1):

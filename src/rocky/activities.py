@@ -77,6 +77,9 @@ class Activities:
         self.hooks = hooks or HarnessHooks()
         self.memory = memory or MemoryManager([StoreMemoryProvider(store)])
 
+    def registered(self) -> list:
+        return [self.plan, self.execute, self.verify, self.persist, self.phase]
+
     async def check_cancelled(self, goal_id: str) -> None:
         if await asyncio.to_thread(self.store.is_cancel_requested, goal_id):
             raise ApplicationError("Goal cancelled", type="GoalCancelled", non_retryable=True)

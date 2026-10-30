@@ -16,7 +16,7 @@ from temporalio import activity, workflow
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
+from temporalio.worker import Replayer, UnsandboxedWorkflowRunner
 
 from rocky.models import (
     Action,
@@ -39,6 +39,7 @@ from rocky.models import (
     VerifyInput,
     WakeCommand,
 )
+from rocky.service import goal_workers
 from rocky.workflow import GoalWorkflow
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
@@ -71,6 +72,7 @@ class Activities:
     decisions: list[Decision] = field(default_factory=list)
     plans: list[PlanInput] = field(default_factory=list)
     plan_run_ids: list[str] = field(default_factory=list)
+    queues: dict[str, set[str]] = field(default_factory=dict)
     phases: list[PhaseInput] = field(default_factory=list)
     tools: list[ToolInput] = field(default_factory=list)
     snapshots: list[RunState] = field(default_factory=list)
@@ -109,6 +111,7 @@ class Activities:
     async def plan(self, request: PlanInput) -> PlanResult:
         self.plans.append(request)
         self.plan_run_ids.append(activity.info().workflow_run_id)
+        self.queues.setdefault("plan", set()).add(activity.info().task_queue)
         self.plan_started.set()
         if len(self.plans) <= self.planning_failures:
             # A persistent failure: transient provider errors are retried by
@@ -129,6 +132,7 @@ class Activities:
     @activity.defn(name="rocky.execute")
     async def execute(self, request: ToolInput) -> ToolResult:
         self.tools.append(request)
+        self.queues.setdefault("execute", set()).add(activity.info().task_queue)
         if len(self.tools) <= self.tool_failures:
             raise ApplicationError("Temporary tool failure", type="Transient")
         return ToolResult(
@@ -140,6 +144,7 @@ class Activities:
     @activity.defn(name="rocky.verify")
     async def verify(self, request: VerifyInput) -> VerificationResult:
         self.verifications += 1
+        self.queues.setdefault("verify", set()).add(activity.info().task_queue)
         return VerificationResult(
             passed=self.verification_passed,
             feedback="Deliverables verified"
@@ -194,13 +199,8 @@ def request(**overrides) -> RunInput:
     return RunInput(goal_id=uuid4().hex, contract=GoalContract(**fields))
 
 
-def worker(env, queue: str, activities: Activities) -> Worker:
-    return Worker(
-        env.client,
-        task_queue=queue,
-        workflows=[GoalWorkflow],
-        activities=activities.registered(),
-    )
+def worker(env, queue: str, activities: Activities):
+    return goal_workers(env.client, queue, activities.registered())
 
 
 async def test_goal_requires_independent_verification(temporal_env):
@@ -216,6 +216,13 @@ async def test_goal_requires_independent_verification(temporal_env):
     assert (result.input_tokens, result.output_tokens) == (29, 17)
     assert len(activities.tools) == activities.verifications == 1
     assert activities.snapshots[-1].status == "succeeded"
+    # Model calls have their own queue and slots; tools stay on the goal's queue.
+    model_queue = run.goal_id + "-model"
+    assert activities.queues == {
+        "plan": {model_queue},
+        "verify": {model_queue},
+        "execute": {run.goal_id},
+    }
 
 
 async def test_wait_is_durable_and_can_be_woken(temporal_env):
@@ -682,12 +689,12 @@ class FrequentContinuationWorkflow(GoalWorkflow):
         return await super().run(run)
 
 
-def continuation_worker(env, queue: str, activities: Activities) -> Worker:
-    return Worker(
+def continuation_worker(env, queue: str, activities: Activities):
+    return goal_workers(
         env.client,
-        task_queue=queue,
+        queue,
+        activities.registered(),
         workflows=[FrequentContinuationWorkflow],
-        activities=activities.registered(),
         workflow_runner=UnsandboxedWorkflowRunner(),
     )
 

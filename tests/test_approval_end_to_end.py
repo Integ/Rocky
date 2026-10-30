@@ -7,7 +7,6 @@ from uuid import uuid4
 import pytest
 import test_workflow as workflow_tests
 from fastapi.testclient import TestClient
-from temporalio.worker import Worker
 
 from rocky.activities import Activities
 from rocky.api import create_app
@@ -23,10 +22,9 @@ from rocky.models import (
     VerificationResult,
     WakeCommand,
 )
-from rocky.service import Dispatcher
+from rocky.service import Dispatcher, goal_workers
 from rocky.store import Store
 from rocky.tools import WorkspaceTools
-from rocky.workflow import GoalWorkflow
 
 temporal_env = workflow_tests.temporal_env
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
@@ -119,17 +117,8 @@ async def test_approved_shell_runs_once_and_persists_actual_results(
             submitted = api.post("/goals", headers=AUTH, json=contract.model_dump(mode="json"))
             assert submitted.status_code == 202
             goal_id = submitted.json()["goal_id"]
-            async with Worker(
-                temporal_env.client,
-                task_queue=settings.task_queue,
-                workflows=[GoalWorkflow],
-                activities=[
-                    activities.plan,
-                    activities.execute,
-                    activities.verify,
-                    activities.persist,
-                    activities.phase,
-                ],
+            async with goal_workers(
+                temporal_env.client, settings.task_queue, activities.registered()
             ):
                 dispatcher = Dispatcher(temporal_env.client, store, settings)
                 await dispatcher.tick()

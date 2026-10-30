@@ -11,7 +11,6 @@ import httpx
 import pytest
 import test_workflow as workflow_tests
 from fastapi.testclient import TestClient
-from temporalio.worker import Worker
 
 from rocky.activities import Activities
 from rocky.api import create_app
@@ -19,10 +18,9 @@ from rocky.config import Settings
 from rocky.credentials import CredentialStore
 from rocky.models import RunState
 from rocky.planner import OpenAIPlanner
-from rocky.service import Dispatcher
+from rocky.service import Dispatcher, goal_workers
 from rocky.store import Store
 from rocky.tools import WorkspaceTools
-from rocky.workflow import GoalWorkflow
 
 temporal_env = workflow_tests.temporal_env
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
@@ -148,17 +146,8 @@ async def test_compatible_provider_survives_default_switch_and_produces_reviewed
                     "api_key": "invented-replacement-test-key",
                 }
                 assert api.put("/provider-settings", json=changed, headers=AUTH).status_code == 200
-                async with Worker(
-                    temporal_env.client,
-                    task_queue=settings.task_queue,
-                    workflows=[GoalWorkflow],
-                    activities=[
-                        activities.plan,
-                        activities.execute,
-                        activities.verify,
-                        activities.persist,
-                        activities.phase,
-                    ],
+                async with goal_workers(
+                    temporal_env.client, settings.task_queue, activities.registered()
                 ):
                     await Dispatcher(temporal_env.client, store, settings).tick()
                     result = await temporal_env.client.get_workflow_handle(

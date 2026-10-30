@@ -48,7 +48,9 @@ class Settings(BaseSettings):
     api_token: SecretStr | None = None
     host: str = "127.0.0.1"
     port: int = 8000
-    max_concurrent_activities: int = 4
+    # Tool runs and state writes share these slots; model calls have their own.
+    max_concurrent_activities: int = Field(default=8, ge=1, le=64)
+    max_concurrent_model_calls: int = Field(default=4, ge=1, le=32)
 
     @field_validator("auto_approve_commands", mode="before")
     @classmethod

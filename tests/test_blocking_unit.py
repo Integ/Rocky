@@ -1,6 +1,7 @@
 """Offline checks of the production loop; no model or Temporal server is needed."""
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from temporalio.exceptions import ActivityError, ApplicationError
@@ -51,6 +52,9 @@ async def test_blocking_stops_inference_without_deliverables(monkeypatch, empty_
     monkeypatch.setattr("rocky.workflow.workflow.execute_activity", dispatch)
     monkeypatch.setattr("rocky.workflow.workflow.wait_condition", wait_condition)
     monkeypatch.setattr("rocky.workflow.workflow.patched", lambda _: patched)
+    monkeypatch.setattr(
+        "rocky.workflow.workflow.info", lambda: SimpleNamespace(task_queue="rocky-goals")
+    )
     monkeypatch.setattr(goal, "_should_continue_as_new", lambda: False)
     if not patched:
         # A history without the patch marker must preserve its original branch.
@@ -108,6 +112,7 @@ async def test_failed_model_usage_exhausts_budget_before_another_call(monkeypatc
     monkeypatch.setattr("rocky.workflow.workflow.now", lambda: datetime(2026, 10, 27, tzinfo=UTC))
     monkeypatch.setattr("rocky.workflow.workflow.execute_activity", dispatch)
     monkeypatch.setattr(goal, "_should_continue_as_new", lambda: False)
+    monkeypatch.setattr(goal, "_model_queue", lambda: None)
     result = await goal.run(run)
     assert result.status == "budget_exhausted"
     assert calls == (["rocky.plan", "rocky.verify"] if review else ["rocky.plan"])

@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import os
-from contextlib import suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import timedelta
 from pathlib import Path
 
@@ -19,7 +19,7 @@ from rocky.models import GoalView, RunCheckpoint, RunInput, RunState, WakeComman
 from rocky.planner import OpenAIPlanner
 from rocky.store import EXTENSION_REASON, FOLLOW_UP_REASON, TERMINAL_STATUSES, Store
 from rocky.tools import WorkspaceTools
-from rocky.workflow import GoalWorkflow
+from rocky.workflow import MODEL_QUEUE_SUFFIX, GoalWorkflow
 
 log = logging.getLogger(__name__)
 _RECONCILIATION_INTERVAL_SECONDS = 30
@@ -243,6 +243,46 @@ class Dispatcher:
                 await reconciliation
 
 
+@asynccontextmanager
+async def goal_workers(
+    client: Client,
+    task_queue: str,
+    activities: list,
+    *,
+    workflows: list | None = None,
+    tool_slots: int | None = None,
+    model_slots: int | None = None,
+    **options,
+):
+    """Run goal workflows with tools on one queue and model calls on another.
+
+    Both workers register every activity, so activities scheduled on the
+    workflow queue by histories recorded before the split still run.
+    """
+    limits = {"max_concurrent_activities": tool_slots} if tool_slots else {}
+    model_limits = {"max_concurrent_activities": model_slots} if model_slots else {}
+    async with AsyncExitStack() as stack:
+        await stack.enter_async_context(
+            Worker(
+                client,
+                task_queue=task_queue,
+                workflows=workflows or [GoalWorkflow],
+                activities=activities,
+                **limits,
+                **options,
+            )
+        )
+        await stack.enter_async_context(
+            Worker(
+                client,
+                task_queue=task_queue + MODEL_QUEUE_SUFFIX,
+                activities=activities,
+                **model_limits,
+            )
+        )
+        yield
+
+
 async def run_worker(settings: Settings | None = None) -> None:
     settings = settings or Settings()
     store = Store(settings.database_url)
@@ -262,18 +302,12 @@ async def run_worker(settings: Settings | None = None) -> None:
         else None
     )
     try:
-        async with Worker(
+        async with goal_workers(
             client,
-            task_queue=settings.task_queue,
-            workflows=[GoalWorkflow],
-            activities=[
-                activities.plan,
-                activities.execute,
-                activities.verify,
-                activities.persist,
-                activities.phase,
-            ],
-            max_concurrent_activities=settings.max_concurrent_activities,
+            settings.task_queue,
+            activities.registered(),
+            tool_slots=settings.max_concurrent_activities,
+            model_slots=settings.max_concurrent_model_calls,
         ):
             if ready_path:
                 descriptor = os.open(
