@@ -23,14 +23,12 @@ struct ApprovalsView: View {
                 HStack(spacing: 11) {
                     Image(systemName: "hand.raised").font(.system(size: 20)).foregroundStyle(Color.rockyAccent)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("审批").font(.system(size: 22, weight: .semibold))
+                        Text("审批").font(.title2.weight(.semibold))
                         Text("集中处理各任务的待批操作，设置哪些操作可以直接执行。").font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                 }
                 Spacer()
-                Button { dismiss() } label: { Image(systemName: "xmark") }
-                    .buttonStyle(IconButtonStyle(size: 30)).keyboardShortcut(.cancelAction).labelled("关闭")
-            }.padding(.leading, 27).padding(.trailing, 20).padding(.vertical, 24)
+            }.padding(.horizontal, 24).padding(.vertical, 20)
             Divider()
             Form {
                 Section {
@@ -128,6 +126,7 @@ struct ApprovalsView: View {
             HStack(spacing: 10) {
                 Text(selection.isEmpty ? "选择要处理的操作" : "已选 \(selectedItems.count) 项").font(.system(size: 11)).foregroundStyle(.secondary)
                 Spacer()
+                Button("完成") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("拒绝所选") { answer(approve: false) }.buttonStyle(.bordered)
                     .disabled(selectedItems.isEmpty || working || !model.isConnected)
                 Button("批准所选") { answer(approve: true) }.buttonStyle(.borderedProminent)

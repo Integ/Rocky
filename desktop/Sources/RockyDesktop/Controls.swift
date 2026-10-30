@@ -53,6 +53,29 @@ struct RowDisclosureStyle: DisclosureGroupStyle {
 extension View {
     /// Tooltip that doubles as the accessibility label of an icon-only control.
     func labelled(_ text: String) -> some View { help(text).accessibilityLabel(text) }
+
+    /// Surface for controls that float over scrolling content, such as the composer. Liquid Glass
+    /// when built with the macOS 26 SDK and running there; a material with a hairline otherwise.
+    /// Both follow the Reduce Transparency and Increase Contrast settings.
+    @ViewBuilder
+    func floatingSurface(cornerRadius: CGFloat) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            glassEffect(.regular, in: shape)
+        } else {
+            materialSurface(shape)
+        }
+        #else
+        materialSurface(shape)
+        #endif
+    }
+
+    private func materialSurface(_ shape: RoundedRectangle) -> some View {
+        background(.regularMaterial, in: shape)
+            .overlay(shape.strokeBorder(Color.primary.opacity(0.12)))
+            .shadow(color: .black.opacity(0.06), radius: 12, y: 4)
+    }
 }
 
 private struct HoverSurface<Label: View>: View {

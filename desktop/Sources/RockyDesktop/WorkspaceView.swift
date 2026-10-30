@@ -4,7 +4,6 @@ import SwiftUI
 extension Color {
     static let rockyAccent = Color(red: 0.72, green: 0.34, blue: 0.23)
     static let rockyCanvas = Color(nsColor: .textBackgroundColor)
-    static let rockySidebar = Color(nsColor: .windowBackgroundColor)
 }
 
 struct WorkspaceView: View {
@@ -13,29 +12,15 @@ struct WorkspaceView: View {
     @State private var confirmStop = false
     @State private var deletingGoal: Goal?
     @FocusState private var composerFocused: Bool
-    @FocusState private var searchFocused: Bool
 
     init(model: AppModel) { self.model = model; self.runtime = model.runtime }
 
     var body: some View {
-        HStack(spacing: 0) {
-            sidebar.frame(width: 244)
-            Divider()
-            VStack(spacing: 0) {
-                topbar
-                Divider().opacity(0.5)
-                if runtime.isReady {
-                    conversation
-                    if let error = model.error { errorBanner(error) }
-                    composer.padding(.horizontal, 36).padding(.bottom, 22)
-                } else {
-                    startup
-                }
-            }
-            .background(Color.rockyCanvas)
-            if model.showInspector {
-                Divider()
-                inspector.frame(width: 264).background(Color.rockySidebar)
+        NavigationSplitView {
+            sidebar.navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 320)
+        } detail: {
+            detail.inspector(isPresented: $model.showInspector) {
+                inspector.inspectorColumnWidth(min: 240, ideal: 270, max: 340)
             }
         }
         .tint(.rockyAccent)
@@ -55,56 +40,63 @@ struct WorkspaceView: View {
         }
     }
 
+    // MARK: Sidebar
+
     private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 9) {
-                RockyMark().frame(height: 28)
-                Text("Rocky").font(.system(size: 22, weight: .semibold, design: .rounded))
-                Spacer()
-            }.padding(.top, 44).padding(.horizontal, 21).padding(.bottom, 25)
-            Button { model.newTask(); composerFocused = true } label: {
-                HStack {
-                    Label("新建任务", systemImage: "square.and.pencil").font(.system(size: 13, weight: .medium))
-                    Spacer()
-                    Text("⌘N").font(.system(size: 10)).foregroundStyle(.tertiary)
-                }.padding(.horizontal, 12).frame(height: 40)
-            }.buttonStyle(CardButtonStyle(cornerRadius: 9, fill: Color.rockyCanvas.opacity(0.8))).padding(.horizontal, 14)
-            searchField.padding(.horizontal, 14).padding(.top, 10)
-            HStack(spacing: 2) {
-                historyTab("最近任务", archived: false)
-                historyTab("已存档", archived: true)
-                Spacer()
-                if !model.showArchived {
-                    Button { model.onlyActive.toggle() } label: { Image(systemName: model.onlyActive ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle") }
-                        .buttonStyle(IconButtonStyle(size: 26, active: model.onlyActive)).labelled(model.onlyActive ? "显示全部任务" : "只显示进行中的任务")
+        List(selection: Binding(get: { model.selectedID }, set: { id in
+            // Clicking empty space clears a List selection; keep the open task instead.
+            if let id, id != model.selectedID { model.select(id) }
+        })) {
+            ForEach(model.visibleGoals) { goal in
+                goalRow(goal).tag(goal.id).contextMenu {
+                    if goal.state.isTerminal { historyActions(goal) }
                 }
-            }.padding(.horizontal, 14).padding(.top, 18).padding(.bottom, 6)
-            ScrollView {
-                LazyVStack(spacing: 2) {
-                    ForEach(model.visibleGoals) { goal in
-                        Button { model.select(goal.id) } label: {
-                            HStack(alignment: .center, spacing: 9) {
-                                Circle().fill(statusColor(goal.state)).frame(width: 5, height: 5)
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text(goal.title).lineLimit(1).foregroundStyle(.primary).font(.system(size: 12.5))
-                                    Text(goal.state.statusLabel).font(.system(size: 10)).foregroundStyle(.secondary)
-                                }
-                                Spacer(minLength: 0)
-                            }.padding(.horizontal, 12).padding(.vertical, 10).frame(maxWidth: .infinity, alignment: .leading)
-                        }.buttonStyle(HoverButtonStyle(cornerRadius: 8, selected: model.selectedID == goal.id)).contextMenu {
-                            if goal.state.isTerminal { historyActions(goal) }
-                        }
-                    }
-                    if model.visibleGoals.isEmpty {
-                        Text(model.search.isEmpty ? (model.showArchived ? "暂无已存档任务" : model.onlyActive ? "没有进行中的任务" : "你的任务会保存在这里") : "没有匹配的任务").font(.system(size: 11)).foregroundStyle(.tertiary).padding(.top, 15)
-                    }
-                }.padding(.horizontal, 12)
             }
-            Spacer(minLength: 8)
-            Divider().padding(.horizontal, 18)
+            if model.visibleGoals.isEmpty {
+                Text(model.search.isEmpty ? (model.showArchived ? "暂无已存档任务" : model.onlyActive ? "没有进行中的任务" : "你的任务会保存在这里") : "没有匹配的任务")
+                    .font(.callout).foregroundStyle(.tertiary).frame(maxWidth: .infinity).padding(.top, 12)
+                    .selectionDisabled()
+            }
+        }
+        .listStyle(.sidebar)
+        .searchable(text: $model.search, placement: .sidebar, prompt: "搜索任务")
+        .safeAreaInset(edge: .top, spacing: 0) {
+            HStack(spacing: 6) {
+                Picker("任务列表", selection: Binding(get: { model.showArchived }, set: { model.showHistory(archived: $0) })) {
+                    Text("最近任务").tag(false)
+                    Text("已存档").tag(true)
+                }.pickerStyle(.segmented).labelsHidden()
+                if !model.showArchived {
+                    Button { model.onlyActive.toggle() } label: {
+                        Image(systemName: model.onlyActive ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                    }.buttonStyle(IconButtonStyle(size: 24, active: model.onlyActive)).labelled(model.onlyActive ? "显示全部任务" : "只显示进行中的任务")
+                }
+            }.padding(.horizontal, 12).padding(.vertical, 6)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) { sidebarFooter }
+        .toolbar {
+            ToolbarItem {
+                Button { model.newTask(); composerFocused = true } label: { Label("新建任务", systemImage: "square.and.pencil") }
+                    .help("新建任务 ⌘N")
+            }
+        }
+    }
+
+    private func goalRow(_ goal: Goal) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: statusSymbol(goal.state)).font(.system(size: 12)).foregroundStyle(statusColor(goal.state)).frame(width: 16)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(goal.title).lineLimit(1)
+                Text(goal.state.statusLabel).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }.padding(.vertical, 3)
+    }
+
+    private var sidebarFooter: some View {
+        VStack(spacing: 2) {
             Button { model.showApprovals = true } label: {
                 HStack(spacing: 10) {
-                    Image(systemName: "hand.raised").font(.system(size: 15))
+                    Image(systemName: "hand.raised").font(.system(size: 14)).frame(width: 18)
                     Text("审批").font(.system(size: 12, weight: .medium))
                     Spacer()
                     let count = model.approvalItems.count
@@ -112,77 +104,71 @@ struct WorkspaceView: View {
                         Text("\(count)").font(.system(size: 10, weight: .semibold)).foregroundStyle(.white)
                             .padding(.horizontal, 6).padding(.vertical, 2).background(Color.orange, in: Capsule())
                     }
-                    Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.tertiary)
-                }.padding(.horizontal, 10).padding(.vertical, 9)
-            }.buttonStyle(HoverButtonStyle(cornerRadius: 9)).padding(.horizontal, 10).padding(.top, 8).disabled(!runtime.isReady)
+                }.padding(.horizontal, 10).frame(height: 32)
+            }.buttonStyle(HoverButtonStyle(cornerRadius: 8)).disabled(!runtime.isReady)
             Button { model.showSettings = true } label: {
                 HStack(spacing: 10) {
-                    Image(systemName: "slider.horizontal.3").font(.system(size: 15))
-                    VStack(alignment: .leading, spacing: 3) {
+                    Image(systemName: "slider.horizontal.3").font(.system(size: 14)).frame(width: 18)
+                    VStack(alignment: .leading, spacing: 2) {
                         Text("设置与模型").font(.system(size: 12, weight: .medium))
                         Text(model.provider?.model ?? "配置你的 AI 模型").font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
                     }
                     Spacer()
-                    Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.tertiary)
-                }.padding(.horizontal, 10).padding(.vertical, 11)
-            }.buttonStyle(HoverButtonStyle(cornerRadius: 9)).padding(10).disabled(!runtime.isReady)
-        }.background(Color.rockySidebar)
+                }.padding(.horizontal, 10).frame(height: 40)
+            }.buttonStyle(HoverButtonStyle(cornerRadius: 8)).disabled(!runtime.isReady)
+        }.padding(10)
     }
 
-    private var searchField: some View {
-        HStack(spacing: 7) {
-            Image(systemName: "magnifyingglass").foregroundStyle(.tertiary)
-            TextField("搜索任务", text: $model.search).textFieldStyle(.plain).focused($searchFocused)
-            if !model.search.isEmpty {
-                Button { model.search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary) }
-                    .buttonStyle(IconButtonStyle(size: 22)).labelled("清除搜索")
-            }
-        }.font(.system(size: 12)).padding(.leading, 10).padding(.trailing, 5).frame(height: 32)
-            .background(Color.primary.opacity(searchFocused ? 0.07 : 0.045), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .contentShape(Rectangle()).onTapGesture { searchFocused = true }
-    }
+    // MARK: Detail
 
-    private func historyTab(_ title: String, archived: Bool) -> some View {
-        let selected = model.showArchived == archived
-        return Button { model.showHistory(archived: archived) } label: {
-            Text(title).font(.system(size: 11, weight: selected ? .semibold : .regular)).foregroundStyle(selected ? .primary : .secondary)
-                .padding(.horizontal, 9).frame(height: 26)
-        }.buttonStyle(HoverButtonStyle(selected: selected))
-    }
-
-    private var topbar: some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(model.selected?.title ?? "新任务").font(.system(size: 13, weight: .medium)).lineLimit(1)
-                if let goal = model.selected {
-                    // A task keeps the model it was submitted with; settings only affect new tasks.
-                    Text(goal.model_settings?.model ?? "未记录模型").font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
-                        .frame(height: 22).help("任务使用提交时的模型")
-                } else {
-                    Button { model.showSettings = true } label: {
-                        HStack(spacing: 4) { Text(model.provider?.model ?? "选择模型"); Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold)) }
-                            .font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 6).frame(height: 22)
-                    }.buttonStyle(HoverButtonStyle(cornerRadius: 6)).padding(.leading, -6).disabled(!runtime.isReady).help("更改新任务使用的模型")
+    private var detail: some View {
+        Group {
+            if runtime.isReady {
+                conversation.safeAreaInset(edge: .bottom, spacing: 0) {
+                    VStack(spacing: 0) {
+                        if let error = model.error { errorBanner(error) }
+                        composer.padding(.horizontal, 36).padding(.bottom, 16)
+                    }
                 }
+            } else {
+                startup
             }
-            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.rockyCanvas)
+        .navigationTitle(model.selected?.title ?? "新任务")
+        // A task keeps the model it was submitted with; settings only affect new tasks.
+        .navigationSubtitle(model.selected.map { $0.model_settings?.model ?? "未记录模型" } ?? (model.provider?.model ?? ""))
+        .toolbar { detailToolbar }
+    }
+
+    @ToolbarContentBuilder
+    private var detailToolbar: some ToolbarContent {
+        ToolbarItem(placement: .status) {
             if !runtime.isReady || !model.isConnected {
-                Circle().fill(Color.orange).frame(width: 6, height: 6)
-                Text(runtime.isReady ? "正在重连" : runtime.status).font(.system(size: 10)).foregroundStyle(.secondary)
-            }
-            HStack(spacing: 2) {
-                if let goal = model.selected, goal.state.isTerminal {
-                    Button { Task { await model.archive(goal, archived: !goal.isArchived) } } label: { Image(systemName: goal.isArchived ? "arrow.uturn.backward" : "archivebox") }
-                        .buttonStyle(IconButtonStyle()).labelled(goal.isArchived ? "移回最近任务" : "存档任务").disabled(!model.canManageHistory(goal))
-                    Button { deletingGoal = goal } label: { Image(systemName: "trash") }
-                        .buttonStyle(IconButtonStyle()).labelled("删除任务").disabled(!model.canManageHistory(goal))
+                HStack(spacing: 5) {
+                    Circle().fill(Color.orange).frame(width: 6, height: 6)
+                    Text(runtime.isReady ? "正在重连" : runtime.status).font(.caption).foregroundStyle(.secondary)
                 }
-                Button { model.showInspector.toggle() } label: { Image(systemName: "sidebar.right") }
-                    .buttonStyle(IconButtonStyle(active: model.showInspector)).labelled(model.selected == nil ? "新任务设置 ⌥⌘I" : "任务详情 ⌥⌘I")
-            }.padding(.leading, 8)
-        }.padding(.leading, 28).padding(.trailing, 16).frame(height: 74)
+            }
+        }
+        ToolbarItemGroup(placement: .primaryAction) {
+            if let goal = model.selected, goal.state.isTerminal {
+                Button { Task { await model.archive(goal, archived: !goal.isArchived) } } label: {
+                    Label(goal.isArchived ? "移回最近任务" : "存档任务", systemImage: goal.isArchived ? "arrow.uturn.backward" : "archivebox")
+                }.help(goal.isArchived ? "移回最近任务" : "存档任务").disabled(!model.canManageHistory(goal))
+                Button { deletingGoal = goal } label: { Label("删除任务", systemImage: "trash") }
+                    .help("删除任务").disabled(!model.canManageHistory(goal))
+            }
+            if model.selected == nil {
+                Button { model.showSettings = true } label: { Label("更改模型", systemImage: "cpu") }
+                    .help("更改新任务使用的模型").disabled(!runtime.isReady)
+            }
+            Button { model.showInspector.toggle() } label: {
+                Label(model.selected == nil ? "新任务设置" : "任务详情", systemImage: "sidebar.right")
+            }.help(model.selected == nil ? "新任务设置 ⌥⌘I" : "任务详情 ⌥⌘I")
+        }
     }
-
     @ViewBuilder
     private func historyActions(_ goal: Goal) -> some View {
         Button {
@@ -306,7 +292,7 @@ struct WorkspaceView: View {
         VStack(spacing: 17) {
             RockyMark().frame(height: 60).padding(.bottom, 5)
             Text("把想法交给 Rocky。").font(.system(size: 30, weight: .medium, design: .serif))
-            Text("一个目标，从规划到交付。\n你的本地 AI 伙伴，会接着把事情做完。")
+            Text("一个目标，从规划到交付。\n你的本地 AI 伙伴，会接着把事情做完。重要结果请自行核验。")
                 .font(.system(size: 13)).foregroundStyle(.secondary).lineSpacing(6).multilineTextAlignment(.center)
             HStack(spacing: 10) {
                 suggestion("整理一份报告", icon: "doc.text", prompt: "帮我整理一份关于 Rocky 项目的说明，解释它的核心能力与使用方式。")
@@ -334,7 +320,8 @@ struct WorkspaceView: View {
     private var composer: some View {
         VStack(spacing: 9) {
             if model.selected?.state.isTerminal == true {
-                Text("这个任务已结束。新建任务，继续下一个想法。").font(.system(size: 11)).foregroundStyle(.secondary).padding(14)
+                Text("这个任务已结束。新建任务，继续下一个想法。").font(.system(size: 11)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 16).padding(.vertical, 10).floatingSurface(cornerRadius: 18)
             } else {
                 VStack(alignment: .leading, spacing: 12) {
                     TextField(model.selected == nil ? "描述你想完成的事…" : "补充信息，或回复 Rocky…", text: $model.input, axis: .vertical)
@@ -355,12 +342,9 @@ struct WorkspaceView: View {
                             if model.isSubmitting { ProgressView().controlSize(.small) } else { Image(systemName: "arrow.up").font(.system(size: 15, weight: .semibold)) }
                         }.buttonStyle(SendButtonStyle()).disabled(!model.canSend).keyboardShortcut(.return, modifiers: .command).labelled("发送 ⌘↩")
                     }
-                }.padding(17).background(Color.rockyCanvas, in: RoundedRectangle(cornerRadius: 18))
-                    .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Color.primary.opacity(composerFocused ? 0.24 : 0.14)))
-                    .shadow(color: .black.opacity(0.035), radius: 10, y: 3)
-                    .contentShape(RoundedRectangle(cornerRadius: 18)).onTapGesture { composerFocused = true }
-                Text("Rocky 会根据目标规划并执行。重要结果请自行核验。")
-                    .font(.system(size: 9)).foregroundStyle(.tertiary)
+                }.padding(17).floatingSurface(cornerRadius: 22)
+                    .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(Color.accentColor.opacity(composerFocused ? 0.45 : 0)))
+                    .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous)).onTapGesture { composerFocused = true }
             }
         }.frame(maxWidth: 780).frame(maxWidth: .infinity)
     }
@@ -411,7 +395,7 @@ struct WorkspaceView: View {
     private var inspector: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 23) {
-                Text(model.selected == nil ? "新任务设置" : "任务详情").font(.system(size: 14, weight: .semibold)).padding(.top, 25)
+                Text(model.selected == nil ? "新任务设置" : "任务详情").font(.headline)
                 if let goal = model.selected { taskDetails(goal) } else { draftDetails }
                 detailSection("权限范围") {
                     Label("文件系统读写", systemImage: "folder")
@@ -426,7 +410,7 @@ struct WorkspaceView: View {
                 if let goal = model.selected {
                     Text(goal.id).font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary).textSelection(.enabled)
                 }
-            }.padding(21)
+            }.padding(.horizontal, 18).padding(.vertical, 16)
         }
     }
 
@@ -481,8 +465,8 @@ struct WorkspaceView: View {
 
     private func detailSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 9) {
-            Text(title).font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-            content().font(.system(size: 11))
+            Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+            content().font(.callout)
         }
     }
 
@@ -492,7 +476,19 @@ struct WorkspaceView: View {
             Text(message).textSelection(.enabled)
             Spacer()
             Button { model.error = nil } label: { Image(systemName: "xmark").foregroundStyle(.red) }.buttonStyle(IconButtonStyle(size: 22)).labelled("关闭提示")
-        }.font(.system(size: 11)).foregroundStyle(.red).padding(12).background(.red.opacity(0.05), in: RoundedRectangle(cornerRadius: 8)).padding(.horizontal, 36).padding(.bottom, 10)
+        }.font(.system(size: 11)).foregroundStyle(.red).padding(12).background(.red.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous)).padding(.horizontal, 36).padding(.bottom, 10)
+    }
+
+    private func statusSymbol(_ state: RunState) -> String {
+        switch state.status {
+        case "succeeded": "checkmark.circle.fill"
+        case "failed", "budget_exhausted", "deadline_exceeded": "exclamationmark.circle.fill"
+        case "blocked", "waiting": "hand.raised.circle.fill"
+        case "cancelled": "stop.circle"
+        case "running", "queued": "circle.dotted"
+        default: "circle"
+        }
     }
 
     private func statusColor(_ state: RunState) -> Color {

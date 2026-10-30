@@ -35,3 +35,11 @@ jobs:
         run: uv run pytest -q -m 'not integration'
       - name: Test native macOS client
         run: swift test --package-path desktop
+  macos-latest-sdk:
+    # Builds the client against the newest macOS SDK so code gated on it (Liquid Glass) is compiled too.
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native macOS client
+        run: swift build --package-path desktop

@@ -36,14 +36,12 @@ struct SettingsView: View {
                 HStack(spacing: 11) {
                     Image(systemName: "slider.horizontal.3").font(.system(size: 20)).foregroundStyle(Color.rockyAccent)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("设置").font(.system(size: 22, weight: .semibold))
+                        Text("设置").font(.title2.weight(.semibold))
                         Text("连接你喜欢的模型，让 Rocky 开始工作。") .font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                 }
                 Spacer()
-                Button { dismiss() } label: { Image(systemName: "xmark") }
-                    .buttonStyle(IconButtonStyle(size: 30)).keyboardShortcut(.cancelAction).labelled("关闭")
-            }.padding(.leading, 27).padding(.trailing, 20).padding(.vertical, 24)
+            }.padding(.horizontal, 24).padding(.vertical, 20)
             Divider()
             Form {
                 Section {
@@ -122,7 +120,7 @@ struct SettingsView: View {
                     Text("模型请求会发送到你配置的服务。") .font(.system(size: 10)).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("完成") { dismiss() }.buttonStyle(.bordered)
+                Button("完成") { dismiss() }.buttonStyle(.bordered).keyboardShortcut(.cancelAction)
                 Button { Task { await save() } } label: {
                     HStack(spacing: 6) { if saving { ProgressView().controlSize(.mini) }; Text("保存设置") }
                 }.buttonStyle(.borderedProminent).disabled(!canSave).keyboardShortcut("s", modifiers: .command)

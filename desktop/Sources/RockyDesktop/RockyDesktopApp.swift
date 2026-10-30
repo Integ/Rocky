@@ -25,8 +25,9 @@ struct RockyDesktopApp: App {
                 }
         }
         .defaultSize(width: 1180, height: 800)
-        .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unified)
         .commands {
+            SidebarCommands()
             CommandGroup(replacing: .newItem) {
                 Button("新建任务") { model.newTask() }.keyboardShortcut("n")
             }

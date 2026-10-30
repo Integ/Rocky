@@ -26,11 +26,11 @@ struct ContractReviewView: View {
             HStack(spacing: 11) {
                 Image(systemName: "checklist").font(.system(size: 20)).foregroundStyle(Color.rockyAccent)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("提交前核对").font(.system(size: 22, weight: .semibold))
+                    Text("提交前核对").font(.title2.weight(.semibold))
                     Text("Rocky 会按这些标准验收结果。不合适就返回修改目标。").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Spacer()
-            }.padding(.leading, 27).padding(.trailing, 20).padding(.vertical, 24)
+            }.padding(.horizontal, 24).padding(.vertical, 20)
             Divider()
             Form {
                 if !review.warnings.isEmpty {
