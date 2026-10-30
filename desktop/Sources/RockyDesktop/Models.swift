@@ -504,6 +504,15 @@ struct GoalDraft: Encodable, Equatable {
         self.objective = objective
         self.folders = folders
     }
+
+    private enum CodingKeys: String, CodingKey { case objective, folders }
+
+    /// A draft without grants sends only its objective.
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(objective, forKey: .objective)
+        if !folders.isEmpty { try values.encode(folders, forKey: .folders) }
+    }
 }
 
 enum InputError: LocalizedError {

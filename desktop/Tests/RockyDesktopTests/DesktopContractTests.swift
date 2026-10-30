@@ -8,6 +8,8 @@ final class DesktopContractTests: XCTestCase {
         let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(draft)) as! [String: Any]
         XCTAssertEqual(encoded["objective"] as? String, "编写报告")
         XCTAssertEqual(Set(encoded.keys), ["objective"])
+        let granted = try JSONSerialization.jsonObject(with: JSONEncoder().encode(GoalDraft(objective: "修复项目", folders: ["/Users/a/project"]))) as! [String: Any]
+        XCTAssertEqual(granted["folders"] as? [String], ["/Users/a/project"])
     }
 
     func testExplicitUnlimitedLimitsRemainReadableForExistingContracts() throws {
