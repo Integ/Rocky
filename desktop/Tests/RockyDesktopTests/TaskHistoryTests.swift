@@ -132,6 +132,7 @@ final class TaskHistoryTests: XCTestCase {
         HistoryProtocol.handle = { request, reply in
             if request.url?.path == "/provider-settings" { respond = reply; started.fulfill() }
             else if request.url?.path.hasSuffix("/archive") == true { reply(200, archivedPayload) }
+            else if request.url?.path == "/memory-proposals" { reply(200, Data("[]".utf8)) }
             else {
                 let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
                 reply(200, items.first { $0.name == "archived" }?.value == "true" ? Data("[]".utf8) : recentPayload)

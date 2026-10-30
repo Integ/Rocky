@@ -183,6 +183,7 @@ class Dispatcher:
                             goal_id=goal.goal_id,
                             contract=goal.contract,
                             model_settings=goal.model_settings,
+                            model_task_queue=self.settings.task_queue + MODEL_QUEUE_SUFFIX,
                             # A recovered goal continues its counters, step
                             # numbers and progress from the saved projection.
                             checkpoint=RunCheckpoint(

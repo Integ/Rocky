@@ -193,6 +193,7 @@ async def test_dispatcher_tells_the_model_about_the_follow_up(store):
     run, options = starts[0]
     assert options["id_reuse_policy"] == WorkflowIDReusePolicy.ALLOW_DUPLICATE
     assert "follow-up request" in run.checkpoint.feedback
+    assert run.model_task_queue == Settings().task_queue + "-model"
     assert run.contract.objective.endswith("加一张图")
 
 

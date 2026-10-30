@@ -206,6 +206,7 @@ def worker(env, queue: str, activities: Activities):
 async def test_goal_requires_independent_verification(temporal_env):
     activities = Activities(decisions=[act(), finish()])
     run = request()
+    run.model_task_queue = run.goal_id + "-model"
     async with worker(temporal_env, run.goal_id, activities):
         result = await temporal_env.client.execute_workflow(
             GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
@@ -217,10 +218,9 @@ async def test_goal_requires_independent_verification(temporal_env):
     assert len(activities.tools) == activities.verifications == 1
     assert activities.snapshots[-1].status == "succeeded"
     # Model calls have their own queue and slots; tools stay on the goal's queue.
-    model_queue = run.goal_id + "-model"
     assert activities.queues == {
-        "plan": {model_queue},
-        "verify": {model_queue},
+        "plan": {run.model_task_queue},
+        "verify": {run.model_task_queue},
         "execute": {run.goal_id},
     }
 

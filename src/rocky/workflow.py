@@ -340,12 +340,6 @@ class GoalWorkflow:
         await self._persist()
         return self._state.model_copy(deep=True)
 
-    def _model_queue(self) -> str | None:
-        # Histories recorded before the split replay on the workflow's queue.
-        if not workflow.patched("model-task-queue-v1"):
-            return None
-        return workflow.info().task_queue + MODEL_QUEUE_SUFFIX
-
     def _timeout(self, maximum_seconds: float) -> timedelta:
         # Each operation is bounded by both its own timeout and the task deadline.
         if self._state.deadline_at:
@@ -365,7 +359,7 @@ class GoalWorkflow:
             "rocky.plan",
             PlanInput(run=run, state=self._state.model_copy(deep=True), feedback=feedback),
             result_type=PlanResult,
-            task_queue=self._model_queue(),
+            task_queue=run.model_task_queue,
             start_to_close_timeout=self._timeout(_MODEL_ATTEMPT_SECONDS),
             schedule_to_close_timeout=self._timeout(_MODEL_TOTAL_SECONDS),
             heartbeat_timeout=_MODEL_HEARTBEAT,
@@ -380,7 +374,7 @@ class GoalWorkflow:
             "rocky.verify",
             VerifyInput(run=run, state=self._state.model_copy(deep=True)),
             result_type=VerificationResult,
-            task_queue=self._model_queue(),
+            task_queue=run.model_task_queue,
             start_to_close_timeout=self._timeout(_MODEL_ATTEMPT_SECONDS),
             schedule_to_close_timeout=self._timeout(_MODEL_TOTAL_SECONDS),
             heartbeat_timeout=_MODEL_HEARTBEAT,

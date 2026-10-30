@@ -240,6 +240,8 @@ class RunInput(Model):
     model_settings: ModelSettings | None = None
     checkpoint: "RunCheckpoint | None" = None
     hook_phases: list["Phase"] = Field(default_factory=list)
+    # Where plans and reviews run; unset (older runs) means the workflow's queue.
+    model_task_queue: str | None = None
 
 
 Status = Literal[
