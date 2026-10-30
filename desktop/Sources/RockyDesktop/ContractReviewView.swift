@@ -72,6 +72,13 @@ struct ContractReviewView: View {
                         Text("Rocky 可以直接修改这些文件夹里的文件，不再逐个询问。要改动授权，返回修改。")
                     }
                 }
+                if let files = review.contract.files, !files.isEmpty {
+                    Section {
+                        ForEach(files, id: \.self) { Text($0).font(.system(size: 11, design: .monospaced)).textSelection(.enabled) }
+                    } header: { Text("参考资料") } footer: {
+                        Text("Rocky 可以直接读取这些文件，但不会修改它们。")
+                    }
+                }
                 Section("交付文件") {
                     ForEach(review.contract.deliverables.indices, id: \.self) { index in
                         HStack {

@@ -8,7 +8,7 @@ from rocky.approval_policy import ApprovalPolicy, ApprovalRule
 from rocky.config import Settings
 from rocky.models import Action, Deliverable, GoalContract, RunInput, ToolInput
 from rocky.tool_contracts import approval_fingerprint
-from rocky.tools import WorkspaceTools
+from rocky.tools import ToolError, WorkspaceTools
 
 
 @pytest.fixture
@@ -173,6 +173,36 @@ def test_granted_folders_open_reads_writes_and_read_only_commands(tmp_path, home
     other = home / "private.txt"
     other.write_text("diary")
     assert run(Action(tool="read_file", path=str(other)), "other").error_code == "approval_required"
+
+
+def test_attached_files_are_readable_but_not_writable(tmp_path, home):
+    tools = make_tools(tmp_path)
+    notes = home / "Documents" / "brief.md"
+    notes.parent.mkdir()
+    notes.write_text("the brief")
+    (notes.parent / "diary.md").write_text("diary")
+    base = request(Action(tool="list_files")).run
+    attached = base.model_copy(
+        update={"contract": base.contract.model_copy(update={"files": [str(notes)]})}
+    )
+
+    def run(action, operation_id):
+        return tools.execute(ToolInput(run=attached, action=action, operation_id=operation_id))
+
+    read = run(Action(tool="read_file", path=str(notes)), "read")
+    assert read.success and read.content == "the brief"
+    sibling = run(Action(tool="read_file", path=str(notes.parent / "diary.md")), "sibling")
+    assert sibling.error_code == "approval_required"
+    write = run(Action(tool="write_file", path=str(notes), content="x"), "write")
+    assert write.error_code == "approval_required"
+    # The service refuses attachments that are missing or are credentials.
+    key = home / ".ssh" / "id_ed25519"
+    key.parent.mkdir()
+    key.write_text("PRIVATE KEY")
+    for value in (str(home / "missing.md"), str(key)):
+        contract = base.contract.model_copy(update={"files": [value]})
+        with pytest.raises(ToolError):
+            tools.attached_files(contract)
 
 
 def test_read_only_commands_naming_personal_files_need_approval(tmp_path, home, monkeypatch):

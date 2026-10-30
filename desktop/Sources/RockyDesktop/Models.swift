@@ -15,6 +15,8 @@ struct GoalContract: Codable, Equatable {
     var allowed_domains: [String] = []
     /// Granted folders; nil on tasks submitted before folders existed.
     var folders: [String]? = nil
+    /// Attached reference files, readable without approval.
+    var files: [String]? = nil
     var limits: TaskLimits?
 
     /// The same task with each finite limit doubled, up to `TaskLimits.retryCeiling`.
@@ -541,22 +543,27 @@ struct GoalDraft: Encodable, Equatable {
     var objective: String
     /// Folders the owner grants this task to change without per-file approval.
     var folders: [String]
+    /// Files attached as reference material.
+    var files: [String]
 
-    init(objective: String, folders: [String] = []) throws {
+    init(objective: String, folders: [String] = [], files: [String] = []) throws {
         let objective = objective.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !objective.isEmpty, objective.count <= 8000 else { throw InputError.invalid("请填写目标，最多 8,000 个字符。") }
         guard folders.count <= 8 else { throw InputError.invalid("一个任务最多授权 8 个文件夹。") }
+        guard files.count <= 20 else { throw InputError.invalid("一个任务最多附加 20 个文件。") }
         self.objective = objective
         self.folders = folders
+        self.files = files
     }
 
-    private enum CodingKeys: String, CodingKey { case objective, folders }
+    private enum CodingKeys: String, CodingKey { case objective, folders, files }
 
-    /// A draft without grants sends only its objective.
+    /// A draft without grants or attachments sends only its objective.
     func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
         try values.encode(objective, forKey: .objective)
         if !folders.isEmpty { try values.encode(folders, forKey: .folders) }
+        if !files.isEmpty { try values.encode(files, forKey: .files) }
     }
 }
 

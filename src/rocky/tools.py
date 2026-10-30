@@ -211,7 +211,8 @@ def _operation_fingerprint(request: ToolInput) -> str:
     # durable receipts when old Activity inputs are decoded by newer workers.
     exclude = {
         "run": {
-            "contract": {"limits"} | ({"folders"} if not request.run.contract.folders else set())
+            "contract": {"limits"}
+            | {name for name in ("folders", "files") if not getattr(request.run.contract, name)}
         }
     }
     # Adding a default must not invalidate receipts written before the field.
@@ -745,6 +746,25 @@ class WorkspaceTools:
             result.append(path)
         return tuple(result)
 
+    def attached_files(self, contract) -> tuple[Path, ...]:
+        """Resolve a contract's attached files; raises ToolError naming one."""
+        forbidden = (self.root, *self.protected_paths, *self.sensitive_paths)
+        result = []
+        for value in contract.files:
+            path = Path(value).resolve()
+            if not path.is_file():
+                raise ToolError(f"Attached file {value} is not an existing file")
+            if any(_inside(path, item) for item in forbidden):
+                raise ToolError(f"Attached file {value} is one of Rocky's own or credential files")
+            result.append(path)
+        return tuple(result)
+
+    def _attached_files(self, request: ToolInput) -> tuple[Path, ...]:
+        try:
+            return self.attached_files(request.run.contract)
+        except ToolError:
+            return ()
+
     def _allowed_folders(self, request: ToolInput) -> tuple[Path, ...]:
         try:
             return self.granted_folders(request.run.contract)
@@ -763,6 +783,8 @@ class WorkspaceTools:
         if _inside(home, target):
             return True
         if not _inside(target, home):
+            return False
+        if target in self._attached_files(request):
             return False
         allowed = (self.root / request.run.goal_id, *self._allowed_folders(request))
         return not any(_inside(target, folder) for folder in allowed)

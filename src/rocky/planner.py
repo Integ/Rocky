@@ -272,7 +272,9 @@ project to work on: file tools and sandboxed commands may change files there
 like in the task workspace, without approval. File writes and downloads to any
 other path outside this task's directory, reads of credential stores, and
 reads of the owner's personal files (under the home folder, outside the task
-and its granted folders) need the owner's approval of that exact action; so
+and its granted folders) need the owner's approval of that exact action;
+run.contract.files lists files the owner attached as reference material,
+which read_file and read-only commands may read without approval; so
 does a read-only command that names such a path. A GET with a request body or
 a URL longer than 2048 characters is reviewed like a POST. Full tool access
 does not bypass that gate. Do not disguise a mutation as a read or move it to
@@ -890,6 +892,7 @@ def _planning_run_context(request: PlanInput, *, scoped: bool) -> dict[str, Any]
         "deliverables",
         "limits",
         "folders",
+        "files",
         "max_wait_seconds",
         "max_no_progress",
     }
@@ -1397,6 +1400,7 @@ objective. Use the user's language. Honor explicit requested filenames and forma
 granted_folders lists folders the owner gave this task to work in (often a
 project); criteria may refer to changes there. Deliverables stay in the task
 workspace, so make a report or log of those changes one of them when useful.
+attached_files lists reference files the owner attached; the task can read them.
 Do not invent facts, extra goals or requirements that need unavailable information.
 Choose visible relative file paths inside the task workspace; never use absolute,
 hidden or parent-traversal paths. For code changes, choose a short verification
@@ -1427,13 +1431,14 @@ what would fix it. Use an empty list when there is nothing to resolve. Concerns
 never change the criteria or limits. Return only DeliveryRequirements.
 """,
             payload={"objective": draft.objective}
-            | ({"granted_folders": draft.folders} if draft.folders else {}),
+            | ({"granted_folders": draft.folders} if draft.folders else {})
+            | ({"attached_files": draft.files} if draft.files else {}),
             schema=DeliveryRequirements,
             max_output_tokens=self._response_tokens(
                 "plan_response_tokens", _PLAN_RESPONSE_TOKENS, model_settings
             ),
             inference=model_settings,
-            cache_key="rocky-delivery-requirements-v5",
+            cache_key="rocky-delivery-requirements-v6",
         )
         # This call precedes the goal, so no task budget records its cost.
         log.info(
@@ -1444,6 +1449,7 @@ never change the criteria or limits. Return only DeliveryRequirements.
         return DraftedContract(
             objective=draft.objective,
             folders=draft.folders,
+            files=draft.files,
             acceptance_criteria=requirements.acceptance_criteria,
             deliverables=requirements.deliverables,
             limits=self._automatic_limits(requirements),

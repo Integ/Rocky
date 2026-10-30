@@ -165,8 +165,10 @@ def test_legacy_receipt_accepts_model_settings_without_repeating_the_operation(t
     )
     receipt = json.loads(receipt_path.read_text())
     legacy_fingerprint = hashlib.sha256(
-        # Contracts then had no granted folders.
-        legacy_input.model_dump_json(exclude={"run": {"contract": {"limits", "folders"}}}).encode()
+        # Contracts then had no granted folders or attached files.
+        legacy_input.model_dump_json(
+            exclude={"run": {"contract": {"limits", "folders", "files"}}}
+        ).encode()
     ).hexdigest()
     assert receipt["fingerprint"] == legacy_fingerprint
     # Materialize the old receipt explicitly, then change the visible file with

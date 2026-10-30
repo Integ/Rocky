@@ -359,7 +359,9 @@ def create_app(
 
     def check_folders(contract: GoalContract | GoalDraft) -> None:
         try:
-            WorkspaceTools(settings).granted_folders(contract)
+            tools = WorkspaceTools(settings)
+            tools.granted_folders(contract)
+            tools.attached_files(contract)
         except ToolError as exc:
             raise HTTPException(422, str(exc)) from None
 

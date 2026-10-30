@@ -81,6 +81,8 @@ class DeliveryRequirements(Model):
 # service checks they exist and are not Rocky's own or credential folders.
 GrantedFolder = Annotated[str, StringConstraints(min_length=2, max_length=1024)]
 MAX_FOLDERS = 8
+# Files the owner attaches as reference material: readable without approval.
+MAX_FILES = 20
 
 
 def _normalized_folders(values: list[str]) -> list[str]:
@@ -95,8 +97,9 @@ def _normalized_folders(values: list[str]) -> list[str]:
 class GoalDraft(Model):
     objective: str = Field(min_length=1, max_length=8000)
     folders: list[GrantedFolder] = Field(default_factory=list, max_length=MAX_FOLDERS)
+    files: list[GrantedFolder] = Field(default_factory=list, max_length=MAX_FILES)
 
-    @field_validator("folders")
+    @field_validator("folders", "files")
     @classmethod
     def validate_folders(cls, values: list[str]) -> list[str]:
         return _normalized_folders(values)
@@ -109,6 +112,7 @@ class GoalContract(Model):
     allowed_tools: list[ToolName] = Field(default_factory=lambda: list(TOOL_NAMES))
     allowed_domains: list[str] = Field(default_factory=list, max_length=30)
     folders: list[GrantedFolder] = Field(default_factory=list, max_length=MAX_FOLDERS)
+    files: list[GrantedFolder] = Field(default_factory=list, max_length=MAX_FILES)
     limits: ExecutionLimits = Field(default_factory=ExecutionLimits)
     # Decode-only metadata retained so stored goal records remain readable.
     # Current execution uses limits exclusively and ignores these flat values.
@@ -121,7 +125,7 @@ class GoalContract(Model):
     max_wait_seconds: int = Field(default=3600, ge=1, le=86400)
     max_no_progress: int = Field(default=3, ge=1, le=10)
 
-    @field_validator("folders")
+    @field_validator("folders", "files")
     @classmethod
     def validate_folders(cls, values: list[str]) -> list[str]:
         return _normalized_folders(values)

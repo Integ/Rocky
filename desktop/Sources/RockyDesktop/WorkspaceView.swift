@@ -186,7 +186,7 @@ struct WorkspaceView: View {
     private var conversation: some View {
         ScrollView {
             if let goal = model.selected {
-                let executionEntries = ExecutionEntry.build(from: model.events)
+                let executionEntries = model.executionEntries
                 VStack(alignment: .leading, spacing: 28) {
                     HStack {
                         Spacer(minLength: 35)
@@ -252,6 +252,9 @@ struct WorkspaceView: View {
                             }
                             if !executionEntries.isEmpty {
                                 DisclosureGroup {
+                                    if model.eventsTruncated {
+                                        Text("只显示最近 \(AppModel.maxEvents) 条状态记录。").font(.system(size: 10)).foregroundStyle(.tertiary)
+                                    }
                                     ExecutionLogView(entries: executionEntries)
                                 } label: {
                                     Label("执行记录 · \(ExecutionLogGroup.build(executionEntries).count) 项", systemImage: "list.bullet").font(.system(size: 11)).foregroundStyle(.secondary)
@@ -334,14 +337,17 @@ struct WorkspaceView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     TextField(model.selected == nil ? "描述你想完成的事…" : model.selected?.state.isTerminal == true ? "追加要求，Rocky 会在这个任务上继续…" : "补充信息，或回复 Rocky…", text: $model.input, axis: .vertical)
                         .textFieldStyle(.plain).font(.system(size: 14)).lineLimit(3...7).focused($composerFocused).onSubmit { Task { await model.send() } }
-                    if model.selected == nil, !model.draftFolders.isEmpty {
-                        FlowFolders(folders: model.draftFolders) { path in model.draftFolders.removeAll { $0 == path } }
+                    if model.selected == nil, !(model.draftFolders.isEmpty && model.draftFiles.isEmpty) {
+                        FlowFolders(folders: model.draftFolders, files: model.draftFiles) { path in
+                            model.draftFolders.removeAll { $0 == path }
+                            model.draftFiles.removeAll { $0 == path }
+                        }
                     }
                     HStack(spacing: 8) {
                         if model.selected == nil {
                             Button { model.chooseFolders() } label: { Image(systemName: "folder.badge.plus").font(.system(size: 13)) }
-                                .buttonStyle(IconButtonStyle(size: 28)).labelled("授权文件夹：任务可直接修改其中的文件")
-                            Text(model.submissionStatus ?? (model.draftFolders.isEmpty ? "AI 自动设定交付要求和执行预算；可拖入项目文件夹授权修改" : "已授权的文件夹可直接修改，其他个人文件仍需批准"))
+                                .buttonStyle(IconButtonStyle(size: 28)).labelled("添加文件夹（可直接修改）或文件（参考资料）")
+                            Text(model.submissionStatus ?? (model.draftFolders.isEmpty && model.draftFiles.isEmpty ? "AI 自动设定交付要求和执行预算；可拖入文件夹授权修改，或拖入文件作为参考资料" : "授权的文件夹可直接修改，附加的文件可直接读取，其他个人文件仍需批准"))
                                 .font(.system(size: 10)).foregroundStyle(.tertiary).lineLimit(1)
                         } else {
                             Text(model.pendingCommand ?? (model.selected?.state.isTerminal == true ? "沿用同一个工作区和进度，追加一份同样的预算" : "补充信息会保存到同一个任务")).font(.system(size: 10)).foregroundStyle(.secondary)
@@ -455,6 +461,15 @@ struct WorkspaceView: View {
             ForEach(goal.contract.deliverables, id: \.path) { Text($0.path).font(.system(size: 11, design: .monospaced)) }
             inspectorAction("在 Finder 中打开", systemImage: "folder") { model.openWorkspace() }
         }
+        if let files = goal.contract.files, !files.isEmpty {
+            detailSection("参考资料") {
+                ForEach(files, id: \.self) { path in
+                    Button { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) } label: {
+                        Text(path).font(.system(size: 11, design: .monospaced)).lineLimit(2).truncationMode(.middle)
+                    }.buttonStyle(.link)
+                }
+            }
+        }
         if let folders = goal.contract.folders, !folders.isEmpty {
             detailSection("授权文件夹") {
                 ForEach(folders, id: \.self) { path in
@@ -527,17 +542,18 @@ struct WorkspaceView: View {
 /// Granted folders in the composer, each removable.
 private struct FlowFolders: View {
     let folders: [String]
+    var files: [String] = []
     let remove: (String) -> Void
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                ForEach(folders, id: \.self) { path in
+                ForEach(folders + files, id: \.self) { path in
                     HStack(spacing: 4) {
-                        Image(systemName: "folder").font(.system(size: 10))
+                        Image(systemName: files.contains(path) ? "doc" : "folder").font(.system(size: 10))
                         Text((path as NSString).lastPathComponent).font(.system(size: 11)).lineLimit(1)
                         Button { remove(path) } label: { Image(systemName: "xmark").font(.system(size: 8, weight: .bold)) }
-                            .buttonStyle(.plain).help("取消授权 \(path)")
+                            .buttonStyle(.plain).help("移除 \(path)")
                     }
                     .padding(.horizontal, 8).padding(.vertical, 4)
                     .background(Color.rockyAccent.opacity(0.1), in: Capsule())

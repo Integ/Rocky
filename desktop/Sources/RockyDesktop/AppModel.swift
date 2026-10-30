@@ -9,7 +9,23 @@ final class AppModel: ObservableObject {
     @Published var search = ""
     @Published var onlyActive = false
     @Published var showArchived = false
-    @Published var events: [GoalEvent] = []
+    /// The selected task's history, newest `maxEvents` only: each event is a
+    /// full state snapshot, and a long task has thousands.
+    @Published var events: [GoalEvent] = [] {
+        didSet {
+            if events.count > Self.maxEvents {
+                events.removeFirst(events.count - Self.maxEvents)
+                eventsTruncated = true
+            } else if events.isEmpty {
+                eventsTruncated = false
+            }
+            // Built once per change, not on every view update.
+            executionEntries = ExecutionEntry.build(from: events)
+        }
+    }
+    static let maxEvents = 1000
+    @Published private(set) var executionEntries: [ExecutionEntry] = []
+    @Published private(set) var eventsTruncated = false
     @Published var messages: [FeedbackMessage] = []
     @Published var truncatedArtifacts: Set<String> = []
     @Published var provider: ProviderSettings?
@@ -22,6 +38,7 @@ final class AppModel: ObservableObject {
     @Published var input = ""
     /// Folders granted to the task being written; sent with its draft.
     @Published var draftFolders: [String] = []
+    @Published var draftFiles: [String] = []
     @Published var error: String?
     @Published var isSubmitting = false
     @Published var submissionStatus: String?
@@ -118,7 +135,9 @@ final class AppModel: ObservableObject {
         await runtime.start()
         while !Task.isCancelled {
             if runtime.isReady { await refresh() }
-            do { try await Task.sleep(for: .seconds(3)) } catch { break }
+            // Poll slowly while no window is in front; alerts still arrive.
+            let seconds: Double = NSApp?.isActive == true ? 3 : 15
+            do { try await Task.sleep(for: .seconds(seconds)) } catch { break }
         }
     }
 
@@ -180,6 +199,7 @@ final class AppModel: ObservableObject {
         select(nil)
         input = ""
         draftFolders = []
+        draftFiles = []
         error = nil
         contractReview = nil
     }
@@ -283,7 +303,7 @@ final class AppModel: ObservableObject {
                     input = ""
                 }
             } else {
-                let submission = try GoalDraft(objective: input, folders: draftFolders)
+                let submission = try GoalDraft(objective: input, folders: draftFolders, files: draftFiles)
                 submissionStatus = "AI 正在拟定验收标准并评估执行预算…"
                 let review = try await api.prepareContract(submission)
                 if generation == selectionGeneration, selectedID == nil {
@@ -335,6 +355,7 @@ final class AppModel: ObservableObject {
             if generation == selectionGeneration {
                 input = ""
                 draftFolders = []
+                draftFiles = []
                 showArchived = false
                 select(goal.id)
             }
@@ -495,19 +516,23 @@ final class AppModel: ObservableObject {
     func chooseFolders() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
-        panel.canChooseFiles = false
+        panel.canChooseFiles = true
         panel.allowsMultipleSelection = true
-        panel.prompt = "授权"
-        panel.message = "选择允许这个任务直接修改的文件夹（例如一个项目）。"
+        panel.prompt = "添加"
+        panel.message = "文件夹：任务可以直接修改其中的文件（例如一个项目）。文件：作为参考资料，任务可以读取。"
         if panel.runModal() == .OK { addFolders(panel.urls) }
     }
 
     func addFolders(_ urls: [URL]) {
         for url in urls {
             var isDirectory: ObjCBool = false
-            guard url.isFileURL, FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else { continue }
+            guard url.isFileURL, FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else { continue }
             let path = url.standardizedFileURL.path
-            if !draftFolders.contains(path), draftFolders.count < 8 { draftFolders.append(path) }
+            if isDirectory.boolValue {
+                if !draftFolders.contains(path), draftFolders.count < 8 { draftFolders.append(path) }
+            } else if !draftFiles.contains(path), draftFiles.count < 20 {
+                draftFiles.append(path)
+            }
         }
     }
 

@@ -38,8 +38,8 @@ jobs:
   macos-latest-sdk:
     # Builds the client against the newest macOS SDK so code gated on it (Liquid Glass) is compiled too.
     runs-on: macos-26
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Build native macOS client
-        run: swift build --package-path desktop
+      - name: Build and test the native macOS client with the newest SDK
+        run: swift test --package-path desktop
