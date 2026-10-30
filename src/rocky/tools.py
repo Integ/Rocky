@@ -209,7 +209,11 @@ def _operation_fingerprint(request: ToolInput) -> str:
     # Keep the original v0.1 ToolInput serialization byte-for-byte. Inference
     # settings do not change tool semantics; including them would invalidate
     # durable receipts when old Activity inputs are decoded by newer workers.
-    exclude = {"run": {"contract": {"limits"}}}
+    exclude = {
+        "run": {
+            "contract": {"limits"} | ({"folders"} if not request.run.contract.folders else set())
+        }
+    }
     # Adding a default must not invalidate receipts written before the field.
     unset = {
         name for name in ("timeout_seconds", "background") if getattr(request.action, name) is None
@@ -625,8 +629,9 @@ class WorkspaceTools:
                         approved_by = "deferred:" + identity
                     elif not exact:
                         approved_by = automatic_approval(request, options, policy)
-                        if approved_by == "read_only" and not self._system_program(
-                            request.action.content
+                        if approved_by == "read_only" and (
+                            not self._system_program(request.action.content)
+                            or self._command_reads_private(request)
                         ):
                             approved_by = ""
                     if not approved_by:
@@ -713,6 +718,73 @@ class WorkspaceTools:
                 hint="Ask the owner to inspect the workspace receipt storage; do not repeat an external effect with a different identifier.",
             )
 
+    def granted_folders(self, contract) -> tuple[Path, ...]:
+        """Resolve a contract's granted folders, refusing ones no task may own.
+
+        Raises ToolError naming the folder. A folder must exist, and must not
+        be the filesystem root, the home folder, Rocky's workspace or service
+        state, the running code, or a credential store, nor contain them.
+        """
+        home = Path.home().resolve()
+        forbidden = (
+            self.root,
+            *self.protected_paths,
+            *self.sensitive_paths,
+            *self.protected_write_paths,
+        )
+        result = []
+        for value in contract.folders:
+            path = Path(value).resolve()
+            if not path.is_dir():
+                raise ToolError(f"Granted folder {value} is not an existing folder")
+            if path == Path("/") or path == home or _inside(home, path):
+                raise ToolError(f"Granted folder {value} is too broad; choose a project folder")
+            if any(_inside(path, item) or _inside(item, path) for item in forbidden):
+                raise ToolError(f"Granted folder {value} holds Rocky's own or credential files")
+            result.append(path)
+        return tuple(result)
+
+    def _allowed_folders(self, request: ToolInput) -> tuple[Path, ...]:
+        try:
+            return self.granted_folders(request.run.contract)
+        except ToolError:
+            # A folder removed or replaced after submission grants nothing.
+            return ()
+
+    def _private_read(self, request: ToolInput, target: Path) -> bool:
+        """Whether reading target reaches the owner's personal files.
+
+        Files under the home folder, outside this task and its granted
+        folders, are personal; so is any folder that contains the home folder.
+        System and toolchain locations elsewhere stay readable.
+        """
+        home = Path.home().resolve()
+        if _inside(home, target):
+            return True
+        if not _inside(target, home):
+            return False
+        allowed = (self.root / request.run.goal_id, *self._allowed_folders(request))
+        return not any(_inside(target, folder) for folder in allowed)
+
+    def _command_reads_private(self, request: ToolInput) -> bool:
+        """Whether a read-only command names a personal file or folder."""
+        words = command_words(request.action.content) or []
+        try:
+            cwd = self._resolve_path(request.run.goal_id, request.action.path, default_root=True)
+        except (ToolError, OSError):
+            return True
+        if self._private_read(request, cwd):
+            return True
+        for word in words[1:]:
+            # Options may carry a path after "=" (--file=/x); bare flags carry none.
+            value = word.partition("=")[2] if word.startswith("-") else word
+            if not value:
+                continue
+            candidate = Path(value) if value.startswith("/") else cwd / value
+            if self._private_read(request, Path(os.path.realpath(candidate))):
+                return True
+        return False
+
     def _file_access(self, request: ToolInput) -> str:
         """Describe a full-access file operation that needs the owner, or return ''.
 
@@ -726,12 +798,15 @@ class WorkspaceTools:
         goal_id = request.run.goal_id
         if action.tool in _FILE_WRITE_TOOLS or action.tool in {"fetch_url", "http_request"}:
             target = self._resolve_path(goal_id, action.path, write=True)
-            if not _inside(target, self.root / goal_id):
-                return f"write {target} outside this task's directory"
+            allowed = (self.root / goal_id, *self._allowed_folders(request))
+            if not any(_inside(target, folder) for folder in allowed):
+                return f"write {target} outside this task's folders"
         elif action.tool in {"read_file", "list_files"}:
             target = self._resolve_path(goal_id, action.path)
             if any(_inside(target, path) for path in self.sensitive_paths):
                 return f"read the credential store {target}"
+            if self._private_read(request, target):
+                return f"read {target}, a personal file outside this task's folders"
         return ""
 
     def _system_program(self, command: str | None) -> bool:
@@ -1016,6 +1091,7 @@ class WorkspaceTools:
                     self.root / request.run.goal_id,
                     protected_paths=self.protected_paths + self.sensitive_paths,
                     blocked_ports=self.control_ports,
+                    writable_paths=self._allowed_folders(request),
                 )
                 command = [*prefix, *command]
 

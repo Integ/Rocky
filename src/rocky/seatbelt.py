@@ -93,6 +93,7 @@ def _profile(
     *,
     protected_paths: tuple[Path, ...] = (),
     blocked_ports: tuple[int, ...] = (),
+    writable_paths: tuple[Path, ...] = (),
 ) -> str:
     # The root-wide rule covers directories created after compilation too.
     # Existing peer symlinks are denied by canonical target as well, since
@@ -122,6 +123,14 @@ def _profile(
         f'(deny network-outbound (remote ip "*:{port}"))\n(deny network-bind (local ip "*:{port}"))'
         for port in sorted(set(blocked_ports))
     )
+    for path in writable_paths:
+        if not Path(path).is_absolute():
+            raise ValueError("Writable sandbox paths must be absolute")
+    # Owner-granted folders; protected denials below still take precedence.
+    writable = "\n".join(
+        f"(allow file-write* (subpath {_quote(path)}))"
+        for path in sorted({Path(path).resolve() for path in writable_paths})
+    )
     return f"""(version 1)
 (deny default)
 (allow process-exec process-fork)
@@ -149,6 +158,7 @@ def _profile(
 ; Traversal and realpath need the workspace's own metadata, not its contents.
 (allow file-read-metadata (literal {_quote(root)}))
 (allow file-write* (subpath {_quote(goal)}))
+{writable}
 (allow file-write-data (require-all
   (literal "/dev/null") (vnode-type CHARACTER-DEVICE)))
 {blocked}
@@ -176,6 +186,7 @@ def prepare_sandbox(
     *,
     protected_paths: tuple[Path, ...] = (),
     blocked_ports: tuple[int, ...] = (),
+    writable_paths: tuple[Path, ...] = (),
 ) -> tuple[list[str], dict[str, str]]:
     """Return the command prefix and environment for a trusted goal directory.
 
@@ -195,7 +206,13 @@ def prepare_sandbox(
     if goal.is_symlink() or directory.resolve(strict=True) != goal:
         raise ValueError("Sandbox directory must be the current goal's real directory")
     # Validate path quoting before making any goal-local directories.
-    profile = _profile(root, goal, protected_paths=protected_paths, blocked_ports=blocked_ports)
+    profile = _profile(
+        root,
+        goal,
+        protected_paths=protected_paths,
+        blocked_ports=blocked_ports,
+        writable_paths=writable_paths,
+    )
     paths = _runtime_directories(goal)
     # The worker's control credentials must not become command capabilities.
     # Keep the toolchain environment (including PATH/HOME) and the parent

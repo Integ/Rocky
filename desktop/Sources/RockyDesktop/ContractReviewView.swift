@@ -51,6 +51,13 @@ struct ContractReviewView: View {
                         Text("\(index + 1). \(criterion)").font(.system(size: 12)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                if let folders = review.contract.folders, !folders.isEmpty {
+                    Section {
+                        ForEach(folders, id: \.self) { Text($0).font(.system(size: 11, design: .monospaced)).textSelection(.enabled) }
+                    } header: { Text("授权文件夹") } footer: {
+                        Text("Rocky 可以直接修改这些文件夹里的文件，不再逐个询问。要改动授权，返回修改。")
+                    }
+                }
                 Section("交付文件") {
                     ForEach(review.contract.deliverables, id: \.path) { Text($0.path).font(.system(size: 11, design: .monospaced)) }
                 }

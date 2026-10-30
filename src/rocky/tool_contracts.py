@@ -254,9 +254,20 @@ def validate_action(action: Action, *, full_access: bool) -> dict | None:
     return options
 
 
+# A safe-method request this long, or with a body, can carry the task's data
+# out as easily as a POST, so it is reviewed like one.
+MAX_UNREVIEWED_URL = 2048
+
+
 def requires_approval(action: Action, options: dict | None = None) -> bool:
     """Opaque shell code and potentially mutating HTTP calls need owner approval."""
-    return action.tool == "run_command" or (
-        action.tool in {"http_request", "fetch_url"}
-        and (options or {}).get("method", "GET").upper() not in SAFE_HTTP_METHODS
+    if action.tool == "run_command":
+        return True
+    if action.tool not in {"http_request", "fetch_url"}:
+        return False
+    options = options or {}
+    return (
+        options.get("method", "GET").upper() not in SAFE_HTTP_METHODS
+        or any(options.get(key) is not None for key in ("json", "data", "body"))
+        or len(action.url or "") > MAX_UNREVIEWED_URL
     )

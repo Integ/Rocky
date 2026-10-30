@@ -13,6 +13,8 @@ struct GoalContract: Codable, Equatable {
     var deliverables: [Deliverable]
     var allowed_tools: [String] = ["read_file", "write_file", "list_files", "fetch_url", "http_request", "run_command", "append_file", "edit_file"]
     var allowed_domains: [String] = []
+    /// Granted folders; nil on tasks submitted before folders existed.
+    var folders: [String]? = nil
     var limits: TaskLimits?
 
     /// The same task with each finite limit doubled, up to `TaskLimits.retryCeiling`.
@@ -492,11 +494,15 @@ struct ArtifactContent: Decodable {
 
 struct GoalDraft: Encodable, Equatable {
     var objective: String
+    /// Folders the owner grants this task to change without per-file approval.
+    var folders: [String]
 
-    init(objective: String) throws {
+    init(objective: String, folders: [String] = []) throws {
         let objective = objective.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !objective.isEmpty, objective.count <= 8000 else { throw InputError.invalid("请填写目标，最多 8,000 个字符。") }
+        guard folders.count <= 8 else { throw InputError.invalid("一个任务最多授权 8 个文件夹。") }
         self.objective = objective
+        self.folders = folders
     }
 }
 

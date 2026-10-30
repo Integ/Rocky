@@ -60,7 +60,7 @@ def test_writes_outside_the_task_need_exact_approval(tmp_path, home, tool):
     pending = tools.execute(pending_request)
 
     assert pending.error_code == "approval_required"
-    assert "outside this task's directory" in pending.content
+    assert "outside this task's folders" in pending.content
     assert pending.approval_command_prefix == []
     assert pending.approval_http_scope is None
     assert target.read_text() == "export PATH=/usr/bin\n"
@@ -125,7 +125,7 @@ def test_downloads_outside_the_task_need_exact_approval_despite_owner_rules(
         assert result.approval_http_scope is None
 
 
-def test_credential_stores_need_approval_to_read_but_other_files_do_not(tmp_path, home):
+def test_credential_stores_and_personal_files_need_approval_to_read(tmp_path, home):
     tools = make_tools(tmp_path)
     key = home / ".ssh" / "id_ed25519"
     key.parent.mkdir()
@@ -140,9 +140,63 @@ def test_credential_stores_need_approval_to_read_but_other_files_do_not(tmp_path
         assert "PRIVATE KEY" not in result.content
         assert "credential store" in result.content
 
-    readme = tools.execute(request(Action(tool="read_file", path=str(project)), "project"))
-    assert readme.success, readme.content
-    assert readme.content == "project notes"
+    personal = tools.execute(request(Action(tool="read_file", path=str(project)), "project"))
+    assert personal.error_code == "approval_required"
+    assert "personal file" in personal.content
+    assert "project notes" not in personal.content
+    # Files outside the home folder (system and toolchain files) stay readable.
+    system = tmp_path / "system" / "notes.txt"
+    system.parent.mkdir()
+    system.write_text("system notes")
+    assert tools.execute(request(Action(tool="read_file", path=str(system)), "system")).success
+
+
+def test_granted_folders_open_reads_writes_and_read_only_commands(tmp_path, home):
+    tools = make_tools(tmp_path)
+    project = home / "project"
+    project.mkdir()
+    (project / "README.md").write_text("project notes")
+    base = request(Action(tool="list_files")).run
+    granted = base.model_copy(
+        update={"contract": base.contract.model_copy(update={"folders": [str(project)]})}
+    )
+
+    def run(action, operation_id):
+        return tools.execute(ToolInput(run=granted, action=action, operation_id=operation_id))
+
+    read = run(Action(tool="read_file", path=str(project / "README.md")), "read")
+    assert read.success and read.content == "project notes"
+    write = run(Action(tool="write_file", path=str(project / "CHANGES.md"), content="x"), "write")
+    assert write.success, write.content
+    assert (project / "CHANGES.md").read_text() == "x"
+    # Another personal folder is still behind approval.
+    other = home / "private.txt"
+    other.write_text("diary")
+    assert run(Action(tool="read_file", path=str(other)), "other").error_code == "approval_required"
+
+
+def test_read_only_commands_naming_personal_files_need_approval(tmp_path, home, monkeypatch):
+    from rocky import tools as tools_module
+
+    monkeypatch.setattr(
+        tools_module,
+        "prepare_sandbox",
+        lambda *args, **kwargs: ([], tools_module.worker_free_environment()),
+    )
+    tools = make_tools(tmp_path)
+    secret = home / "Documents" / "tax.txt"
+    secret.parent.mkdir()
+    secret.write_text("TOPSECRET")
+    (tools.root / "file-access").mkdir(parents=True, exist_ok=True)
+    (tools.root / "file-access" / "notes.txt").write_text("task notes")
+
+    for command in (f"cat {secret}", "cat ../../home/Documents/tax.txt", f"grep -r TOP {home}"):
+        result = tools.execute(request(Action(tool="run_command", content=command), command))
+        assert result.error_code == "approval_required", command
+        assert "TOPSECRET" not in result.content
+    inside = tools.execute(request(Action(tool="run_command", content="cat notes.txt"), "inside"))
+    assert inside.success, inside.content
+    assert "task notes" in inside.content
 
 
 def test_trusted_mode_runs_outside_file_access_and_records_it(tmp_path, home):

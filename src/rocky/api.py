@@ -339,9 +339,16 @@ def create_app(
         # This is liveness. Queued goals can remain pending while Temporal is offline.
         return {"status": "ok", "service": "rocky"}
 
+    def check_folders(contract: GoalContract | GoalDraft) -> None:
+        try:
+            WorkspaceTools(settings).granted_folders(contract)
+        except ToolError as exc:
+            raise HTTPException(422, str(exc)) from None
+
     @app.post("/goal-contract", response_model=ContractReview, dependencies=auth)
     async def prepare_goal_contract(draft: GoalDraft):
         """Draft a contract for owner review; it is submitted separately."""
+        check_folders(draft)
         try:
             prepared = await planner.prepare_contract(draft, get_default_model_settings())
         except PlannerError:
@@ -355,6 +362,7 @@ def create_app(
     @app.post("/goal-contract/check", response_model=ContractReview, dependencies=auth)
     def check_goal_contract(contract: GoalContract):
         """Budget warnings for a contract the owner edited before submitting."""
+        check_folders(contract)
         return ContractReview(contract=contract, warnings=contract_warnings(contract))
 
     @app.post("/goals", response_model=GoalView, status_code=202, dependencies=auth)
@@ -362,6 +370,7 @@ def create_app(
         contract: GoalContract,
         idempotency_key: Annotated[str | None, Header(max_length=200)] = None,
     ):
+        check_folders(contract)
         goal_id = (
             str(uuid5(NAMESPACE_URL, f"rocky:{idempotency_key}"))
             if idempotency_key

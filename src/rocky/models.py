@@ -76,8 +76,30 @@ class DeliveryRequirements(Model):
     concerns: list[Criterion] = Field(default_factory=list, max_length=8)
 
 
+# Folders the owner grants one task: file tools and sandboxed commands may
+# write there without per-action approval. Absolute and normalized; the
+# service checks they exist and are not Rocky's own or credential folders.
+GrantedFolder = Annotated[str, StringConstraints(min_length=2, max_length=1024)]
+MAX_FOLDERS = 8
+
+
+def _normalized_folders(values: list[str]) -> list[str]:
+    result = []
+    for value in values:
+        if "\x00" in value or not value.startswith("/") or "/../" in value + "/":
+            raise ValueError("Granted folders must be absolute paths without '..'")
+        result.append(value.rstrip("/") or "/")
+    return list(dict.fromkeys(result))
+
+
 class GoalDraft(Model):
     objective: str = Field(min_length=1, max_length=8000)
+    folders: list[GrantedFolder] = Field(default_factory=list, max_length=MAX_FOLDERS)
+
+    @field_validator("folders")
+    @classmethod
+    def validate_folders(cls, values: list[str]) -> list[str]:
+        return _normalized_folders(values)
 
 
 class GoalContract(Model):
@@ -86,6 +108,7 @@ class GoalContract(Model):
     deliverables: list[Deliverable] = Field(min_length=1, max_length=20)
     allowed_tools: list[ToolName] = Field(default_factory=lambda: list(TOOL_NAMES))
     allowed_domains: list[str] = Field(default_factory=list, max_length=30)
+    folders: list[GrantedFolder] = Field(default_factory=list, max_length=MAX_FOLDERS)
     limits: ExecutionLimits = Field(default_factory=ExecutionLimits)
     # Decode-only metadata retained so stored goal records remain readable.
     # Current execution uses limits exclusively and ignores these flat values.
@@ -97,6 +120,11 @@ class GoalContract(Model):
     deadline_seconds: int | None = Field(default=None, ge=1, json_schema_extra={"deprecated": True})
     max_wait_seconds: int = Field(default=3600, ge=1, le=86400)
     max_no_progress: int = Field(default=3, ge=1, le=10)
+
+    @field_validator("folders")
+    @classmethod
+    def validate_folders(cls, values: list[str]) -> list[str]:
+        return _normalized_folders(values)
 
     @field_validator("allowed_domains")
     @classmethod

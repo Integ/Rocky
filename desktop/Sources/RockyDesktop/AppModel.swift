@@ -20,6 +20,8 @@ final class AppModel: ObservableObject {
     @Published var contractReview: PendingReview?
     @Published var showInspector = false
     @Published var input = ""
+    /// Folders granted to the task being written; sent with its draft.
+    @Published var draftFolders: [String] = []
     @Published var error: String?
     @Published var isSubmitting = false
     @Published var submissionStatus: String?
@@ -155,6 +157,7 @@ final class AppModel: ObservableObject {
         showArchived = false
         select(nil)
         input = ""
+        draftFolders = []
         error = nil
         contractReview = nil
     }
@@ -249,7 +252,7 @@ final class AppModel: ObservableObject {
                     input = ""
                 }
             } else {
-                let submission = try GoalDraft(objective: input)
+                let submission = try GoalDraft(objective: input, folders: draftFolders)
                 submissionStatus = "AI 正在拟定验收标准并评估执行预算…"
                 let review = try await api.prepareContract(submission)
                 if generation == selectionGeneration, selectedID == nil {
@@ -292,6 +295,7 @@ final class AppModel: ObservableObject {
             contractReview = nil
             if generation == selectionGeneration {
                 input = ""
+                draftFolders = []
                 showArchived = false
                 select(goal.id)
             }
@@ -416,6 +420,26 @@ final class AppModel: ObservableObject {
             try await api.deleteApprovalRule(rule.rule_id)
             approvalPolicy = try await api.approvalPolicy()
         } catch { self.error = error.localizedDescription }
+    }
+
+    /// Lets the owner pick project folders this task may change.
+    func chooseFolders() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "授权"
+        panel.message = "选择允许这个任务直接修改的文件夹（例如一个项目）。"
+        if panel.runModal() == .OK { addFolders(panel.urls) }
+    }
+
+    func addFolders(_ urls: [URL]) {
+        for url in urls {
+            var isDirectory: ObjCBool = false
+            guard url.isFileURL, FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else { continue }
+            let path = url.standardizedFileURL.path
+            if !draftFolders.contains(path), draftFolders.count < 8 { draftFolders.append(path) }
+        }
     }
 
     func openWorkspace(_ goal: Goal? = nil) {
