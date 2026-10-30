@@ -90,7 +90,7 @@ struct AttentionTracker {
             } else if let approval = state.pending_approval, approval.fingerprint != previous?.approval {
                 alert = .approval(summary: approval.summary, unsandboxed: approval.action.isUnsandboxed)
             } else if waiting, previous?.status != "blocked" {
-                alert = .blocked(reason: state.reason)
+                alert = .blocked(reason: state.displayReason)
             } else if waiting, let last = entry.lastAlert, now.timeIntervalSince(last) >= reminderInterval {
                 alert = .reminder(since: entry.waitingSince ?? last)
             } else if state.isTerminal, let previous, !Self.terminal(previous.status) {

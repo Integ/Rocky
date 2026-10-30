@@ -146,6 +146,8 @@ def _local_request(request: Request) -> bool:
 class ContractReview(Model):
     contract: GoalContract
     warnings: list[ContractWarning] = Field(default_factory=list)
+    # Tokens the drafting call used; not charged to the task.
+    drafting_tokens: int | None = None
 
 
 class FollowUpRequest(Model):
@@ -373,7 +375,13 @@ def create_app(
             ) from None
         concerns = prepared.concerns if isinstance(prepared, DraftedContract) else []
         contract = prepared.contract() if isinstance(prepared, DraftedContract) else prepared
-        return ContractReview(contract=contract, warnings=contract_warnings(contract, concerns))
+        return ContractReview(
+            contract=contract,
+            warnings=contract_warnings(contract, concerns),
+            drafting_tokens=prepared.drafting_tokens
+            if isinstance(prepared, DraftedContract)
+            else None,
+        )
 
     @app.post("/goal-contract/check", response_model=ContractReview, dependencies=auth)
     def check_goal_contract(contract: GoalContract):
@@ -408,17 +416,19 @@ def create_app(
         response: Response,
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
         archived: bool = False,
+        query: Annotated[str, Query(max_length=200)] = "",
         if_none_match: Annotated[str | None, Header()] = None,
     ):
         # Read the tag before the list: a write in between yields a newer list
         # under an older tag, so the next poll refetches instead of missing it.
-        tag = f'"{database.list_goals_tag(limit, archived=archived)}"'
+        query = query.strip()
+        tag = f'"{database.list_goals_tag(limit, archived=archived, query=query)}"'
         if if_none_match and tag in {
             value.strip().removeprefix("W/") for value in if_none_match.split(",")
         }:
             return Response(status_code=304, headers={"ETag": tag, "Cache-Control": "no-store"})
         response.headers["ETag"] = tag
-        return database.list_goals(limit, archived=archived)
+        return database.list_goals(limit, archived=archived, query=query)
 
     @app.get("/memories", dependencies=auth)
     def get_memories(

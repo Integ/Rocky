@@ -132,6 +132,8 @@ Valid decisions:
   and choose an integer wait_seconds from 1 to contract.max_wait_seconds.
 - finish: only when actual observations support the deliverables and all
   acceptance criteria. The application will independently verify the artifacts.
+  The reason is shown to the owner as the result: summarize what was delivered
+  and anything they should check, in the language of the objective.
 - blocked: specify the concrete missing information or authorization, or why
   the objective cannot be completed with the available information or access.
   Once inspected evidence establishes that a required authoritative input is
@@ -1446,6 +1448,7 @@ never change the criteria or limits. Return only DeliveryRequirements.
             deliverables=requirements.deliverables,
             limits=self._automatic_limits(requirements),
             concerns=requirements.concerns,
+            drafting_tokens=input_tokens + output_tokens,
         )
 
     async def plan(self, request: PlanInput) -> PlanResult:

@@ -212,6 +212,8 @@ async def test_goal_requires_independent_verification(temporal_env):
             GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
         )
     assert result.status == "succeeded"
+    # The owner sees the model's summary, not the reviewer's feedback.
+    assert result.reason == finish().reason
     assert result.steps == 2
     assert result.model_calls == 3
     assert (result.input_tokens, result.output_tokens) == (29, 17)

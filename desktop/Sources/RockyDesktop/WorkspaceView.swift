@@ -61,6 +61,8 @@ struct WorkspaceView: View {
         }
         .listStyle(.sidebar)
         .searchable(text: $model.search, placement: .sidebar, prompt: "搜索任务")
+        .onChange(of: model.search) { _, _ in model.searchChanged() }
+        .onChange(of: model.showArchived) { _, _ in model.searchChanged() }
         .safeAreaInset(edge: .top, spacing: 0) {
             HStack(spacing: 6) {
                 Picker("任务列表", selection: Binding(get: { model.showArchived }, set: { model.showHistory(archived: $0) })) {
@@ -211,8 +213,9 @@ struct WorkspaceView: View {
                                 Text(goal.state.statusLabel).font(.system(size: 10)).foregroundStyle(statusColor(goal.state))
                                 if !goal.state.isTerminal && goal.state.status != "blocked" { ProgressView().controlSize(.mini) }
                             }
-                            Text(goal.state.reason.isEmpty ? "目标已保存，正在等待代理开始执行。" : goal.state.reason)
+                            Text(goal.state.reason.isEmpty ? "目标已保存，正在等待代理开始执行。" : goal.state.displayReason)
                                 .font(.system(size: 14)).lineSpacing(6).textSelection(.enabled)
+                                .help(goal.state.displayReason == goal.state.reason ? "" : goal.state.reason)
                             if let approval = goal.state.pending_approval {
                                 VStack(alignment: .leading, spacing: 10) {
                                     Label("操作需要批准", systemImage: "hand.raised").font(.system(size: 12, weight: .medium))

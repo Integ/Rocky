@@ -133,3 +133,31 @@ def test_noop_command_lock_does_not_invalidate_the_list(client, store):
     tag = client.get("/goals", headers=AUTH).headers["ETag"]
     store.enqueue_command("goal", "cancel")
     assert client.get("/goals", headers=AUTH | {"If-None-Match": tag}).status_code == 304
+
+
+def test_unfinished_goals_stay_listed_beyond_the_newest(store, client):
+    store.create_goal("old-running", CONTRACT)
+    store.save_state(RunState(goal_id="old-running", revision=1, status="running"))
+    for index in range(3):
+        store.create_goal(f"new-{index}", CONTRACT)
+        finish(store, f"new-{index}")
+    listed = [goal.goal_id for goal in store.list_goals(limit=2)]
+    assert listed[:2] == ["new-2", "new-1"] and "old-running" in listed
+    assert "new-0" not in listed
+    # Archived lists stay a plain page.
+    store.set_archived("new-0", True)
+    assert [goal.goal_id for goal in store.list_goals(limit=1, archived=True)] == ["new-0"]
+    response = client.get("/goals?limit=2", headers=AUTH)
+    assert "old-running" in [goal["goal_id"] for goal in response.json()]
+
+
+def test_search_covers_every_goal(store, client):
+    store.create_goal("needle", CONTRACT.model_copy(update={"objective": "整理 Rocky 季度报告"}))
+    finish(store, "needle")
+    for index in range(3):
+        store.create_goal(f"other-{index}", CONTRACT)
+        finish(store, f"other-{index}")
+    assert [goal.goal_id for goal in store.list_goals(limit=2, query="季度")] == ["needle"]
+    assert store.list_goals_tag(2, query="季度") != store.list_goals_tag(2)
+    response = client.get("/goals", params={"query": "季度", "limit": 2}, headers=AUTH)
+    assert [goal["goal_id"] for goal in response.json()] == ["needle"]

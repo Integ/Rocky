@@ -1055,7 +1055,14 @@ class GoalWorkflow:
                     await self._end_phase({"error": cycle.error}, failed=True)
             self._check_limits()
             if cycle.verification and cycle.verification.passed and not cycle.error:
-                return await self._complete("succeeded", cycle.verification.feedback)
+                # The model's own summary is for the owner; the reviewer's
+                # feedback stays in the execution record.
+                summary = (
+                    cycle.decision.reason
+                    if cycle.decision and cycle.decision.kind == "finish" and cycle.decision.reason
+                    else cycle.verification.feedback
+                )
+                return await self._complete("succeeded", summary)
             if cycle.decision and cycle.decision.kind == "blocked" and not cycle.error:
                 cycle.blocked_reason = cycle.decision.reason
             if cycle.blocked_reason:

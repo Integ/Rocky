@@ -142,9 +142,11 @@ class DraftedContract(GoalContract):
     """A model-drafted contract with the drafter's concerns for owner review."""
 
     concerns: list[Criterion] = Field(default_factory=list, max_length=8)
+    # What drafting cost; it precedes the goal, so no task budget includes it.
+    drafting_tokens: int = Field(default=0, ge=0)
 
     def contract(self) -> GoalContract:
-        return GoalContract.model_validate(self.model_dump(exclude={"concerns"}))
+        return GoalContract.model_validate(self.model_dump(exclude={"concerns", "drafting_tokens"}))
 
 
 class Action(Model):

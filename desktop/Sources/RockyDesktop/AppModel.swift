@@ -29,6 +29,8 @@ final class AppModel: ObservableObject {
     @Published var pendingCommand: String?
     @Published var artifactContents: [String: String] = [:]
     @Published var artifactErrors: [String: String] = [:]
+    @Published var searchResults: [Goal] = []
+    private var searchTask: Task<Void, Never>?
     @Published var memories: [Memory] = []
     @Published var memoryProposals: [MemoryProposal] = []
     @Published private(set) var historyUpdates: Set<String> = []
@@ -38,6 +40,7 @@ final class AppModel: ObservableObject {
         var drafted: GoalContract
         var contract: GoalContract
         var warnings: [ContractWarning]
+        var draftingTokens: Int? = nil
         /// Idempotency key and the contract it was first sent with, so a retried
         /// submission cannot create a second goal and an edited one gets a new key.
         var key = UUID().uuidString
@@ -89,9 +92,25 @@ final class AppModel: ObservableObject {
     }
 
     var api: APIClient { client ?? APIClient(baseURL: runtime.apiURL, token: runtime.apiToken) }
-    var selected: Goal? { goals.first { $0.id == selectedID } }
+    var selected: Goal? { goals.first { $0.id == selectedID } ?? searchResults.first { $0.id == selectedID } }
     var visibleGoals: [Goal] {
-        goals.filter { $0.isArchived == showArchived && (showArchived || !onlyActive || !$0.state.isTerminal) && (search.isEmpty || $0.contract.objective.localizedCaseInsensitiveContains(search)) }
+        var seen = Set<String>()
+        let source = search.isEmpty ? goals : (goals + searchResults).filter { seen.insert($0.id).inserted }
+        return source.filter { $0.isArchived == showArchived && (showArchived || !onlyActive || !$0.state.isTerminal) && (search.isEmpty || $0.contract.objective.localizedCaseInsensitiveContains(search)) }
+    }
+
+    /// Older goals matching the search, found by the service.
+    func searchChanged() {
+        searchTask?.cancel()
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { searchResults = []; return }
+        let archived = showArchived
+        searchTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard let self, !Task.isCancelled else { return }
+            let found = (try? await self.api.searchGoals(String(query.prefix(200)), archived: archived)) ?? []
+            if !Task.isCancelled { self.searchResults = found }
+        }
     }
     var canSend: Bool { runtime.isReady && isConnected && !isSubmitting && !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (selected != nil || provider?.isConfigured == true) && (selected.map { !$0.state.isTerminal || $0.state.acceptsFollowUp } ?? true) && pendingCommand == nil }
 
@@ -268,7 +287,7 @@ final class AppModel: ObservableObject {
                 submissionStatus = "AI 正在拟定验收标准并评估执行预算…"
                 let review = try await api.prepareContract(submission)
                 if generation == selectionGeneration, selectedID == nil {
-                    contractReview = PendingReview(drafted: review.contract, contract: review.contract, warnings: review.warnings)
+                    contractReview = PendingReview(drafted: review.contract, contract: review.contract, warnings: review.warnings, draftingTokens: review.drafting_tokens)
                 }
                 return
             }
@@ -288,8 +307,16 @@ final class AppModel: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
 
+    /// Owner edits to the drafted criteria or deliverables. Budget warnings
+    /// depend only on the limits, so no check is needed.
+    func editReview(_ change: (inout GoalContract) -> Void) {
+        guard var review = contractReview else { return }
+        change(&review.contract)
+        contractReview = review
+    }
+
     func submitReviewed() async {
-        guard var review = contractReview, runtime.isReady, isConnected, !isSubmitting else { return }
+        guard var review = contractReview, review.contract.isSubmittable, runtime.isReady, isConnected, !isSubmitting else { return }
         let generation = selectionGeneration
         if review.keyContract != review.contract {
             review.key = UUID().uuidString

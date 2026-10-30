@@ -41,6 +41,8 @@ struct GoalContract: Codable, Equatable {
 struct ContractReview: Codable, Equatable {
     var contract: GoalContract
     var warnings: [ContractWarning]
+    /// Tokens the drafting call used; not charged to the task.
+    var drafting_tokens: Int?
 }
 
 struct ContractWarning: Codable, Equatable, Hashable {
@@ -105,6 +107,15 @@ struct TaskLimits: Codable, Equatable {
         try values.encode(max_model_calls, forKey: .max_model_calls)
         try values.encode(max_tokens, forKey: .max_tokens)
         try values.encode(timeout_seconds, forKey: .timeout_seconds)
+    }
+}
+
+extension GoalContract {
+    /// The service requires 1–20 nonblank criteria and deliverables.
+    var isSubmittable: Bool {
+        let blank = { (text: String) in text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return (1...20).contains(acceptance_criteria.count) && !acceptance_criteria.contains(where: blank)
+            && (1...20).contains(deliverables.count) && !deliverables.map(\.path).contains(where: blank)
     }
 }
 
@@ -175,6 +186,36 @@ struct RunState: Codable, Equatable {
     var isTerminal: Bool {
         ["succeeded", "failed", "cancelled", "budget_exhausted", "deadline_exceeded"].contains(status)
     }
+    /// The reason in the owner's language. Fixed system messages are English
+    /// on the service; the model's own words are shown as written.
+    var displayReason: String { Self.localized(reason) }
+
+    static func localized(_ reason: String) -> String {
+        let text = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let match = text.firstMatch(of: #/^(\d+) approval requests in a row went unanswered/#) {
+            return "连续 \(match.1) 次审批无人回应，任务已暂停。可在“审批”里补批，或发消息让它继续。"
+        }
+        for (prefix, message) in systemReasons where text.hasPrefix(prefix) { return message }
+        return reason
+    }
+
+    private static let systemReasons: [(String, String)] = [
+        ("Owner approval is required", "这项操作需要你批准，批准前不会执行。"),
+        ("The task's planning-step limit has been reached", "已达到步骤上限。可以加倍预算继续。"),
+        ("The task's model-call limit has been reached", "已达到模型调用上限。可以加倍预算继续。"),
+        ("The task's cumulative token limit has been reached", "已达到 token 上限。可以加倍预算继续。"),
+        ("The task's wall-clock limit has elapsed", "已到任务时限。可以延长时限继续。"),
+        ("Cancelled by the user", "任务已停止。"),
+        ("Execution cancelled", "任务已停止。"),
+        ("Continuing from saved progress with a larger budget", "已提高上限，正在从保存的进度继续。"),
+        ("Continuing with the owner's follow-up request", "正在按你的追加要求继续。"),
+        ("Recovering from saved progress", "正在从保存的进度恢复。"),
+        ("Recovery did not produce new progress", "重试没有带来新进展。请补充信息或解决依赖后发消息继续。"),
+        ("The action could not complete", "操作没有完成，Rocky 会先确认实际状态再换办法。"),
+        ("The reflection observer failed", "扩展检查失败，请检查扩展的依赖。"),
+        ("External input received", "收到你的消息，继续执行。"),
+    ]
+
     /// An ended task the owner can continue with a follow-up request.
     var acceptsFollowUp: Bool {
         ["succeeded", "cancelled", "budget_exhausted", "deadline_exceeded"].contains(status)

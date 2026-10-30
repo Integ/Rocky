@@ -43,6 +43,8 @@ from rocky.models import (
     RunState,
 )
 
+# Unfinished goals listed beyond the newest ones; far more than one Mac runs.
+MAX_LISTED_UNFINISHED = 200
 # Query terms and candidate rows bound the work of one memory search.
 _MEMORY_QUERY_TERMS = 64
 _MEMORY_CANDIDATES = 500
@@ -579,16 +581,43 @@ class Store:
             else GoalLifecycleRow.archived.is_not(True),
         )
 
-    def list_goals(self, limit: int = 50, *, archived: bool = False) -> list[GoalView]:
+    def _list_filter(self, limit: int, archived: bool, query: str) -> list:
+        """The newest goals, plus every unfinished one however old.
+
+        A long task created before the newest `limit` goals must stay visible,
+        and the supervisor must see it to keep the Mac awake. A query searches
+        objectives across all goals instead.
+        """
+        where = list(self._listed(archived))
+        if query:
+            where.append(
+                func.lower(GoalRow.contract["objective"].as_string()).contains(
+                    query.lower(), autoescape=True
+                )
+            )
+            return where
+        recent = select(GoalRow.goal_id).outerjoin(
+            GoalLifecycleRow, GoalLifecycleRow.goal_id == GoalRow.goal_id
+        )
+        # A subquery keeps each listing to one statement.
+        recent = recent.where(*where).order_by(GoalRow.created_at.desc()).limit(limit)
+        if archived:
+            return [*where, GoalRow.goal_id.in_(recent)]
+        unfinished = GoalRow.state["status"].as_string().not_in(TERMINAL_STATUSES)
+        return [*where, or_(GoalRow.goal_id.in_(recent), unfinished)]
+
+    def list_goals(
+        self, limit: int = 50, *, archived: bool = False, query: str = ""
+    ) -> list[GoalView]:
         with self.sessions() as session:
             return self._views(
                 session,
-                *self._listed(archived),
+                *self._list_filter(limit, archived, query),
                 order_by=GoalRow.created_at.desc(),
-                limit=limit,
+                limit=limit if query else limit + MAX_LISTED_UNFINISHED,
             )
 
-    def list_goals_tag(self, limit: int = 50, *, archived: bool = False) -> str:
+    def list_goals_tag(self, limit: int = 50, *, archived: bool = False, query: str = "") -> str:
         """A validator for list_goals that reads no contract or state JSON.
 
         Contracts, creation times and model settings never change after creation;
@@ -599,11 +628,11 @@ class Store:
             rows = session.execute(
                 select(GoalRow.goal_id, GoalRow.revision)
                 .outerjoin(GoalLifecycleRow, GoalLifecycleRow.goal_id == GoalRow.goal_id)
-                .where(*self._listed(archived))
+                .where(*self._list_filter(limit, archived, query))
                 .order_by(GoalRow.created_at.desc())
-                .limit(limit)
+                .limit(limit if query else limit + MAX_LISTED_UNFINISHED)
             )
-            digest = hashlib.sha256(f"{archived}:{limit}".encode())
+            digest = hashlib.sha256(f"{archived}:{limit}:{query}".encode())
             for goal_id, revision in rows:
                 digest.update(f"\n{goal_id}:{revision}".encode())
             return digest.hexdigest()[:32]

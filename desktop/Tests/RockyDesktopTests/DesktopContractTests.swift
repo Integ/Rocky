@@ -3,6 +3,24 @@ import XCTest
 @testable import RockyDesktop
 
 final class DesktopContractTests: XCTestCase {
+    func testEditedContractNeedsNonblankCriteriaAndDeliverables() throws {
+        let goal = try JSONDecoder().decode(Goal.self, from: Data(Self.goalJSON.utf8))
+        var contract = goal.contract
+        XCTAssertTrue(contract.isSubmittable)
+        contract.acceptance_criteria.append("  ")
+        XCTAssertFalse(contract.isSubmittable)
+        contract.acceptance_criteria.removeLast()
+        contract.deliverables = []
+        XCTAssertFalse(contract.isSubmittable)
+    }
+
+    func testSystemReasonsAreShownInChinese() {
+        XCTAssertEqual(RunState.localized("The task's wall-clock limit has elapsed."), "已到任务时限。可以延长时限继续。")
+        XCTAssertTrue(RunState.localized("3 approval requests in a row went unanswered. Review…").hasPrefix("连续 3 次审批"))
+        XCTAssertTrue(RunState.localized("Owner approval is required before running this shell command.").contains("批准"))
+        XCTAssertEqual(RunState.localized("报告已写好，见 report.md。"), "报告已写好，见 report.md。")
+    }
+
     func testMemoryProposalsDecodeFromTheService() throws {
         let json = """
         [{"proposal_id":"g:report-style","goal_id":"g","key":"report-style","kind":"preference",

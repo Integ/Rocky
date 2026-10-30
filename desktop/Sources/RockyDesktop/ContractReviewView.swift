@@ -27,7 +27,7 @@ struct ContractReviewView: View {
                 Image(systemName: "checklist").font(.system(size: 20)).foregroundStyle(Color.rockyAccent)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("提交前核对").font(.title2.weight(.semibold))
-                    Text("Rocky 会按这些标准验收结果。不合适就返回修改目标。").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text("Rocky 会按这些标准验收结果。可以直接修改标准和交付文件。").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Spacer()
             }.padding(.horizontal, 24).padding(.vertical, 20)
@@ -43,13 +43,27 @@ struct ContractReviewView: View {
                         Text("这些只是提醒，不会阻止提交。目标里缺少的资料，可以返回补充到目标中。")
                     }
                 }
-                Section("目标") {
+                Section {
                     Text(review.contract.objective).font(.system(size: 12)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                }
-                Section("验收标准") {
-                    ForEach(Array(review.contract.acceptance_criteria.enumerated()), id: \.offset) { index, criterion in
-                        Text("\(index + 1). \(criterion)").font(.system(size: 12)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                } header: { Text("目标") } footer: {
+                    if let tokens = review.draftingTokens {
+                        Text("拟定这份核对单用了 \(TaskLimits.tokens(tokens)) tokens，不计入任务预算。")
                     }
+                }
+                Section {
+                    ForEach(review.contract.acceptance_criteria.indices, id: \.self) { index in
+                        HStack(alignment: .top) {
+                            Text("\(index + 1).").font(.system(size: 12)).foregroundStyle(.secondary)
+                            TextField("验收标准", text: criterion(index), axis: .vertical).font(.system(size: 12)).lineLimit(1...4)
+                            removeButton(disabled: review.contract.acceptance_criteria.count <= 1) {
+                                model.editReview { $0.acceptance_criteria.remove(at: index) }
+                            }
+                        }
+                    }
+                    Button { model.editReview { $0.acceptance_criteria.append("") } } label: { Label("添加一条标准", systemImage: "plus") }
+                        .buttonStyle(.borderless).disabled(review.contract.acceptance_criteria.count >= 20)
+                } header: { Text("验收标准") } footer: {
+                    Text("可以直接修改、删除或补充；Rocky 会按改后的标准验收。")
                 }
                 if let folders = review.contract.folders, !folders.isEmpty {
                     Section {
@@ -59,7 +73,16 @@ struct ContractReviewView: View {
                     }
                 }
                 Section("交付文件") {
-                    ForEach(review.contract.deliverables, id: \.path) { Text($0.path).font(.system(size: 11, design: .monospaced)) }
+                    ForEach(review.contract.deliverables.indices, id: \.self) { index in
+                        HStack {
+                            TextField("文件路径，例如 report.md", text: deliverable(index)).font(.system(size: 11, design: .monospaced))
+                            removeButton(disabled: review.contract.deliverables.count <= 1) {
+                                model.editReview { $0.deliverables.remove(at: index) }
+                            }
+                        }
+                    }
+                    Button { model.editReview { $0.deliverables.append(Deliverable(path: "")) } } label: { Label("添加交付文件", systemImage: "plus") }
+                        .buttonStyle(.borderless).disabled(review.contract.deliverables.count >= 20)
                 }
                 Section {
                     Picker("预算", selection: Binding(get: { budgetFactor }, set: { factor in update(draftedLimits.scaledBudget(by: factor), keepTime: true) })) {
@@ -93,10 +116,29 @@ struct ContractReviewView: View {
                 Spacer()
                 Button("返回修改") { model.contractReview = nil }.buttonStyle(.bordered).keyboardShortcut(.cancelAction)
                 Button("提交任务") { Task { await model.submitReviewed() } }.buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction).disabled(model.isSubmitting || !model.isConnected)
+                    .keyboardShortcut(.defaultAction).disabled(model.isSubmitting || !model.isConnected || !review.contract.isSubmittable)
             }.padding(20)
         }
         .frame(width: 620, height: 640).tint(.rockyAccent)
+    }
+
+    private func criterion(_ index: Int) -> Binding<String> {
+        Binding(
+            get: { review.contract.acceptance_criteria.indices.contains(index) ? review.contract.acceptance_criteria[index] : "" },
+            set: { value in model.editReview { if $0.acceptance_criteria.indices.contains(index) { $0.acceptance_criteria[index] = value } } }
+        )
+    }
+
+    private func deliverable(_ index: Int) -> Binding<String> {
+        Binding(
+            get: { review.contract.deliverables.indices.contains(index) ? review.contract.deliverables[index].path : "" },
+            set: { value in model.editReview { if $0.deliverables.indices.contains(index) { $0.deliverables[index].path = value } } }
+        )
+    }
+
+    private func removeButton(disabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) { Image(systemName: "minus.circle") }
+            .buttonStyle(.borderless).foregroundStyle(.secondary).disabled(disabled).labelled("删除")
     }
 
     private func update(_ value: TaskLimits, keepTime: Bool) {

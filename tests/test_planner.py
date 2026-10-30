@@ -145,8 +145,9 @@ async def test_prepare_contract_uses_configured_model_and_generated_budget(limit
     assert "Reserve extra calls" in arguments["input"][0]["content"]
     assert "In concerns" in arguments["input"][0]["content"]
     assert contract.concerns == []
+    assert contract.drafting_tokens > 0
     assert contract.contract() == GoalContract.model_validate(
-        contract.model_dump(exclude={"concerns"})
+        contract.model_dump(exclude={"concerns", "drafting_tokens"})
     )
     assert json.loads(arguments["input"][1]["content"]) == {"objective": draft.objective}
     assert draft.objective not in arguments["input"][0]["content"]

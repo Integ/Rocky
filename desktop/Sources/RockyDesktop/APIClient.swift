@@ -61,6 +61,16 @@ struct APIClient {
         if response.statusCode == 304 { return nil }
         return GoalList(goals: try decode(data), tag: response.value(forHTTPHeaderField: "ETag"))
     }
+    /// Searches every goal's objective, not only the loaded pages.
+    func searchGoals(_ query: String, archived: Bool) async throws -> [Goal] {
+        var parts = URLComponents()
+        parts.path = "/goals"
+        parts.queryItems = [
+            URLQueryItem(name: "limit", value: "100"), URLQueryItem(name: "archived", value: "\(archived)"),
+            URLQueryItem(name: "query", value: query),
+        ]
+        return try await request(parts.string!)
+    }
     func setArchived(_ id: String, archived: Bool) async throws -> Goal {
         try await request("/goals/\(id)/\(archived ? "archive" : "restore")", method: "POST")
     }
