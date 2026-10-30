@@ -29,6 +29,8 @@ final class AppModel: ObservableObject {
     @Published var pendingCommand: String?
     @Published var artifactContents: [String: String] = [:]
     @Published var artifactErrors: [String: String] = [:]
+    @Published var memories: [Memory] = []
+    @Published var memoryProposals: [MemoryProposal] = []
     @Published private(set) var historyUpdates: Set<String> = []
 
     struct PendingReview: Equatable {
@@ -125,6 +127,7 @@ final class AppModel: ObservableObject {
                 delivery?.updateBadge(attentionGoals.count)
             }
             provider = settings
+            if let proposals = try? await api.memoryProposals(), proposals != memoryProposals { memoryProposals = proposals }
             isConnected = true
             if hadConnectionError { error = nil; hadConnectionError = false }
             await loadSelection()
@@ -326,6 +329,39 @@ final class AppModel: ObservableObject {
             if let index = goals.firstIndex(where: { $0.id == goal.id }) { goals[index] = extended }
             if selectedID == goal.id { showArchived = false }
             await refresh()
+        } catch { self.error = error.localizedDescription }
+    }
+
+    func proposals(for goal: Goal) -> [MemoryProposal] { memoryProposals.filter { $0.goal_id == goal.id } }
+
+    func loadMemories() async {
+        do { memories = try await api.memories() } catch { self.error = error.localizedDescription }
+    }
+
+    func resolve(_ proposal: MemoryProposal, save: Bool, content: String? = nil) async {
+        do {
+            let edited = content?.trimmingCharacters(in: .whitespacesAndNewlines)
+            try await api.resolveProposal(proposal.id, save: save, content: edited == proposal.content ? nil : edited)
+            memoryProposals.removeAll { $0.id == proposal.id }
+            if save { await loadMemories() }
+        } catch { self.error = error.localizedDescription }
+    }
+
+    /// Adds a memory by hand; the key is derived from the time so it never collides.
+    func remember(kind: String, content: String) async -> Bool {
+        let text = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return false }
+        do {
+            _ = try await api.putMemory(key: "owner-\(Int(Date().timeIntervalSince1970 * 1000))", kind: kind, content: text)
+            await loadMemories()
+            return true
+        } catch { self.error = error.localizedDescription; return false }
+    }
+
+    func forget(_ memory: Memory) async {
+        do {
+            try await api.deleteMemory(memory)
+            memories.removeAll { $0.key == memory.key }
         } catch { self.error = error.localizedDescription }
     }
 

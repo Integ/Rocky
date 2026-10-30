@@ -171,6 +171,11 @@ class MemoryRequest(Model):
     expected_revision: int | None = Field(default=None, ge=0)
 
 
+class ProposalDecision(Model):
+    # The owner may edit a suggestion before saving it.
+    content: str | None = Field(default=None, min_length=1, max_length=8000)
+
+
 ApprovalScope = Literal["action", "task", "always", "deny", "deferred", "dismiss"]
 
 
@@ -439,6 +444,26 @@ def create_app(
         except KeyError:
             raise HTTPException(404, "Memory not found") from None
         except MemoryConflictError as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @app.get("/memory-proposals", dependencies=auth)
+    def get_memory_proposals(goal_id: str | None = None):
+        return database.memory_proposals(goal_id)
+
+    @app.post("/memory-proposals/{proposal_id}/save", dependencies=auth)
+    def save_memory_proposal(proposal_id: str, request: ProposalDecision | None = None):
+        return _resolve_proposal(proposal_id, save=True, content=request and request.content)
+
+    @app.post("/memory-proposals/{proposal_id}/dismiss", dependencies=auth)
+    def dismiss_memory_proposal(proposal_id: str):
+        return _resolve_proposal(proposal_id, save=False)
+
+    def _resolve_proposal(proposal_id: str, *, save: bool, content: str | None = None):
+        try:
+            return database.resolve_memory_proposal(proposal_id, save=save, content=content)
+        except KeyError:
+            raise HTTPException(404, "Suggestion not found") from None
+        except ValueError as exc:
             raise HTTPException(409, str(exc)) from None
 
     @app.get("/goals/{goal_id}", response_model=GoalView, dependencies=auth)

@@ -192,6 +192,19 @@ class TaskProgress(Model):
     evidence: list[ProgressItem] = Field(default_factory=list, max_length=12)
 
 
+MemoryKind = Literal["preference", "decision", "correction", "pitfall"]
+MAX_MEMORY_PROPOSALS = 3
+
+
+class MemoryProposal(Model):
+    """A lasting fact the model suggests keeping; saved only when the owner agrees."""
+
+    key: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9._-]*$")
+    kind: MemoryKind
+    content: str = Field(min_length=1, max_length=1000)
+    keywords: str = Field(default="", max_length=200)
+
+
 class Decision(Model):
     kind: Literal["act", "wait", "finish", "blocked"]
     reason: str = Field(max_length=2000)
@@ -201,6 +214,10 @@ class Decision(Model):
     wait_seconds: int | None = None
     handoff_summary: str | None = Field(default=None, max_length=4000)
     task_progress: TaskProgress | None = None
+    # Only with finish or blocked; the owner reviews each before it is kept.
+    memory_proposals: list[MemoryProposal] | None = Field(
+        default=None, max_length=MAX_MEMORY_PROPOSALS
+    )
 
 
 class Artifact(Model):

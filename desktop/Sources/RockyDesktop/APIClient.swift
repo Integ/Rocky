@@ -149,6 +149,19 @@ struct APIClient {
     func deleteApprovalRule(_ id: String) async throws {
         _ = try await rawRequest("/approval-rules/\(id)", method: "DELETE")
     }
+    func memories() async throws -> [Memory] { try await request("/memories?limit=100") }
+    func putMemory(key: String, kind: String, content: String) async throws -> Memory {
+        try await request("/memories/\(key)", method: "PUT", body: JSONEncoder().encode(["kind": kind, "content": content]))
+    }
+    func deleteMemory(_ memory: Memory) async throws {
+        _ = try await rawRequest("/memories/\(memory.key)?expected_revision=\(memory.revision)", method: "DELETE")
+    }
+    func memoryProposals() async throws -> [MemoryProposal] { try await request("/memory-proposals") }
+    func resolveProposal(_ id: String, save: Bool, content: String? = nil) async throws {
+        let body = try content.map { try JSONEncoder().encode(["content": $0]) }
+        let path = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? id
+        _ = try await rawRequest("/memory-proposals/\(path)/\(save ? "save" : "dismiss")", method: "POST", body: body)
+    }
     func artifact(_ id: String, path: String) async throws -> ArtifactContent {
         var parts = URLComponents()
         parts.path = "/goals/\(id)/artifacts/content"

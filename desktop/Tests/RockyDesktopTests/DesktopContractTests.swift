@@ -3,6 +3,21 @@ import XCTest
 @testable import RockyDesktop
 
 final class DesktopContractTests: XCTestCase {
+    func testMemoryProposalsDecodeFromTheService() throws {
+        let json = """
+        [{"proposal_id":"g:report-style","goal_id":"g","key":"report-style","kind":"preference",
+          "content":"用中文写报告。","keywords":"","status":"pending","created_at":"2026-10-30","replaces":null}]
+        """
+        let proposals = try JSONDecoder().decode([MemoryProposal].self, from: Data(json.utf8))
+        XCTAssertEqual(proposals.first?.id, "g:report-style")
+        XCTAssertEqual(proposals.first?.kindLabel, "偏好")
+        XCTAssertNil(proposals.first?.replaces)
+        let memory = try JSONDecoder().decode(Memory.self, from: Data("""
+        {"key":"k","kind":"pitfall","content":"c","keywords":"","source":"goal:g","priority":0,"revision":2,"active":true,"updated_at":"x"}
+        """.utf8))
+        XCTAssertEqual(memory.revision, 2)
+    }
+
     func testSubmissionOnlyRequiresObjective() throws {
         let draft = try GoalDraft(objective: "  编写报告  ")
         let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(draft)) as! [String: Any]

@@ -96,9 +96,16 @@ class Activities:
         request.approvals = policy.planning_context()
         await self.check_cancelled(request.run.goal_id)
         try:
-            return await self.planner.plan(request)
+            result = await self.planner.plan(request)
         except PlannerError as error:
             raise _model_failure(error) from None
+        decision = result.decision
+        if decision.memory_proposals and decision.kind in ("finish", "blocked"):
+            # Suggestions only: nothing reaches memory until the owner saves it.
+            await asyncio.to_thread(
+                self.store.propose_memories, request.run.goal_id, decision.memory_proposals
+            )
+        return result
 
     @activity.defn(name="rocky.phase")
     async def phase(self, request: PhaseInput) -> PhaseResult:

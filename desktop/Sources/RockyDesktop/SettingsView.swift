@@ -101,6 +101,7 @@ struct SettingsView: View {
                         Text("仅显示所选模型支持的档位。更高的思考程度可能增加响应时间和用量。")
                     }
                 }
+                MemorySection(model: model)
                 Section {
                     Toggle("关闭窗口后留在菜单栏", isOn: $keepInMenuBar)
                     Button("打开系统通知设置") {

@@ -34,7 +34,14 @@ from sqlalchemy.pool import StaticPool
 
 from rocky.approval_policy import MAX_RULES, ApprovalPolicy, ApprovalRule, ApprovalSettings
 from rocky.inference import ModelSettings
-from rocky.models import ExecutionLimits, GoalContract, GoalView, RunState
+from rocky.models import (
+    MAX_MEMORY_PROPOSALS,
+    ExecutionLimits,
+    GoalContract,
+    GoalView,
+    MemoryProposal,
+    RunState,
+)
 
 # Query terms and candidate rows bound the work of one memory search.
 _MEMORY_QUERY_TERMS = 64
@@ -241,6 +248,21 @@ class MemoryRow(Base):
     revision: Mapped[int] = mapped_column(Integer, default=1)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     updated_at: Mapped[str] = mapped_column(String(64))
+
+
+class MemoryProposalRow(Base):
+    """A memory the model suggested during a goal, waiting for the owner."""
+
+    __tablename__ = "memory_proposals"
+    proposal_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    goal_id: Mapped[str] = mapped_column(String(128), index=True)
+    key: Mapped[str] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(16))
+    content: Mapped[str] = mapped_column(Text)
+    keywords: Mapped[str] = mapped_column(String(200), default="")
+    # pending, saved or dismissed; a dismissed proposal is not suggested again.
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    created_at: Mapped[str] = mapped_column(String(64))
 
 
 class SchemaVersionRow(Base):
@@ -1011,6 +1033,7 @@ class Store:
                 ExecutionStepRow,
                 ExecutionEventRow,
                 KnowledgeRow,
+                MemoryProposalRow,
             ):
                 session.execute(delete(table).where(table.goal_id == goal_id))
 
@@ -1659,6 +1682,88 @@ class Store:
             row.revision += 1
             row.updated_at = datetime.now(UTC).isoformat()
             return self._memory_view(row)
+
+    def propose_memories(self, goal_id: str, proposals: list[MemoryProposal]) -> None:
+        """Record suggestions once per goal and key; retries change nothing."""
+        now = datetime.now(UTC).isoformat()
+        with self.sessions.begin() as session:
+            for proposal in proposals[:MAX_MEMORY_PROPOSALS]:
+                proposal_id = f"{goal_id}:{proposal.key}"
+                if session.get(MemoryProposalRow, proposal_id) is not None:
+                    continue
+                existing = session.get(MemoryRow, proposal.key)
+                if (
+                    existing is not None
+                    and existing.active
+                    and existing.content == proposal.content
+                ):
+                    continue
+                session.add(
+                    MemoryProposalRow(
+                        proposal_id=proposal_id,
+                        goal_id=goal_id,
+                        key=proposal.key,
+                        kind=proposal.kind,
+                        content=proposal.content,
+                        keywords=proposal.keywords,
+                        status="pending",
+                        created_at=now,
+                    )
+                )
+
+    @staticmethod
+    def _proposal_view(row: MemoryProposalRow, current: MemoryRow | None) -> dict:
+        return {
+            "proposal_id": row.proposal_id,
+            "goal_id": row.goal_id,
+            "key": row.key,
+            "kind": row.kind,
+            "content": row.content,
+            "keywords": row.keywords,
+            "status": row.status,
+            "created_at": row.created_at,
+            # A proposal for a key already in memory replaces that memory.
+            "replaces": current.content if current is not None and current.active else None,
+        }
+
+    def memory_proposals(self, goal_id: str | None = None) -> list[dict]:
+        statement = select(MemoryProposalRow).where(MemoryProposalRow.status == "pending")
+        if goal_id is not None:
+            statement = statement.where(MemoryProposalRow.goal_id == goal_id)
+        with self.sessions() as session:
+            rows = list(session.scalars(statement.order_by(MemoryProposalRow.created_at).limit(50)))
+            return [self._proposal_view(row, session.get(MemoryRow, row.key)) for row in rows]
+
+    def resolve_memory_proposal(
+        self, proposal_id: str, *, save: bool, content: str | None = None
+    ) -> dict:
+        """Save (optionally edited) or dismiss a pending proposal."""
+        with self.sessions.begin() as session:
+            row = session.get(MemoryProposalRow, proposal_id)
+            if row is None:
+                raise KeyError(proposal_id)
+            if row.status != "pending":
+                raise ValueError("This suggestion was already handled")
+            row.status = "saved" if save else "dismissed"
+            current = session.get(MemoryRow, row.key)
+            view = self._proposal_view(row, current)
+            revision = current.revision if current is not None else None
+        if not save:
+            return view
+        try:
+            self.put_memory(
+                view["key"],
+                view["kind"],
+                (content if content is not None else view["content"]).strip(),
+                keywords=view["keywords"],
+                source=f"goal:{view['goal_id']}",
+                expected_revision=revision,
+            )
+        except ValueError:
+            with self.sessions.begin() as session:
+                session.get(MemoryProposalRow, proposal_id).status = "pending"
+            raise
+        return {**view, "status": "saved"}
 
     def mark_command_sent(self, command_id: str) -> None:
         with self.sessions.begin() as session:

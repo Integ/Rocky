@@ -527,3 +527,36 @@ enum InputError: LocalizedError {
 extension String {
     var lines: [String] { split(separator: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty } }
 }
+
+/// A lasting fact saved for future tasks.
+struct Memory: Codable, Identifiable, Equatable {
+    var key: String
+    var kind: String
+    var content: String
+    var revision: Int
+    var source: String?
+    var id: String { key }
+}
+
+/// A memory Rocky suggested; nothing is kept until the owner saves it.
+struct MemoryProposal: Codable, Identifiable, Equatable {
+    var proposal_id: String
+    var goal_id: String
+    var key: String
+    var kind: String
+    var content: String
+    var replaces: String?
+    var id: String { proposal_id }
+
+    static let kinds = ["preference", "decision", "correction", "pitfall"]
+    static func label(_ kind: String) -> String {
+        switch kind {
+        case "preference": "偏好"
+        case "decision": "决定"
+        case "correction": "更正"
+        case "pitfall": "注意事项"
+        default: kind
+        }
+    }
+    var kindLabel: String { Self.label(kind) }
+}

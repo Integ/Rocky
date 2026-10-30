@@ -257,6 +257,10 @@ struct WorkspaceView: View {
                             ForEach(goal.state.artifacts) { artifact in
                                 artifactCard(artifact)
                             }
+                            let proposals = model.proposals(for: goal)
+                            if !proposals.isEmpty {
+                                MemoryProposalsCard(model: model, proposals: proposals)
+                            }
                             if let pending = model.pendingCommand {
                                 Label(pending, systemImage: "clock").font(.system(size: 11)).foregroundStyle(.secondary)
                             }
