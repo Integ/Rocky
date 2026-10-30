@@ -3,6 +3,10 @@
 **Rocky 是一个长期运行的自主数字代理。** 提交目标、验收标准和执行范围后，Rocky
 自主规划下一步、调用工具、核验产物，并在等待、重启和人工反馈之后继续工作。
 
+[![Rocky 一分钟介绍](docs/media/rocky-intro.gif)](docs/media/rocky-intro.mp4)
+
+▶ [观看一分钟介绍视频](docs/media/rocky-intro.mp4)（MP4，带中文字幕；画面为示意动画）
+
 macOS 原生应用是 Rocky 唯一的客户端，使用 SwiftUI 提供任务历史、对话式输入、执行记录、文件预览与模型设置。
 执行内核使用 Python、Temporal 和 SQLite / PostgreSQL，支持 OpenAI、第三方兼容 API、Anthropic 和本机 Ollama。
 
