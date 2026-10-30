@@ -13,7 +13,7 @@ Rocky 只提供 macOS 原生客户端，使用 SwiftUI。任务历史、任务�
 open dist/Rocky.app
 ```
 
-构建需要 Xcode Command Line Tools 和网络连接；脚本会准备应用需要的运行工具并生成 `dist/Rocky.app`。可以将应用拖到“应用程序”文件夹后使用。首次打开时，应用会在用户的 Application Support 目录准备 Python 和项目依赖，随后启动本地 API、任务 worker 和持久化 Temporal 服务。首次准备需要网络；之后无需保留终端或打开浏览器。
+构建需要 Xcode Command Line Tools 和网络连接；脚本会准备应用需要的运行工具并生成 `dist/Rocky.app`。可以将应用拖到“应用程序”文件夹后使用。应用内置 Python 和全部锁定的依赖：首次打开或升级后，应用在用户的 Application Support 目录离线准备运行环境，随后启动本地 API、任务 worker 和持久化 Temporal 服务；同一版本再次启动时直接运行，不调用 uv、不需要网络。设置 `ROCKY_SKIP_OFFLINE_BUNDLE=1` 构建的应用体积更小，但首次准备需要访问 PyPI 和 GitHub。之后无需保留终端或打开浏览器。
 
 这是本机构建并临时签名的应用。面向其他用户分发的版本仍需要开发者自己的 Developer ID 签名和 Apple 公证。
 

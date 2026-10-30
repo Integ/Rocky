@@ -56,10 +56,30 @@ export ROCKY_TEMPORAL_BIN="$BIN/temporal" ROCKY_TEMPORAL_DB="$SUPPORT/data/tempo
 export ROCKY_PREVENT_SLEEP=1
 
 cd "$PROJECT"
-if ! "$BIN/uv" sync --frozen --no-dev --no-editable --python 3.12 --managed-python \
-     --reinstall-package rocky-agent; then
-  status failed "Python 环境准备失败。检查网络后会自动重试；详细信息见 agent.log。"
-  exit 1
+BUILD_ID="$(cat "$RESOURCES/backend/BUILD_ID")"
+OFFLINE="$RESOURCES/runtime/offline.tar.gz"
+STAMP="$PROJECT/.venv/.rocky-build"
+sync_environment() {
+  "$BIN/uv" sync --frozen --no-dev --no-editable --python 3.12 --managed-python \
+    --reinstall-package rocky-agent "$@"
+}
+# An environment already prepared for this build starts without uv at all.
+if [[ ! -x "$PROJECT/.venv/bin/python" || ! -f "$STAMP" || "$(cat "$STAMP")" != "$BUILD_ID" ]]; then
+  ready=0
+  if [[ -f "$OFFLINE" ]]; then
+    if [[ "$(cat "$SUPPORT/cache/offline-build" 2>/dev/null || true)" != "$BUILD_ID" ]]; then
+      status preparing "正在解压内置的 Python 运行环境"
+      # The archive holds cache/uv and runtime/python, merged into the support folder.
+      /usr/bin/tar -xzf "$OFFLINE" -C "$SUPPORT" && echo "$BUILD_ID" >"$SUPPORT/cache/offline-build"
+    fi
+    sync_environment --offline && ready=1
+  fi
+  # A build without the bundle, or one that is missing a package, downloads.
+  if [[ $ready == 0 ]] && ! sync_environment; then
+    status failed "Python 环境准备失败。检查网络后会自动重试；详细信息见 agent.log。"
+    exit 1
+  fi
+  echo "$BUILD_ID" >"$STAMP"
 fi
 # The client compares this with the bundle to restart a service left over
 # from an older app version.

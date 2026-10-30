@@ -81,6 +81,22 @@ else
 fi
 chmod 755 "$RESOURCES/runtime/bin/uv" "$RESOURCES/runtime/bin/temporal" "$RESOURCES/runtime/bin/rocky-agent" \
   "$APP/Contents/MacOS/RockyDesktop"
+
+# Ship Python and every locked dependency, so first launch and upgrades set up
+# the service without a network (or a slow route to PyPI and GitHub).
+# ROCKY_SKIP_OFFLINE_BUNDLE=1 builds a smaller app that downloads them instead.
+if [[ "${ROCKY_SKIP_OFFLINE_BUNDLE:-}" != "1" ]]; then
+  echo "Bundling Python and dependencies for offline setup…"
+  OFFLINE="$STAGE/offline"
+  mkdir -p "$OFFLINE/cache/uv" "$OFFLINE/runtime/python" "$STAGE/sync"
+  cp -R "$RESOURCES/backend/." "$STAGE/sync/"
+  (cd "$STAGE/sync" && env UV_CACHE_DIR="$OFFLINE/cache/uv" UV_PYTHON_INSTALL_DIR="$OFFLINE/runtime/python" \
+    UV_PROJECT_ENVIRONMENT="$STAGE/sync/.venv" UV_NO_CONFIG=1 UV_NO_ENV_FILE=1 \
+    "$RESOURCES/runtime/bin/uv" sync --frozen --no-dev --no-editable --python 3.12 --managed-python)
+  # Keep downloaded wheels and the build backend; drop only unreferenced entries.
+  env UV_CACHE_DIR="$OFFLINE/cache/uv" "$RESOURCES/runtime/bin/uv" cache prune
+  tar -czf "$RESOURCES/runtime/offline.tar.gz" -C "$OFFLINE" cache runtime
+fi
 plutil -lint "$APP/Contents/Library/LaunchAgents/dev.rocky.agent.plist" >/dev/null
 if [[ -f "$ROOT/scripts/make_app_icon.swift" ]]; then
   swift -module-cache-path "$ROOT/desktop/.cache/modules" "$ROOT/scripts/make_app_icon.swift" \
