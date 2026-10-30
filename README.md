@@ -41,7 +41,7 @@ Temporal 本地引擎。首次打开应用会注册 Rocky 后台服务（launchd
 设置不会返回密钥明文。Ollama 可以不填密钥，但需事先启动本机 Ollama 并下载模型。
 
 `⌘N` 新建任务，`⌘↩` 提交；验收标准、产物路径和执行预算由 AI 根据目标及任务难度拟定，提交前先给你核对并提示缺少的资料或偏紧的预算，可以返回修改或调大预算和时限。默认完整权限，无需配置域名白名单。
-需要审批时，任务详情展示完整操作，点击“批准此操作”继续同一操作，或取消任务。任务结束后可直接预览、导出文件。关闭窗口或退出应用不会停止后台服务，
+需要审批时，任务详情展示完整操作，点击“批准此操作”继续同一操作，或取消任务。任务需要审批、等你回复或结束时，Rocky 发送系统通知（点通知打开该任务），Dock 图标显示等你处理的任务数，一直等你的任务每 3 小时再提醒一次；关闭窗口后默认留在菜单栏继续提醒，可在设置的“通知”中关闭。任务结束后可直接预览、导出文件。关闭窗口或退出应用不会停止后台服务，
 任务继续执行，下次打开应用直接连接；后台服务崩溃后由 launchd 自动重启并恢复未结束任务。有任务运行时，后台服务会阻止 Mac 空闲睡眠，
 但合盖或手动睡眠时任务暂停，唤醒后继续。设置中可重启或停止后台服务。已结束任务支持存档、恢复和删除；删除任务会同时删除执行记录和工作区文件（含交付物），只想移出列表请用存档。
 
@@ -134,11 +134,11 @@ Compose 显式使用 `ROCKY_AUTH_MODE=token`，因为容器内请求来自容器
 
 Python 文件工具可使用绝对路径和隐藏文件，但包括 `full` 模式在内，一律禁止访问工作区根目录中的其他任务和私有 `.rocky/` 控制目录；路径遍历、符号链接和硬链接也不能绕过限制。读取、写入、追加、编辑、目录列表、HTTP 下载目标及验收文件读取都遵守此边界。在 `required` 审批模式下，写入、追加、编辑或下载到当前任务目录之外的路径（包括经任务内符号链接指向外部的路径），以及读取或列出凭据存储（`~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.netrc`、`~/.config/gh`、`~/Library/Keychains`、浏览器配置等），都需要所有者逐次批准完整操作，所有者规则和本任务同类授权都不能放行。工作区之外的其他文件可直接读取。产物相对路径用于结果核验和导出。
 
-macOS 上的 `run_command` 默认通过 `/usr/bin/sandbox-exec -p <按 goal 生成的 SBPL profile>` 执行。命令只能写当前任务目录，不能读写其他任务或 `.rocky/`；临时文件、Python/uv/pip/npm 缓存位于任务内的 `.rocky-sandbox/`，因此 `uv`、`git`、`python` 可正常创建项目、虚拟环境及缓存。子进程和脱离原进程组的后台作业继承同一 Seatbelt 限制。上述凭据存储在沙箱内不可读，需要它们的命令（如走 SSH 的 `git push`、`gh`、`aws`）须申请 `sandbox=false`；其他普通文件可读，网络访问继续开放；此机制提供文件及进程隔离，不提供网络隔离或资源配额。非 macOS、缺少 Seatbelt 或系统拒绝加载 profile 时，命令执行失败，不会自动降级为无沙箱执行。
+macOS 上的 `run_command` 默认通过 `/usr/bin/sandbox-exec -p <按 goal 生成的 SBPL profile>` 执行。命令只能写当前任务目录，不能读写其他任务或 `.rocky/`；临时文件、Python/uv/pip/npm 缓存位于任务内的 `.rocky-sandbox/`，因此 `uv`、`git`、`python` 可正常创建项目、虚拟环境及缓存。子进程和后台作业继承同一 Seatbelt 限制。上述凭据存储在沙箱内不可读，需要它们的命令（如走 SSH 的 `git push`、`gh`、`aws`）须申请 `sandbox=false`；其他普通文件可读，网络访问继续开放；此机制提供文件及进程隔离，不提供网络隔离或资源配额。非 macOS、缺少 Seatbelt 或系统拒绝加载 profile 时，命令执行失败，不会自动降级为无沙箱执行。
 
 后台服务的 Rocky/Temporal 及常见 API 凭据环境变量不会传给沙箱命令，Python/uv 也不会继承后台服务的虚拟环境配置。配置中的凭据文件、SQLite 数据库及其 WAL/SHM/回滚日志，以及 `rocky serve` 的 API 令牌、Temporal 数据库、`run/` 状态目录和日志目录（`ROCKY_API_TOKEN_FILE`、`ROCKY_TEMPORAL_DB`、`ROCKY_RUN_DIR`、`ROCKY_LOG_DIR`），文件工具和沙箱命令都不能读写；文件工具也不能改写正在运行的 Rocky 代码或 Python 环境。命令和 HTTP 工具（包括重定向）不能连接配置的 Rocky API、Temporal 目标端口，防止任务调用控制接口自行审批。这些端口在所有目标地址上保留，普通外部服务若使用相同端口也会被阻止。
 
-`http_request` 的 `content` 为 JSON 配置，例如 `{"method":"POST","data":{"username":"…","password":"…"},"session":"platform"}`；后续请求使用相同 `session` 自动携带 Cookie。可用 `headers` / `json` / `body` / `auth` 配置其他认证方式，`path` 保存完整响应文件。会话按任务和名称隔离，私有持久存储，重启后可复用。`run_command` 的 `content` 为 Shell 命令，`path` 可指定工作目录。单次请求或命令最多 30 秒，较长计算可作为后台作业运行并在后续步骤查看文件结果。
+`http_request` 的 `content` 为 JSON 配置，例如 `{"method":"POST","data":{"username":"…","password":"…"},"session":"platform"}`；后续请求使用相同 `session` 自动携带 Cookie。可用 `headers` / `json` / `body` / `auth` 配置其他认证方式，`path` 保存完整响应文件。会话按任务和名称隔离，私有持久存储，重启后可复用。`run_command` 的 `content` 为 Shell 命令，`path` 可指定工作目录。单次 HTTP 请求最多 30 秒。命令默认最多 30 秒，可用 `timeout_seconds` 申请最长 900 秒（构建、安装依赖、测试套件）；命令返回时它留下的子进程会被结束。更长的工作或需要一直运行的服务用 `background: true` 作为后台作业启动：调用立即返回作业 ID，输出写入任务目录的 `.rocky-jobs/<id>.log`，结束后在 `.rocky-jobs/<id>.exit` 写入退出码。每个任务最多同时 4 个后台作业，单个最长 6 小时，任务结束或删除时全部停止。`timeout_seconds` 和 `background` 属于审批内容，改动它们会使原审批失效。
 
 `ROCKY_APPROVAL_MODE=required` 是默认值：每条 Shell 命令，以及 GET/HEAD/OPTIONS 以外的 HTTP 请求，都要先经过分级审批。审批绑定任务、操作 ID 和完整参数，普通唤醒消息或网页中的“已批准”不会授权。依次检查：
 

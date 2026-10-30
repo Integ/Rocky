@@ -28,7 +28,7 @@ from rocky.models import (
     VerifyInput,
 )
 from rocky.planner import OpenAIPlanner, PlannerError, TransientModelError
-from rocky.store import Store
+from rocky.store import TERMINAL_STATUSES, Store
 from rocky.tools import WorkspaceTools
 
 
@@ -208,3 +208,10 @@ class Activities:
     @activity.defn(name="rocky.persist")
     async def persist(self, state: RunState) -> None:
         await asyncio.to_thread(self.store.save_state, state)
+        stop_jobs = getattr(self.tools, "stop_jobs", None)
+        if state.status in TERMINAL_STATUSES and stop_jobs is not None:
+            # A finished task leaves no background job running.
+            try:
+                await asyncio.to_thread(stop_jobs, state.goal_id)
+            except Exception:
+                activity.logger.warning("Could not stop a finished task's background jobs")

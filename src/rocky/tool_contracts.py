@@ -32,6 +32,7 @@ def approval_fingerprint(request: ToolInput) -> str:
     # before sandbox was an Action field. An opt-out changes the reviewed act.
     if not request.action.sandbox:
         action["sandbox"] = False
+    action.update(_command_options(request.action))
     payload = {
         "goal_id": request.run.goal_id,
         "operation_id": request.operation_id,
@@ -39,6 +40,19 @@ def approval_fingerprint(request: ToolInput) -> str:
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def _command_options(action: Action) -> dict:
+    """Timeout and background options that change the reviewed act.
+
+    Unset options are left out so identities recorded before they existed
+    stay valid.
+    """
+    return {
+        key: value
+        for key, value in action.model_dump(include={"timeout_seconds", "background"}).items()
+        if value is not None
+    }
 
 
 def action_identity(goal_id: str, action: Action) -> str:
@@ -49,7 +63,10 @@ def action_identity(goal_id: str, action: Action) -> str:
     """
     payload = {
         "goal_id": goal_id,
-        "action": action.model_dump(include={"tool", "path", "url", "content", "sandbox"}),
+        "action": {
+            **action.model_dump(include={"tool", "path", "url", "content", "sandbox"}),
+            **_command_options(action),
+        },
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode()).hexdigest()
@@ -184,10 +201,20 @@ def validate_action(action: Action, *, full_access: bool) -> dict | None:
         raise ActionValidationError("append_file requires nonempty content to append.")
     if action.tool == "edit_file":
         parse_edits(action.content)
+    if action.tool != "run_command" and (
+        action.timeout_seconds is not None or action.background is not None
+    ):
+        raise ActionValidationError(
+            f"{action.tool} does not accept timeout_seconds or background; set them to null."
+        )
     if action.tool == "run_command":
         if not action.content or not action.content.strip() or "\x00" in action.content:
             raise ActionValidationError(
                 "run_command requires a nonempty shell command in content without NUL characters."
+            )
+        if action.background and action.timeout_seconds is not None:
+            raise ActionValidationError(
+                "A background job has no timeout; set timeout_seconds to null when background is true."
             )
     if action.tool not in {"fetch_url", "http_request"}:
         return None

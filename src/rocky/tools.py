@@ -38,6 +38,8 @@ from rocky.command_policy import command_class, command_words
 from rocky.config import Settings
 from rocky.http_tools import HTTPToolError, request_http
 from rocky.models import (
+    DEFAULT_COMMAND_SECONDS,
+    MAX_COMMAND_SECONDS,
     Artifact,
     RunInput,
     ToolInput,
@@ -188,14 +190,34 @@ def _changed(before: dict, after: dict) -> list[str]:
     return [path for path, signature in after.items() if before.get(path) != signature]
 
 
+# Background jobs per task, and how long one may run.
+MAX_JOBS = 4
+MAX_JOB_SECONDS = 6 * 3600
+
+
+def _kill_group(pgid: int, signum: int = signal.SIGKILL) -> None:
+    if pgid <= 1:
+        # 0 and 1 would signal Rocky's own group or every process.
+        return
+    try:
+        os.killpg(pgid, signum)
+    except OSError:
+        pass
+
+
 def _operation_fingerprint(request: ToolInput) -> str:
     # Keep the original v0.1 ToolInput serialization byte-for-byte. Inference
     # settings do not change tool semantics; including them would invalidate
     # durable receipts when old Activity inputs are decoded by newer workers.
     exclude = {"run": {"contract": {"limits"}}}
+    # Adding a default must not invalidate receipts written before the field.
+    unset = {
+        name for name in ("timeout_seconds", "background") if getattr(request.action, name) is None
+    }
     if request.action.sandbox:
-        # Adding the default must not invalidate completed pre-sandbox receipts.
-        exclude["action"] = {"sandbox"}
+        unset.add("sandbox")
+    if unset:
+        exclude["action"] = unset
     payload = request.model_dump_json(
         include={"run": {"goal_id", "contract"}, "operation_id": True, "action": True},
         exclude=exclude,
@@ -366,6 +388,8 @@ class WorkspaceTools:
                     ]
         self.protected_paths = tuple(dict.fromkeys(protected))
         home = Path.home()
+        # Background jobs started by this worker, by process group.
+        self._processes: dict[int, subprocess.Popen] = {}
         self.sensitive_paths = tuple(
             dict.fromkeys((home / path).resolve() for path in SENSITIVE_HOME_PATHS)
         )
@@ -377,10 +401,117 @@ class WorkspaceTools:
             }
         )
 
+    def _jobs_dir(self, goal_id: str) -> Path:
+        # Kept in the private control directory: a task can read its job logs
+        # but cannot edit the process IDs Rocky later signals.
+        return self.root / ".rocky" / goal_id / "jobs"
+
+    def _job_records(self, goal_id: str) -> list[dict]:
+        directory = self._jobs_dir(goal_id)
+        records = []
+        for path in sorted(directory.glob("*.json")) if directory.is_dir() else []:
+            try:
+                record = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(record, dict) and isinstance(record.get("pgid"), int):
+                records.append(record)
+        return records
+
+    def _job_running(self, record: dict) -> bool:
+        process = self._processes.get(record["pgid"])
+        if process is not None:
+            # Reap jobs this worker started, so they do not linger as zombies.
+            if process.poll() is None:
+                return True
+            del self._processes[record["pgid"]]
+            return False
+        try:
+            # The wrapper shell leads the group until the command ends.
+            return os.getpgid(record["pgid"]) == record["pgid"]
+        except (ProcessLookupError, PermissionError, OSError):
+            return False
+
+    def stop_jobs(self, goal_id: str, *, older_than: float | None = None) -> int:
+        """Stop a task's background jobs; returns how many were running."""
+        if not _IDENTIFIER.fullmatch(goal_id):
+            raise ToolError("Invalid goal identifier")
+        stopped = 0
+        now = time.time()
+        for record in self._job_records(goal_id):
+            if older_than is not None and now - record.get("started", now) < older_than:
+                continue
+            if self._job_running(record):
+                _kill_group(record["pgid"], signal.SIGTERM)
+                stopped += 1
+        if stopped:
+            time.sleep(0.5)
+            for record in self._job_records(goal_id):
+                if older_than is None or now - record.get("started", now) >= older_than:
+                    _kill_group(record["pgid"])
+        return stopped
+
+    def _start_job(
+        self, request: ToolInput, directory: Path, prefix: list[str], environment: dict
+    ) -> ToolResult:
+        goal_id = request.run.goal_id
+        self.stop_jobs(goal_id, older_than=MAX_JOB_SECONDS)
+        running = [record for record in self._job_records(goal_id) if self._job_running(record)]
+        if len(running) >= MAX_JOBS:
+            raise ToolError(
+                f"This task already has {MAX_JOBS} background jobs running; wait for one to finish "
+                "(its .exit file appears) before starting another."
+            )
+        job_id = _digest(request.operation_id.encode())[:12]
+        output = self.root / goal_id / ".rocky-jobs"
+        output.mkdir(mode=0o700, exist_ok=True)
+        log_path, exit_path = output / f"{job_id}.log", output / f"{job_id}.exit"
+        exit_path.unlink(missing_ok=True)
+        # The wrapper records the exit status where the task can read it.
+        # A subshell, so `exit` in the command still reaches the status line.
+        script = '(eval "$1"); status=$?; printf "%s\\n" "$status" > "$2"'
+        argv = [*prefix, script, "rocky-job", request.action.content, str(exit_path)]
+        with open(log_path, "wb") as log:
+            process = subprocess.Popen(
+                argv,
+                cwd=directory,
+                env=environment,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                close_fds=True,
+                start_new_session=True,
+            )
+        self._processes[process.pid] = process
+        jobs = self._jobs_dir(goal_id)
+        jobs.mkdir(parents=True, mode=0o700, exist_ok=True)
+        (jobs / f"{job_id}.json").write_text(
+            json.dumps(
+                {
+                    "job_id": job_id,
+                    "pgid": process.pid,
+                    "command": request.action.content[:2000],
+                    "started": time.time(),
+                }
+            )
+        )
+        log_name = self.display_path(goal_id, log_path)
+        exit_name = self.display_path(goal_id, exit_path)
+        return ToolResult(
+            success=True,
+            content=(
+                f"Started background job {job_id}. Output goes to {log_name}; when the command "
+                f"ends its exit status is written to {exit_name}. Read those files to follow it. "
+                f"Jobs are stopped when the task ends or after {MAX_JOB_SECONDS // 3600} hours."
+            ),
+            progress_key=f"job:{job_id}",
+        )
+
     def delete_goal_files(self, goal_id: str) -> None:
         """Remove a deleted goal's workspace, receipts and cookie sessions."""
         if not _IDENTIFIER.fullmatch(goal_id):
             raise ToolError("Invalid goal identifier")
+        self.stop_jobs(goal_id)
         for path in (self.root / goal_id, self.root / ".rocky" / goal_id):
             # Never follow a link: remove the link itself, not what it points to.
             if path.is_symlink():
@@ -888,6 +1019,10 @@ class WorkspaceTools:
                 )
                 command = [*prefix, *command]
 
+            if action.background:
+                return self._start_job(request, directory, command[:-1], environment)
+            limit = action.timeout_seconds or DEFAULT_COMMAND_SECONDS
+
             def visible(path: Path) -> bool:
                 return self._visible_path(request.run.goal_id, path, parent_resolved=True)
 
@@ -905,14 +1040,15 @@ class WorkspaceTools:
                 )
                 timed_out = False
                 try:
-                    process.wait(timeout=30)
+                    process.wait(timeout=limit)
                 except subprocess.TimeoutExpired:
                     timed_out = True
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+                    _kill_group(process.pid)
                     process.wait()
+                else:
+                    # Children left behind (`cmd &`) would outlive the task
+                    # unmanaged; long work belongs in a background job.
+                    _kill_group(process.pid)
                 stdout.seek(0)
                 stderr.seek(0)
                 output = stdout.read(MAX_CONTENT).decode("utf-8", errors="replace")
@@ -921,7 +1057,7 @@ class WorkspaceTools:
             description = f"Exit code: {process.returncode}"
             if timed_out:
                 description += (
-                    "\nCommand timed out after 30 seconds; its process group was stopped."
+                    f"\nCommand timed out after {limit} seconds; its process group was stopped."
                 )
             after, complete_after = _snapshot(directory, visible)
             changed = [
@@ -941,7 +1077,7 @@ class WorkspaceTools:
                 if timed_out
                 else ("command_failed" if process.returncode else ""),
                 retry_hint=(
-                    "Inspect partial output and filesystem effects before retrying. Break long work into bounded commands or run a background job with output redirected to a file."
+                    f"Inspect partial output and filesystem effects before retrying. Ask for a longer timeout_seconds (up to {MAX_COMMAND_SECONDS}) or run it with background=true and check its log later."
                     if timed_out
                     else (
                         "Inspect stderr and exit code, correct the command or dependencies, then retry with a new operation identifier."

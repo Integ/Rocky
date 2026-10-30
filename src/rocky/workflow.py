@@ -379,6 +379,9 @@ class GoalWorkflow:
     async def _execute(
         self, run: RunInput, action: Action | None, operation_id: str | None = None
     ) -> ToolResult:
+        attempt = 45
+        if action is not None and action.tool == "run_command" and not action.background:
+            attempt = max(attempt, (action.timeout_seconds or 0) + 20)
         return await workflow.execute_activity(
             "rocky.execute",
             ToolInput(
@@ -397,8 +400,10 @@ class GoalWorkflow:
                 preapproved_actions=list(self._state.preapproved_actions),
             ),
             result_type=ToolResult,
-            start_to_close_timeout=self._timeout(45),
-            schedule_to_close_timeout=self._timeout(150),
+            # A long command keeps the attempt open; the dispatch receipt
+            # turns any retry after a lost worker into outcome_unknown.
+            start_to_close_timeout=self._timeout(attempt),
+            schedule_to_close_timeout=self._timeout(attempt + 105),
             # A lost worker is noticed in seconds instead of after the full attempt.
             heartbeat_timeout=_TOOL_HEARTBEAT,
             retry_policy=RetryPolicy(

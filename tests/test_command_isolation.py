@@ -203,7 +203,8 @@ def test_default_dispatch_passes_profile_argv_environment_and_closes_control_des
     def fake_process(arguments, **kwargs):
         captured.append((arguments, kwargs))
         kwargs["stdout"].write(b"stub command output\n")
-        return SimpleNamespace(returncode=0, wait=lambda timeout=None: 0)
+        # An unused process group: the leftover-process sweep finds nothing to stop.
+        return SimpleNamespace(pid=2**30, returncode=0, wait=lambda timeout=None: 0)
 
     monkeypatch.setattr("rocky.tools.subprocess.Popen", fake_process)
     command = "printf '%s' '$(touch should-not-run)'"

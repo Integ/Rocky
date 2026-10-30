@@ -21,6 +21,8 @@ ToolName = Literal[
 ]
 TOOL_NAMES = get_args(ToolName)
 MAX_PARALLEL_ACTIONS = 8
+DEFAULT_COMMAND_SECONDS = 30
+MAX_COMMAND_SECONDS = 900
 SAFE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
@@ -125,6 +127,12 @@ class Action(Model):
     # Only run_command may opt out, after exact owner approval. Decode older
     # actions with isolation enabled; strings and integers cannot disable it.
     sandbox: bool = Field(default=True, strict=True)
+    # run_command only. null keeps the 30-second default; longer work may ask
+    # for up to MAX_COMMAND_SECONDS, or run as a background job.
+    timeout_seconds: int | None = Field(default=None, ge=1, le=MAX_COMMAND_SECONDS, strict=True)
+    # run_command only: start the command, return at once and keep its output
+    # in the task's .rocky-jobs/ directory. Jobs stop when the task ends.
+    background: bool | None = Field(default=None, strict=True)
 
 
 def read_only_action(action: Action) -> bool:

@@ -218,7 +218,7 @@ struct PendingApproval: Codable, Equatable {
         return ISO8601DateFormatter().date(from: trimmed)
     }
     var summary: String {
-        [action.tool, action.path, action.url, action.content].compactMap { $0 }.joined(separator: "\n")
+        [action.tool, action.path, action.url, action.content, action.runModeText].compactMap { $0 }.joined(separator: "\n")
     }
 }
 
@@ -271,8 +271,18 @@ struct ProposedAction: Codable, Equatable {
     var content: String?
     /// false: the command runs outside Seatbelt with the owner's full privileges.
     var sandbox: Bool?
+    /// run_command only: a longer limit than the default 30 seconds.
+    var timeout_seconds: Int?
+    /// run_command only: starts a job that keeps running after the call returns.
+    var background: Bool?
 
     var isUnsandboxed: Bool { tool == "run_command" && sandbox == false }
+    /// How the command runs, when it differs from a normal 30-second command.
+    var runModeText: String? {
+        if background == true { return "后台作业：立即返回，任务结束时停止" }
+        if let timeout_seconds { return "最长运行 \(TaskLimits.duration(timeout_seconds))" }
+        return nil
+    }
 }
 
 struct Goal: Codable, Identifiable, Equatable {
