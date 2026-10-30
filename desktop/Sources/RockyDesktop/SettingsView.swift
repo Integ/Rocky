@@ -120,6 +120,7 @@ struct SettingsView: View {
                 } header: { Text("后台服务") } footer: {
                     Text("Rocky 在后台常驻运行，关闭窗口或退出应用后任务继续执行；有任务运行时会阻止 Mac 空闲睡眠，但合盖或手动睡眠时任务会暂停。停止后台服务后，重新打开 Rocky 会再次启动。")
                 }
+                ServiceHealthSection(model: model)
             }.formStyle(.grouped).disabled(saving || model.provider == nil)
             Divider()
             HStack(spacing: 10) {

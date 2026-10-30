@@ -11,9 +11,11 @@ import fcntl
 import json
 import os
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -54,6 +56,21 @@ def load_or_create_token(path: Path) -> str:
     if len(token) < 32:
         raise SupervisorError("The API token file is empty or too short")
     return token
+
+
+def rotate_token(path: Path) -> None:
+    """Atomically replace the owner token; the running service keeps the old one."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(secrets.token_urlsafe(_TOKEN_BYTES))
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def temporal_endpoint(address: str) -> tuple[str, int]:
@@ -114,6 +131,7 @@ class Supervisor:
         self._stopping = False
         self._caffeinate: subprocess.Popen | None = None
         self._token = ""
+        self._backup: threading.Thread | None = None
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -169,7 +187,10 @@ class Supervisor:
             self.log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             path = self.log_dir / f"{child.name}.log"
             _rotate(path)
-            descriptor = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            # Append mode lets _trim_logs empty the file under a running child.
+            descriptor = os.open(
+                path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_APPEND | os.O_NOFOLLOW, 0o600
+            )
             output = os.fdopen(descriptor, "wb")
         try:
             child.process = subprocess.Popen(
@@ -219,6 +240,7 @@ class Supervisor:
 
     def _watch(self) -> int:
         next_activity_check = 0.0
+        next_housekeeping = self.clock() + 60
         while not self._stopping:
             try:
                 self._check_children()
@@ -229,6 +251,10 @@ class Supervisor:
             if self.prevent_sleep and self.clock() >= next_activity_check:
                 self._update_sleep_assertion()
                 next_activity_check = self.clock() + 15
+            if self.clock() >= next_housekeeping:
+                self._trim_logs()
+                self._schedule_backup()
+                next_housekeeping = self.clock() + 60
             time.sleep(0.5)
         write_status(self.run_dir, "stopped")
         return 0
@@ -249,6 +275,46 @@ class Supervisor:
                 child.process.kill()
                 child.process.wait()
         self.ready_file.unlink(missing_ok=True)
+
+    # -- housekeeping --------------------------------------------------------
+
+    def _trim_logs(self) -> None:
+        """Keep each child log under log_max_bytes: copy it to .1, then empty it."""
+        if self.log_dir is None:
+            return
+        for child in self.children:
+            path = self.log_dir / f"{child.name}.log"
+            try:
+                if path.stat().st_size <= self.settings.log_max_bytes:
+                    continue
+                shutil.copyfile(path, path.with_name(path.name + ".1"))
+                os.truncate(path, 0)
+            except OSError:
+                continue
+
+    def _schedule_backup(self) -> None:
+        """Back up in the background when the newest backup is older than the interval."""
+        hours = self.settings.backup_interval_hours
+        if not hours or (self._backup is not None and self._backup.is_alive()):
+            return
+        from rocky.backup import default_backup_dir, last_backup
+
+        newest = last_backup(default_backup_dir(self.settings))
+        if newest is not None:
+            age = time.time() - Path(newest["path"]).stat().st_mtime
+            if age < hours * 3600:
+                return
+        self._backup = threading.Thread(target=self._run_backup, name="backup", daemon=True)
+        self._backup.start()
+
+    def _run_backup(self) -> None:
+        from rocky.backup import create_backup
+
+        try:
+            path = create_backup(self.settings, keep=self.settings.backup_keep)
+            print(f"Rocky backup written: {path.name}", file=sys.stderr)
+        except Exception as exc:
+            print(f"Rocky backup failed: {type(exc).__name__}: {exc}", file=sys.stderr)
 
     # -- probes --------------------------------------------------------------
 
@@ -323,14 +389,20 @@ class Supervisor:
             self._caffeinate = None
 
 
-def serve(settings: Settings | None = None) -> int:
-    settings = settings or Settings()
-    environ = os.environ
+def service_paths(settings: Settings) -> tuple[Path, Path]:
+    """The run directory and token file `rocky serve` uses for these settings."""
     data = Path(settings.database_url.removeprefix("sqlite:///")).parent
     if not settings.database_url.startswith("sqlite:///"):
         data = Path("./data")
-    run_dir = Path(environ.get("ROCKY_RUN_DIR") or data / "run")
-    token_path = Path(environ.get("ROCKY_API_TOKEN_FILE") or data / "api-token")
+    run_dir = Path(settings.run_dir or data / "run").expanduser()
+    token_path = Path(settings.api_token_file or data / "api-token").expanduser()
+    return run_dir, token_path
+
+
+def serve(settings: Settings | None = None) -> int:
+    settings = settings or Settings()
+    environ = os.environ
+    run_dir, token_path = service_paths(settings)
     log_dir = Path(environ["ROCKY_LOG_DIR"]) if environ.get("ROCKY_LOG_DIR") else None
     temporal_db = environ.get("ROCKY_TEMPORAL_DB")
     supervisor = Supervisor(

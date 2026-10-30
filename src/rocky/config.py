@@ -23,6 +23,14 @@ class Settings(BaseSettings):
     temporal_db: Path | None = None
     run_dir: Path | None = None
     log_dir: Path | None = None
+    # Backups default to a folder next to the database. `rocky serve` makes
+    # one every backup_interval_hours (0 turns that off) and keeps the newest
+    # backup_keep.
+    backup_dir: Path | None = None
+    backup_interval_hours: float = Field(default=24, ge=0, le=24 * 30)
+    backup_keep: int = Field(default=7, ge=1, le=365)
+    # A service log is copied to .1 and emptied when it grows past this size.
+    log_max_bytes: int = Field(default=20_000_000, ge=100_000)
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "default"
     task_queue: str = "rocky-goals"
@@ -44,6 +52,9 @@ class Settings(BaseSettings):
     # Per-request response caps. Reasoning tokens count toward them.
     plan_response_tokens: int = Field(default=16_384, ge=1_024, le=128_000)
     review_response_tokens: int = Field(default=12_000, ge=1_024, le=128_000)
+    # Browser the browse tool drives; unset finds Chrome, Edge, Chromium or
+    # Brave in /Applications, then Playwright's own Chromium.
+    browser_path: Path | None = None
     auth_mode: Literal["local", "token"] = "local"
     api_token: SecretStr | None = None
     host: str = "127.0.0.1"

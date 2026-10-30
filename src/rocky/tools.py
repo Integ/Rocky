@@ -34,6 +34,7 @@ from rocky.approval_policy import (
     automatic_approval,
     http_scope,
 )
+from rocky.browser import BrowserUnavailable, browse, browser_executable, parse_browse_options
 from rocky.command_policy import command_class, command_words
 from rocky.config import Settings
 from rocky.http_tools import HTTPToolError, request_http
@@ -64,7 +65,7 @@ MAX_CONTENT = 16000
 # Full-access edits load the file into memory; larger files need run_command.
 MAX_EDIT_BYTES = 20_000_000
 # Interrupted non-idempotent effects must be inspected, never silently repeated.
-_DISPATCH_MARKED = {"http_request", "run_command", "append_file", "edit_file"}
+_DISPATCH_MARKED = {"http_request", "run_command", "append_file", "edit_file", "browse"}
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 _FILE_WRITE_TOOLS = frozenset({"write_file", "append_file", "edit_file"})
@@ -354,6 +355,7 @@ def _atomic_write(parent: int, name: str, content: bytes, *, preserve_mode: bool
 class WorkspaceTools:
     def __init__(self, settings: Settings):
         self.full_access = settings.tool_access == "full"
+        self.browser_path = getattr(settings, "browser_path", None)
         self.approval_mode = getattr(settings, "approval_mode", "required")
         prefixes = getattr(settings, "auto_approved_prefixes", None)
         self.auto_approved_prefixes = prefixes() if callable(prefixes) else []
@@ -382,8 +384,12 @@ class WorkspaceTools:
                 Path(str(filename) + suffix) for suffix in ("", "-wal", "-shm", "-journal")
             )
             # `rocky serve` keeps its token and status next to the database.
-            protected += [filename.parent / "api-token", filename.parent / "run"]
-        for name in ("api_token_file", "temporal_db", "run_dir", "log_dir"):
+            protected += [
+                filename.parent / "api-token",
+                filename.parent / "run",
+                filename.parent / "backups",
+            ]
+        for name in ("api_token_file", "temporal_db", "run_dir", "log_dir", "backup_dir"):
             if (path := getattr(settings, name, None)) is not None:
                 path = Path(path).expanduser().resolve()
                 protected.append(path)
@@ -579,7 +585,7 @@ class WorkspaceTools:
                 raise ToolError("Invalid operation identifier")
             if not self.full_access and (
                 request.action.tool not in request.run.contract.allowed_tools
-                or request.action.tool in {"http_request", "run_command"}
+                or request.action.tool in {"http_request", "run_command", "browse"}
             ):
                 raise ToolError("The tool is not authorized by this goal")
             fingerprint = _operation_fingerprint(request)
@@ -678,11 +684,21 @@ class WorkspaceTools:
                         code="sandbox_unavailable",
                         hint="Run the worker on macOS with Seatbelt available, or request exact owner approval for run_command with sandbox=false.",
                     )
+                except BrowserUnavailable as exc:
+                    result = _failure(
+                        str(exc),
+                        code="browser_unavailable",
+                        hint="Ask the owner to install Google Chrome, or use fetch_url or http_request for pages that work without JavaScript.",
+                    )
                 except HTTPToolError as exc:
                     uncertain = requires_approval(request.action, options)
                     result = _failure(
                         str(exc),
-                        code="outcome_unknown" if uncertain else "http_request_failed",
+                        code="outcome_unknown"
+                        if uncertain
+                        else "browser_failed"
+                        if request.action.tool == "browse"
+                        else "http_request_failed",
                         hint=(
                             "The request may have reached the server. Inspect actual external state with a read operation before issuing another mutation."
                             if uncertain
@@ -819,7 +835,11 @@ class WorkspaceTools:
         if not self.full_access or not action.path:
             return ""
         goal_id = request.run.goal_id
-        if action.tool in _FILE_WRITE_TOOLS or action.tool in {"fetch_url", "http_request"}:
+        if action.tool in _FILE_WRITE_TOOLS or action.tool in {
+            "fetch_url",
+            "http_request",
+            "browse",
+        }:
             target = self._resolve_path(goal_id, action.path, write=True)
             allowed = (self.root / goal_id, *self._allowed_folders(request))
             if not any(_inside(target, folder) for folder in allowed):
@@ -934,6 +954,7 @@ class WorkspaceTools:
             "edit_file",
             "fetch_url",
             "http_request",
+            "browse",
         }
         return self._resolve_path(
             request.run.goal_id, path, default_root=default_root, write=writes
@@ -1035,6 +1056,39 @@ class WorkspaceTools:
         except ValueError:
             return str(value)
 
+    def _browse(self, request: ToolInput) -> ToolResult:
+        action = request.action
+        if not action.url:
+            raise ToolError("browse requires a URL")
+        options = parse_browse_options(action.content)
+        destination = self._path(request, action.path) if action.path else None
+        page, image = browse(
+            action.url,
+            options,
+            self.root / ".rocky" / request.run.goal_id / "browser",
+            blocked_ports=self.control_ports,
+            executable=browser_executable(self.browser_path),
+            screenshot=destination is not None,
+        )
+        if destination is not None and image is not None:
+            with self._full_parent(request.run.goal_id, destination, create=True) as parent:
+                _atomic_write(parent, destination.name, image)
+            page["screenshot"] = self.display_path(request.run.goal_id, destination)
+        content = json.dumps(page, ensure_ascii=False)
+        status = page.get("status_code")
+        ok = status is None or 200 <= status < 400
+        return ToolResult(
+            success=ok,
+            content=_clip(content),
+            progress_key="browse:" + _digest(content.encode()),
+            artifacts=self._artifact(request, destination) if destination else [],
+            changed_paths=[self.display_path(request.run.goal_id, destination)]
+            if destination
+            else [],
+            error_code="" if ok else "http_status",
+            retry_hint="" if ok else "Inspect status_code and the page text before retrying.",
+        )
+
     def _artifact(self, request: ToolInput, path: Path) -> list[Artifact]:
         try:
             relative = path.relative_to(self.root / request.run.goal_id)
@@ -1051,6 +1105,8 @@ class WorkspaceTools:
 
     def _execute_full(self, request: ToolInput) -> ToolResult:
         action = request.action
+        if action.tool == "browse":
+            return self._browse(request)
         if action.tool in {"fetch_url", "http_request"}:
             if not action.url:
                 raise ToolError(f"{action.tool} requires a URL")

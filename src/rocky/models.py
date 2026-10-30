@@ -18,6 +18,7 @@ ToolName = Literal[
     "run_command",
     "append_file",
     "edit_file",
+    "browse",
 ]
 TOOL_NAMES = get_args(ToolName)
 MAX_PARALLEL_ACTIONS = 8

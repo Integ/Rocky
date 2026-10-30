@@ -130,7 +130,7 @@ Compose 显式使用 `ROCKY_AUTH_MODE=token`，因为容器内请求来自容器
 }
 ```
 
-默认 `ROCKY_TOOL_ACCESS=full`。完整权限模式提供 `read_file`、`write_file`、`append_file`、`edit_file`、`list_files`、`fetch_url`、`http_request` 和 `run_command`；支持 HTTP/HTTPS 地址、私网、本机服务、重定向、POST 表单/JSON、认证请求及登录 Cookie 会话，下述 Rocky 控制端口除外。旧任务中保存的 `allowed_tools` / `allowed_domains` 不再限制执行。
+默认 `ROCKY_TOOL_ACCESS=full`。完整权限模式提供 `read_file`、`write_file`、`append_file`、`edit_file`、`list_files`、`fetch_url`、`http_request`、`browse` 和 `run_command`；支持 HTTP/HTTPS 地址、私网、本机服务、重定向、POST 表单/JSON、认证请求及登录 Cookie 会话，下述 Rocky 控制端口除外。旧任务中保存的 `allowed_tools` / `allowed_domains` 不再限制执行。
 
 Python 文件工具可使用绝对路径和隐藏文件，但包括 `full` 模式在内，一律禁止访问工作区根目录中的其他任务和私有 `.rocky/` 控制目录；路径遍历、符号链接和硬链接也不能绕过限制。读取、写入、追加、编辑、目录列表、HTTP 下载目标及验收文件读取都遵守此边界。提交任务时可以授权文件夹（合同的 `folders`，客户端在输入框点文件夹按钮或拖入文件夹）：任务可以像在自己目录里一样直接读写这些文件夹，Seatbelt 也允许沙箱命令写入。授权文件夹必须已存在，不能是根目录、家目录本身，也不能包含或位于 Rocky 自己的数据、代码或凭据存储中。也可以附加文件作为参考资料（合同的 `files`，客户端拖入文件或在同一个按钮里选择文件）：任务可以直接读取这些文件，但不能修改；附加的文件必须存在，且不能是凭据或 Rocky 自己的文件。在 `required` 审批模式下，写入、追加、编辑或下载到任务目录和授权文件夹之外的路径（包括经任务内符号链接指向外部的路径）、读取或列出凭据存储（`~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.netrc`、`~/.config/gh`、`~/Library/Keychains`、浏览器配置等），以及读取或列出家目录下任务目录和授权文件夹之外的个人文件，都需要所有者逐次批准完整操作，所有者规则和本任务同类授权都不能放行。家目录之外的系统和工具链文件可直接读取。产物相对路径用于结果核验和导出。
 
@@ -148,6 +148,8 @@ macOS 上的 `run_command` 默认通过 `/usr/bin/sandbox-exec -p <按 goal 生�
 4. **等待所有者**：其余操作暂停等待批准。`POST /goals/{id}/approve` 接受 `scope` 为 `action`（默认）、`task`、`always`、`deny`。`GET /approvals` 列出所有未结束任务的待批与超时未批请求，`POST /approvals/batch` 一次处理多条。
 
 无人回应的请求在 `ROCKY_APPROVAL_TIMEOUT_MINUTES`（默认 30，0 表示一直等待，客户端可改）后**只会被拒绝，绝不会自动批准**（选“一直等待”时会一直等到你处理或取消，期间不计时）：操作不执行，模型收到 `approval_timeout` 并改做不需要审批的工作，该请求进入任务的“超时未批”列表。所有者之后用 `scope` 为 `deferred` 批准它，任务会被唤醒，并可原样执行这一操作一次；`dismiss` 将其移除。连续 3 次超时后任务转为等待输入。含 `;`、`&&`、`|`、重定向、`$`、反引号或换行的命令永远不匹配前缀与只读规则，`sudo`/`env`/`xargs` 等包装命令和 `python -c` 这类内联代码不会提供同类批准。执行记录中的 `approved_by` 注明每个免审操作由哪一级放行（`read_only`、`allowlist`、`rule:<id>`、`task`、`deferred:…`、`owner`、`trusted`）。明确接受命令自行执行的单机所有者可配置 `ROCKY_APPROVAL_MODE=trusted`；完整工具权限本身不会关闭审批。此门禁按工具/方法分类，不能识别具有副作用的 GET 接口；带请求体或 URL 超过 2048 字符的 GET/HEAD/OPTIONS 按写入请求审批，以免把文件内容夹带出去。短 GET 仍可携带少量数据，这是保留的风险：个人文件读取需批准正是为此设置。所有者规则放行的命令（如 `uv run pytest`）在沙箱内运行任意项目代码，同样不受个人文件读取限制。任务目录和授权文件夹内的文件写入无需审批。
+
+`browse` 用无界面浏览器打开需要 JavaScript 的网页，返回最终地址、状态码、标题、渲染后的正文、链接和表单字段（带选择器）。它驱动本机已安装的 Chrome（或 Edge、Chromium、Brave，可用 `ROCKY_BROWSER_PATH` 指定；都没有时运行一次 `rocky browser-install` 下载 Playwright 的 Chromium），每个任务和 `session` 名称用独立的私有浏览器配置，登录状态跨调用保留，从不使用你自己的浏览器配置。`content` 可带 `steps`（最多 20 步：`click`、`fill`、`select`、`press`、`wait`、`scroll`），`path` 可保存 `.png` 截图。只读打开（不带步骤或只有 `wait`/`scroll`）与 GET 同级，免审批，但页面加载期间不允许页面自己发 POST 等写入请求；带 `click`/`fill`/`select`/`press` 的调用可以提交表单，需要逐次批准完整操作（所有者 HTTP 规则和本任务同类授权都不覆盖），URL 超过 2048 字符同样需批准。页面、重定向和 WebSocket 都连不上 Rocky 控制端口；截图写到任务目录和授权文件夹之外时按文件写入审批。
 
 浏览器自动化或需要写工作区外部文件的特殊命令可设置 `{"tool":"run_command","content":"…","path":"…","sandbox":false}`。这一出口始终需要用户逐次批准完整操作，即使使用 `trusted`、全局前缀白名单或本任务同类授权也不能跳过；审批界面会明确提示以当前用户权限在 Seatbelt 外运行。无沙箱命令不再具有任务文件隔离保证。更改命令、工作目录或 `sandbox` 值都会使原审批失效。
 
@@ -168,6 +170,14 @@ macOS 上的 `run_command` 默认通过 `/usr/bin/sandbox-exec -p <按 goal 生�
 合同 API：`POST /goal-contract` 由模型根据目标拟定合同，返回 `{"contract": …, "warnings": […]}`，不会创建任务；`warnings` 里 `concern` 是模型指出的问题（无法核验的标准、拿不到的资料等），`model_calls_low` / `token_budget_low` / `time_limit_low` 是预算检查及建议值。确认后把 `contract` 原样提交到 `POST /goals`。`POST /goal-contract/check` 对修改过的合同只做预算检查，不调用模型。
 
 任务管理 API：`GET /goals` 默认排除存档任务，`GET /goals?archived=true` 查看存档；`POST /goals/{id}/archive` 存档、`POST /goals/{id}/restore` 恢复、`DELETE /goals/{id}` 删除已结束任务及执行记录，并删除其工作区、回执和 Cookie 会话。进行中、休眠和等待输入的任务不能存档或删除。
+
+## 运行状态、备份与令牌
+
+- `GET /health` 只表示 API 活着；`GET /status`（需令牌）给出执行进程心跳、Temporal 连通性、各状态任务数、待派发任务和待送达指令、待审批数、磁盘剩余空间、最近备份和问题列表；`GET /metrics` 以 Prometheus 文本格式输出同样的数字。`rocky status` 打印 `/status`。客户端“设置 → 运行状态与备份”显示这些信息。
+- `rocky serve` 每 `ROCKY_BACKUP_INTERVAL_HOURS`（默认 24，0 关闭）小时在 `ROCKY_BACKUP_DIR`（默认数据库旁的 `backups/`，应用里是 `~/Library/Application Support/Rocky/backups`）写一份备份，保留最近 `ROCKY_BACKUP_KEEP`（默认 7）份。备份是一个私有 `.tar.gz`：Rocky 和 Temporal 的 SQLite 数据库用 SQLite 在线备份接口取一致快照，任务工作区原样打包，跳过 `.venv`、`node_modules`、`__pycache__`、`.cache` 和浏览器配置；不含 API 密钥（在钥匙串里）和 API 令牌。`rocky backup`、`POST /backups` 或客户端“立即备份”随时备份，`rocky backups` 列出。备份目录对文件工具和沙箱命令不可见。
+- 恢复：先停止后台服务，再运行 `rocky restore <备份文件>`。它先核对清单里每个数据库的 SHA-256，全部无误才动手，当前数据库和工作区移到数据库旁的 `pre-restore-<时间>/`，不会删除。恢复后重新打开应用即可。
+- 服务日志超过 `ROCKY_LOG_MAX_BYTES`（默认 20 MB）时复制到 `.1` 后清空，进程不用重启。
+- `rocky rotate-token` 换一个新的 API 令牌，重启后台服务后生效。服务只监听本机回环地址，不提供远程访问。
 
 ## Harness 与记忆
 

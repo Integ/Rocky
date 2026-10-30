@@ -16,7 +16,7 @@ PROJECT="$SUPPORT/backend"
 RUN="$SUPPORT/run"
 LOGS="$SUPPORT/logs"
 
-for dir in "$SUPPORT" "$SUPPORT/data" "$SUPPORT/data/workspaces" "$LOGS" "$RUN" "$PROJECT" \
+for dir in "$SUPPORT" "$SUPPORT/data" "$SUPPORT/data/workspaces" "$SUPPORT/backups" "$LOGS" "$RUN" "$PROJECT" \
            "$SUPPORT/cache" "$SUPPORT/cache/uv" "$SUPPORT/runtime" "$SUPPORT/runtime/python"; do
   if [[ -L "$dir" ]]; then echo "Refusing symbolic link: $dir" >&2; exit 78; fi
   mkdir -p "$dir"
@@ -51,7 +51,7 @@ export ROCKY_WORKSPACE_ROOT="$SUPPORT/data/workspaces"
 export ROCKY_TOOL_ACCESS=full
 export ROCKY_CREDENTIAL_PATH="$SUPPORT/data/credentials.json"
 export ROCKY_API_TOKEN_FILE="$SUPPORT/data/api-token"
-export ROCKY_RUN_DIR="$RUN" ROCKY_LOG_DIR="$LOGS"
+export ROCKY_RUN_DIR="$RUN" ROCKY_LOG_DIR="$LOGS" ROCKY_BACKUP_DIR="$SUPPORT/backups"
 export ROCKY_TEMPORAL_BIN="$BIN/temporal" ROCKY_TEMPORAL_DB="$SUPPORT/data/temporal.db"
 export ROCKY_PREVENT_SLEEP=1
 

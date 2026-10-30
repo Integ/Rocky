@@ -10,6 +10,7 @@ import json
 
 import httpx
 
+from rocky.browser import interactive, parse_browse_options
 from rocky.http_tools import HTTPToolError, _request_options
 from rocky.models import SAFE_HTTP_METHODS, Action, ToolInput
 
@@ -187,7 +188,7 @@ def validate_action(action: Action, *, full_access: bool) -> dict | None:
         raise ActionValidationError(
             f"{action.tool} requires path; supply the file to read or change."
         )
-    if action.tool not in {"fetch_url", "http_request"} and action.url is not None:
+    if action.tool not in {"fetch_url", "http_request", "browse"} and action.url is not None:
         raise ActionValidationError(f"{action.tool} does not accept url; set url to null.")
     if action.tool == "list_files" and action.content is not None:
         raise ActionValidationError(f"{action.tool} does not accept content; set content to null.")
@@ -216,7 +217,7 @@ def validate_action(action: Action, *, full_access: bool) -> dict | None:
             raise ActionValidationError(
                 "A background job has no timeout; set timeout_seconds to null when background is true."
             )
-    if action.tool not in {"fetch_url", "http_request"}:
+    if action.tool not in {"fetch_url", "http_request", "browse"}:
         return None
     if (
         not action.url
@@ -234,6 +235,18 @@ def validate_action(action: Action, *, full_access: bool) -> dict | None:
         raise ActionValidationError(
             "Supply an absolute http:// or https:// URL with a hostname."
         ) from None
+    if action.tool == "browse":
+        if not full_access:
+            raise ActionValidationError("browse needs full tool access.")
+        if action.path is not None and not action.path.lower().endswith(".png"):
+            raise ActionValidationError(
+                "browse path is where a screenshot is saved and must end in .png; "
+                "set it to null for no screenshot."
+            )
+        try:
+            return parse_browse_options(action.content)
+        except ValueError as exc:
+            raise ActionValidationError(f"{exc}.") from None
     if not full_access and (action.content is not None or action.path is not None):
         raise ActionValidationError(
             "Scoped fetch_url accepts only url; set path and content to null."
@@ -263,6 +276,9 @@ def requires_approval(action: Action, options: dict | None = None) -> bool:
     """Opaque shell code and potentially mutating HTTP calls need owner approval."""
     if action.tool == "run_command":
         return True
+    if action.tool == "browse":
+        # Clicking or typing on a page can submit anything; reading it is a GET.
+        return interactive(options or {}) or len(action.url or "") > MAX_UNREVIEWED_URL
     if action.tool not in {"http_request", "fetch_url"}:
         return False
     options = options or {}

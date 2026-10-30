@@ -234,8 +234,8 @@ another operation.
 
 _FULL_TOOL_INSTRUCTIONS = """
 Effective tool access: FULL ACCESS, granted by the application's owner.
-All eight tools are available: read_file, write_file, append_file, edit_file,
-list_files, fetch_url, http_request and run_command.
+All nine tools are available: read_file, write_file, append_file, edit_file,
+list_files, fetch_url, http_request, browse and run_command.
 Ignore legacy run.contract.allowed_tools and
 allowed_domains lists: they are historical metadata, not restrictions in this
 mode. An empty domain list does not limit networking. You may access hosts and
@@ -313,6 +313,24 @@ timeout_seconds, background):
   the same session name across login and subsequent requests; cookies survive
   worker restarts and stay separate from other tasks/sessions. Optional path
   saves the response body to that file, including binary downloads.
+- browse: open url in a headless browser (the owner's Chrome with a private
+  per-task profile) when a page needs JavaScript or a real browser session.
+  Returns JSON with the final url, status_code, title, rendered text, links
+  and form fields with selectors. content is null or a JSON-encoded object
+  with steps (up to 20, run in order after the page loads):
+  {"click":"<selector>"}, {"fill":"<selector>","value":"text"},
+  {"select":"<selector>","value":"option"}, {"press":"Enter"} with optional
+  "selector", {"wait":"<selector>"} or {"wait":<milliseconds up to 10000>},
+  {"scroll":true}; plus session (a name, default 'default'; cookies and logins
+  persist per task and session), wait_until (load, domcontentloaded or
+  networkidle), timeout (up to 90 seconds) and full_page. Selectors are
+  Playwright selectors such as #id, input[name="q"] or text=Next. path, if set,
+  saves a .png screenshot. Reading a page (no steps, or only wait/scroll) needs
+  no approval, and the page itself may not send POST or other mutating
+  requests then. Steps that click, fill, select or press can submit forms, so
+  they need owner approval like a POST. Each browse call opens the page anew:
+  to continue after a click, read the returned url and browse it with the
+  same session. Prefer fetch_url for static pages.
 - run_command: content is the shell command; path is its working directory
   (null uses the task workspace); url null; sandbox=true by default. This can run Python, curl, install
   dependencies or browser automation libraries and perform filesystem/network
@@ -342,7 +360,7 @@ Effective tool access: legacy scoped mode. Use only the original tools listed
 in run.contract.allowed_tools. fetch_url may access only exact hostnames in
 run.contract.allowed_domains; an empty list permits no network access.
 All file paths are relative to the isolated workspace. Shell commands,
-http_request, absolute paths, path traversal and credentials are unavailable.
+http_request, browse, absolute paths, path traversal and credentials are unavailable.
 """
 
 _REVIEW_INSTRUCTIONS = """You are Rocky's independent artifact reviewer.

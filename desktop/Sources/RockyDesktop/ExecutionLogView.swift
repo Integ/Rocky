@@ -94,6 +94,10 @@ extension ToolObservation {
             if let data = content.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let status = value["status_code"] as? Int { return "HTTP \(status)" }
             return "已取得响应内容"
+        case "browse":
+            if let data = content.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let title = value["title"] as? String, !title.isEmpty { return "已打开：\(title.prefix(80))" }
+            return "已打开网页"
         default: return "操作已完成"
         }
     }

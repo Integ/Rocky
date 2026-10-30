@@ -1143,6 +1143,34 @@ class Store:
             row = session.get(GoalRow, goal_id)
             return row is None or row.cancel_requested
 
+    def health_counts(self) -> dict:
+        """Task counts by status and the outbox backlog, for monitoring."""
+        status = GoalRow.state["status"].as_string()
+        with self.sessions() as session:
+            visible = GoalLifecycleRow.deleted.is_not(True)
+            rows = session.execute(
+                select(status, func.count())
+                .select_from(GoalRow)
+                .outerjoin(GoalLifecycleRow, GoalLifecycleRow.goal_id == GoalRow.goal_id)
+                .where(visible)
+                .group_by(status)
+            ).all()
+            undispatched = session.scalar(
+                select(func.count())
+                .select_from(GoalRow)
+                .where(GoalRow.dispatched.is_(False), status.not_in(TERMINAL_STATUSES))
+            )
+            unsent = session.scalar(
+                select(func.count()).select_from(CommandRow).where(CommandRow.sent.is_(False))
+            )
+            events = session.scalar(select(func.count()).select_from(EventRow))
+        return {
+            "goals": {str(name): count for name, count in rows if name is not None},
+            "undispatched_goals": undispatched or 0,
+            "unsent_commands": unsent or 0,
+            "events": events or 0,
+        }
+
     def pending_commands(self) -> list[dict]:
         with self.sessions() as session:
             return [

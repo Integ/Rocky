@@ -1,8 +1,10 @@
 """Worker and durable submission/command outbox dispatcher."""
 
 import asyncio
+import json
 import logging
 import os
+import time
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import timedelta
 from pathlib import Path
@@ -16,6 +18,7 @@ from temporalio.worker import Worker
 from rocky.activities import Activities
 from rocky.config import Settings
 from rocky.models import GoalView, RunCheckpoint, RunInput, RunState, WakeCommand
+from rocky.monitoring import HEARTBEAT_FILE, HEARTBEAT_SECONDS
 from rocky.planner import OpenAIPlanner
 from rocky.store import EXTENSION_REASON, FOLLOW_UP_REASON, TERMINAL_STATUSES, Store
 from rocky.tools import WorkspaceTools
@@ -284,6 +287,25 @@ async def goal_workers(
         yield
 
 
+async def _heartbeat(client: Client, path: Path | None) -> None:
+    """Publish worker liveness and Temporal reachability for the API's /status."""
+    while True:
+        if path is not None:
+            try:
+                temporal = await asyncio.wait_for(client.service_client.check_health(), 5)
+            except Exception:
+                temporal = False
+            temporary = path.with_name(f".{path.name}.{os.getpid()}")
+            try:
+                temporary.write_text(
+                    json.dumps({"at": time.time(), "temporal": bool(temporal), "pid": os.getpid()})
+                )
+                temporary.replace(path)
+            except OSError:
+                log.warning("Worker heartbeat could not be written")
+        await asyncio.sleep(HEARTBEAT_SECONDS)
+
+
 async def run_worker(settings: Settings | None = None) -> None:
     settings = settings or Settings()
     store = Store(settings.database_url)
@@ -315,10 +337,11 @@ async def run_worker(settings: Settings | None = None) -> None:
                     ready_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
                 )
                 os.close(descriptor)
-            await asyncio.Event().wait()
+            await _heartbeat(client, ready_path.with_name(HEARTBEAT_FILE) if ready_path else None)
     finally:
         if ready_path:
             ready_path.unlink(missing_ok=True)
+            ready_path.with_name(HEARTBEAT_FILE).unlink(missing_ok=True)
         dispatcher.cancel()
         with suppress(asyncio.CancelledError):
             await dispatcher

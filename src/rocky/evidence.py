@@ -31,7 +31,7 @@ _COMMAND_LIMIT = 2_000
 _MAX_FILES = 30
 _MAX_ACTIONS = 80
 _CLIPPED = "\n[truncated]"
-_OUTPUT_TOOLS = {"run_command", "fetch_url", "http_request", "list_files"}
+_OUTPUT_TOOLS = {"run_command", "fetch_url", "http_request", "list_files", "browse"}
 
 
 def _excerpt(value, limit: int) -> str:

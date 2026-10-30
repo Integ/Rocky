@@ -406,9 +406,14 @@ subsequent actions and never claims to reverse existing effects.
 ## Current scope and next work
 
 Current tools: filesystem reads/writes/listing, HTTP retrieval, general HTTP
-requests with authenticated sessions and shell execution. Browser automation can
-be run through shell-installed tools. Curated cross-goal memory is supported;
-there is no built-in browser-control tool or multi-host execution. Running
+requests with authenticated sessions, a headless browser (`browse`, Playwright
+driving the installed Chrome with a private per-task profile; reading is
+GET-tier and blocks page-initiated mutations, interaction steps need exact
+approval) and shell execution. Curated cross-goal memory is supported. Rocky
+runs on one Mac by design; there is no multi-host execution or remote access.
+`rocky serve` makes daily consistent backups (SQLite online backup plus the
+workspaces), trims logs by size, and the API reports readiness on `/status`
+and Prometheus metrics on `/metrics`. Running
 Workflow code changes need Temporal versioning/replay validation; preserve the
 locked dependencies for active executions.
 

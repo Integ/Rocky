@@ -6,6 +6,8 @@ import logging
 import os
 import re
 import secrets
+import sqlite3
+import tarfile
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 from urllib.parse import quote
@@ -13,13 +15,14 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import Field
 from sqlalchemy.exc import IntegrityError
 
 from rocky import __version__
 from rocky.approval_policy import ApprovalRule, ApprovalSettings
+from rocky.backup import BackupError, create_backup, default_backup_dir, list_backups
 from rocky.config import Settings
 from rocky.contract_check import ContractWarning, contract_warnings
 from rocky.credentials import CredentialError, CredentialStore
@@ -32,6 +35,7 @@ from rocky.models import (
     GoalView,
     Model,
 )
+from rocky.monitoring import prometheus, service_status
 from rocky.planner import OpenAIPlanner, PlannerError
 from rocky.providers import PRESETS, ProviderUpdate, credential_id, provider_model_catalog
 from rocky.store import MemoryConflictError, Store, equivalent_contracts
@@ -356,6 +360,39 @@ def create_app(
     def health():
         # This is liveness. Queued goals can remain pending while Temporal is offline.
         return {"status": "ok", "service": "rocky"}
+
+    @app.get("/status", dependencies=auth)
+    def status():
+        """Readiness and the numbers worth watching; see rocky.monitoring."""
+        return service_status(settings, database)
+
+    @app.get("/metrics", dependencies=auth)
+    def metrics():
+        return PlainTextResponse(
+            prometheus(service_status(settings, database)),
+            media_type="text/plain; version=0.0.4",
+        )
+
+    @app.get("/backups", dependencies=auth)
+    def get_backups():
+        directory = default_backup_dir(settings)
+        return {
+            "directory": str(directory),
+            "interval_hours": settings.backup_interval_hours,
+            "keep": settings.backup_keep,
+            "backups": list_backups(directory),
+        }
+
+    @app.post("/backups", status_code=201, dependencies=auth)
+    def post_backup():
+        try:
+            path = create_backup(settings, keep=settings.backup_keep)
+        except BackupError as exc:
+            raise HTTPException(409, str(exc)) from None
+        except (OSError, sqlite3.Error, tarfile.TarError):
+            log.exception("Backup failed")
+            raise HTTPException(500, "Backup failed; see the API log") from None
+        return next(item for item in list_backups(path.parent) if item["path"] == str(path))
 
     def check_folders(contract: GoalContract | GoalDraft) -> None:
         try:

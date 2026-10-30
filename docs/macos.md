@@ -64,9 +64,9 @@ Rocky 的执行内核作为后台服务（launchd 用户级 LaunchAgent `dev.roc
 ~/Library/Application Support/Rocky/
 ```
 
-该目录保存本地数据库、任务工作目录、Temporal 历史及运行环境。钥匙串凭证单独保存在系统钥匙串中。需要备份时，请先在设置中停止后台服务，再备份 Application Support 目录；仅复制任务数据库不能完整保留工作流历史和产物。
+该目录保存本地数据库、任务工作目录、Temporal 历史、备份及运行环境。钥匙串凭证单独保存在系统钥匙串中。后台服务每天自动备份数据库和任务文件夹到 `backups/`，保留最近 7 份；“设置 → 运行状态与备份”可以立即备份、查看执行进程和磁盘状态。恢复时先停止后台服务，再在终端运行 `rocky restore <备份文件>`，当前数据会移到 `data/pre-restore-<时间>/` 保留。
 
-后台服务只监听回环地址，API 始终要求保存在 `data/api-token`（权限 0600）的持久令牌。应用只连接自己注册的后台服务，不会接管其他外部服务。同一数据目录一次只允许一个服务实例（`run/service.lock`）；若端口已被其他进程占用，后台服务会启动失败并由 launchd 定期重试。运行日志位于 `logs/`（`agent.log`、`temporal.log`、`api.log`、`worker.log`，上一轮保留为 `.1`），当前阶段写入 `run/status`。
+后台服务只监听回环地址，API 始终要求保存在 `data/api-token`（权限 0600）的持久令牌。应用只连接自己注册的后台服务，不会接管其他外部服务。同一数据目录一次只允许一个服务实例（`run/service.lock`）；若端口已被其他进程占用，后台服务会启动失败并由 launchd 定期重试。运行日志位于 `logs/`（`agent.log`、`temporal.log`、`api.log`、`worker.log`，上一轮或超过 20 MB 的部分保留为 `.1`），当前阶段写入 `run/status`，执行进程每 15 秒写一次 `run/worker-heartbeat`。
 
 启动失败时可从应用中重试，并检查网络连接、磁盘空间及运行日志。不要删除数据目录来解决普通连接错误。删除目录会丢失任务与产物；清除钥匙串凭证需要单独操作。
 
