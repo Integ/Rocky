@@ -34,13 +34,16 @@ from sqlalchemy.pool import StaticPool
 
 from rocky.approval_policy import MAX_RULES, ApprovalPolicy, ApprovalRule, ApprovalSettings
 from rocky.inference import ModelSettings
-from rocky.models import GoalContract, GoalView, RunState
+from rocky.models import ExecutionLimits, GoalContract, GoalView, RunState
 
 # Query terms and candidate rows bound the work of one memory search.
 _MEMORY_QUERY_TERMS = 64
 _MEMORY_CANDIDATES = 500
 _MEMORY_FIELD_WEIGHTS = (("keywords", 3), ("key", 2), ("content", 1))
 TERMINAL_STATUSES = ("succeeded", "failed", "cancelled", "budget_exhausted", "deadline_exceeded")
+# Ends the owner can lift by giving the goal more budget or time.
+EXTENDABLE_STATUSES = ("budget_exhausted", "deadline_exceeded")
+EXTENSION_REASON = "Continuing from saved progress with a larger budget from the owner."
 LEGACY_BUDGET_FIELDS = {"max_steps", "max_model_calls", "max_output_tokens", "deadline_seconds"}
 EVENT_STATE_FIELDS = (
     "goal_id",
@@ -644,6 +647,69 @@ class Store:
             state.revision = row.revision + 1
             state.updated_at = datetime.now(UTC).isoformat()
             data = state.model_dump(mode="json")
+            row.state, row.revision, row.dispatched = data, state.revision, False
+            if lifecycle is not None:
+                lifecycle.archived = False
+            if session.get(GoalRecoveryRow, goal_id) is None:
+                session.add(GoalRecoveryRow(goal_id=goal_id, requested_at=state.updated_at))
+            session.add(EventRow(goal_id=goal_id, state=_event_state(data)))
+            session.flush()
+            return self._view(row, session)
+
+    def extend_goal(self, goal_id: str, limits: ExecutionLimits) -> GoalView:
+        """Continue a goal that used up its budget or time, with larger limits.
+
+        Like recovery, the goal resumes from its saved projection: workspace,
+        counters, progress and handoff carry over and the wall clock restarts.
+        The new limits replace the contract's and must leave room for work.
+        """
+        with self.sessions.begin() as session:
+            changed = session.execute(
+                update(GoalRow)
+                .where(
+                    GoalRow.goal_id == goal_id,
+                    GoalRow.state["status"].as_string().in_(EXTENDABLE_STATUSES),
+                    GoalRow.cancel_requested.is_(False),
+                    ~exists().where(
+                        GoalLifecycleRow.goal_id == GoalRow.goal_id,
+                        GoalLifecycleRow.deleted.is_(True),
+                    ),
+                )
+                .values(revision=GoalRow.revision)
+            )
+            row = session.get(GoalRow, goal_id)
+            lifecycle = session.get(GoalLifecycleRow, goal_id)
+            if row is None or (lifecycle and lifecycle.deleted):
+                raise KeyError(goal_id)
+            if not changed.rowcount:
+                raise ValueError("Only goals that ran out of budget or time can be extended")
+            state = RunState.model_validate(row.state)
+            used = state.input_tokens + state.output_tokens
+            for limit, usage in (
+                (limits.max_steps, state.steps),
+                (limits.max_model_calls, state.model_calls),
+                (limits.max_tokens, used),
+            ):
+                if limit is not None and limit <= usage:
+                    raise ValueError(
+                        "The new limits leave no room beyond what the goal already used"
+                    )
+            contract = GoalContract.model_validate(row.contract)
+            contract.limits = limits
+            if state.pending_approval is not None:
+                state.deferred_approvals = [
+                    *state.deferred_approvals[-19:],
+                    state.pending_approval,
+                ]
+                state.pending_approval = None
+            state.status = "queued"
+            state.reason = EXTENSION_REASON
+            state.wake_at = None
+            state.deadline_at = None
+            state.revision = row.revision + 1
+            state.updated_at = datetime.now(UTC).isoformat()
+            data = state.model_dump(mode="json")
+            row.contract = contract.model_dump(mode="json")
             row.state, row.revision, row.dispatched = data, state.revision, False
             if lifecycle is not None:
                 lifecycle.archived = False

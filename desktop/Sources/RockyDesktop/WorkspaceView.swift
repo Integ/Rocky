@@ -264,12 +264,12 @@ struct WorkspaceView: View {
                     }
                     if goal.state.isTerminal {
                         HStack(spacing: 10) {
-                            if goal.state.status == "budget_exhausted" {
-                                Button { Task { await model.retryBudgetExhausted(goal) } } label: {
-                                    Label("加倍预算重试", systemImage: "arrow.clockwise")
+                            if ["budget_exhausted", "deadline_exceeded"].contains(goal.state.status) {
+                                Button { Task { await model.extend(goal) } } label: {
+                                    Label(goal.state.status == "budget_exhausted" ? "加倍预算继续" : "延长时限继续", systemImage: "arrow.clockwise")
                                 }.buttonStyle(.borderedProminent)
-                                    .disabled(!model.isConnected || model.isSubmitting || model.provider?.isConfigured != true)
-                                    .help("沿用原目标和验收标准，预算翻倍后创建新任务；保留原任务记录。")
+                                    .disabled(!model.isConnected || model.isSubmitting || model.pendingCommand != nil)
+                                    .help("在原任务上继续：沿用工作区、进度和已有记录，预算和时限翻倍，运行时间重新计算。")
                             }
                             if goal.state.status == "failed" {
                                 Button { Task { await model.recover(goal) } } label: {

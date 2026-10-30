@@ -303,22 +303,19 @@ final class AppModel: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
 
-    func retryBudgetExhausted(_ goal: Goal) async {
-        guard goal.state.status == "budget_exhausted", runtime.isReady, isConnected,
-              !isSubmitting, provider?.isConfigured == true else { return }
-        let generation = selectionGeneration
+    /// Continues a task that ran out of budget or time in place: same
+    /// workspace and progress, each finite limit doubled.
+    func extend(_ goal: Goal) async {
+        guard ["budget_exhausted", "deadline_exceeded"].contains(goal.state.status), isConnected,
+              !isSubmitting, pendingCommand == nil else { return }
         isSubmitting = true
         error = nil
-        submissionStatus = "正在以更高预算重新创建任务…"
-        defer { isSubmitting = false; submissionStatus = nil }
+        defer { isSubmitting = false }
         do {
-            // Re-estimating the same objective would likely pick the same budget
-            // again; reuse the accepted contract and grow its limits instead.
-            // The key makes repeated clicks for one exhausted task idempotent.
-            let retried = try await api.submit(goal.contract.retryingWithLargerBudget(), key: "budget-retry:\(goal.id)")
-            goals.removeAll { $0.id == retried.id }
-            goals.insert(retried, at: 0)
-            if generation == selectionGeneration { showArchived = false; select(retried.id) }
+            let limits = goal.contract.retryingWithLargerBudget().limits ?? TaskLimits()
+            let extended = try await api.extendGoal(goal.id, limits: limits)
+            if let index = goals.firstIndex(where: { $0.id == goal.id }) { goals[index] = extended }
+            if selectedID == goal.id { showArchived = false }
             await refresh()
         } catch { self.error = error.localizedDescription }
     }

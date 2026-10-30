@@ -17,7 +17,7 @@ from rocky.activities import Activities
 from rocky.config import Settings
 from rocky.models import GoalView, RunCheckpoint, RunInput, RunState, WakeCommand
 from rocky.planner import OpenAIPlanner
-from rocky.store import TERMINAL_STATUSES, Store
+from rocky.store import EXTENSION_REASON, TERMINAL_STATUSES, Store
 from rocky.tools import WorkspaceTools
 from rocky.workflow import GoalWorkflow
 
@@ -45,6 +45,11 @@ _RECOVERY_FEEDBACK = (
     "Rocky's execution engine stopped this task unexpectedly and the owner recovered it "
     "from its saved progress. An operation that was in progress may or may not have taken "
     "effect: inspect the current state before repeating it, then continue the task."
+)
+_EXTENSION_FEEDBACK = (
+    "The task stopped at its budget or time limit, and the owner raised the limits so it can "
+    "continue. Its workspace, progress and handoff are unchanged. Pick up where it stopped, "
+    "spend the new budget on the remaining work, and finish as soon as the criteria are met."
 )
 _HISTORY_LIMIT_REASON = (
     "The execution service stopped this task because its workflow history reached the size "
@@ -170,7 +175,12 @@ class Dispatcher:
                             model_settings=goal.model_settings,
                             # A recovered goal continues its counters, step
                             # numbers and progress from the saved projection.
-                            checkpoint=RunCheckpoint(state=goal.state, feedback=_RECOVERY_FEEDBACK)
+                            checkpoint=RunCheckpoint(
+                                state=goal.state,
+                                feedback=_EXTENSION_FEEDBACK
+                                if goal.state.reason == EXTENSION_REASON
+                                else _RECOVERY_FEEDBACK,
+                            )
                             if recovery
                             else None,
                         ),

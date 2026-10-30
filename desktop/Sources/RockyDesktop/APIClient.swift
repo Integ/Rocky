@@ -36,7 +36,7 @@ struct APIClient {
             case 401, 403: message = "本地服务认证失败，请重新启动应用。"
             case 404: message = "任务或文件不存在。"
             case 409: message = "任务状态已变化，请刷新后重试。"
-            case 422: message = "设置不符合要求，请检查目标、模型名称和 API 地址。"
+            case 422: message = "设置不符合要求，请检查目标、授权文件夹、模型名称和 API 地址。"
             case 502: message = "AI 未能完成任务评估，请检查模型配置后重新提交。"
             case 503: message = "服务暂时不可用，请检查本地服务与钥匙串权限。"
             default: message = "请求失败（\(response.statusCode)），请稍后重试。"
@@ -67,6 +67,10 @@ struct APIClient {
     /// Continues a goal that failed in the execution engine from its saved progress.
     func recoverGoal(_ id: String) async throws -> Goal {
         try await request("/goals/\(id)/recover", method: "POST")
+    }
+    /// Continues a goal that ran out of budget or time, with these limits.
+    func extendGoal(_ id: String, limits: TaskLimits) async throws -> Goal {
+        try await request("/goals/\(id)/extend", method: "POST", body: JSONEncoder().encode(limits))
     }
     func deleteGoal(_ id: String) async throws {
         _ = try await rawRequest("/goals/\(id)", method: "DELETE")

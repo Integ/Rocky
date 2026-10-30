@@ -24,7 +24,14 @@ from rocky.config import Settings
 from rocky.contract_check import ContractWarning, contract_warnings
 from rocky.credentials import CredentialError, CredentialStore
 from rocky.inference import ModelSettings, model_catalog
-from rocky.models import DraftedContract, GoalContract, GoalDraft, GoalView, Model
+from rocky.models import (
+    DraftedContract,
+    ExecutionLimits,
+    GoalContract,
+    GoalDraft,
+    GoalView,
+    Model,
+)
 from rocky.planner import OpenAIPlanner, PlannerError
 from rocky.providers import PRESETS, ProviderUpdate, credential_id, provider_model_catalog
 from rocky.store import MemoryConflictError, Store, equivalent_contracts
@@ -456,6 +463,18 @@ def create_app(
     def recover_failed_goal(goal_id: str):
         try:
             return database.recover_goal(goal_id)
+        except KeyError:
+            raise HTTPException(404, "Goal not found") from None
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @app.post(
+        "/goals/{goal_id}/extend", response_model=GoalView, status_code=202, dependencies=auth
+    )
+    def extend_goal(goal_id: str, limits: ExecutionLimits):
+        """Continue a goal that ran out of budget or time, from its saved progress."""
+        try:
+            return database.extend_goal(goal_id, limits)
         except KeyError:
             raise HTTPException(404, "Goal not found") from None
         except ValueError as exc:
