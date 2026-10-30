@@ -9,11 +9,12 @@ extension Color {
 struct WorkspaceView: View {
     @ObservedObject var model: AppModel
     @ObservedObject private var runtime: RuntimeManager
+    @ObservedObject private var agenda: AgendaModel
     @State private var confirmStop = false
     @State private var deletingGoal: Goal?
     @FocusState private var composerFocused: Bool
 
-    init(model: AppModel) { self.model = model; self.runtime = model.runtime }
+    init(model: AppModel) { self.model = model; self.runtime = model.runtime; self.agenda = model.agenda }
 
     var body: some View {
         NavigationSplitView {
@@ -26,6 +27,8 @@ struct WorkspaceView: View {
         .tint(.rockyAccent)
         .sheet(isPresented: $model.showSettings) { SettingsView(model: model) }
         .sheet(isPresented: $model.showApprovals) { ApprovalsView(model: model) }
+        .sheet(isPresented: $model.showAgenda) { AgendaView(model: model, agenda: agenda) }
+        .sheet(item: $model.scheduleSeed) { seed in ScheduleEditorView(agenda: agenda, seed: seed) }
         .sheet(isPresented: Binding(get: { model.contractReview != nil }, set: { if !$0 { model.contractReview = nil } })) {
             if let review = model.contractReview { ContractReviewView(model: model, review: review) }
         }
@@ -109,6 +112,19 @@ struct WorkspaceView: View {
                     }
                 }.padding(.horizontal, 10).frame(height: 32)
             }.buttonStyle(HoverButtonStyle(cornerRadius: 8)).disabled(!runtime.isReady)
+            Button { model.showAgenda = true } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "calendar.badge.clock").font(.system(size: 14)).frame(width: 18)
+                    Text("议程").font(.system(size: 12, weight: .medium))
+                    Spacer()
+                    let count = agenda.attentionCount
+                    if count > 0 {
+                        Text("\(count)").font(.system(size: 10, weight: .semibold)).foregroundStyle(.white)
+                            .padding(.horizontal, 6).padding(.vertical, 2).background(Color.orange, in: Capsule())
+                    }
+                }.padding(.horizontal, 10).frame(height: 32)
+            }.buttonStyle(HoverButtonStyle(cornerRadius: 8)).disabled(!runtime.isReady)
+                .help("长期目标和定时任务")
             Button { model.showSettings = true } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "slider.horizontal.3").font(.system(size: 14)).frame(width: 18)
@@ -156,6 +172,11 @@ struct WorkspaceView: View {
             }
         }
         ToolbarItemGroup(placement: .primaryAction) {
+            if let goal = model.selected {
+                Button { model.scheduleSeed = ScheduleSeed(contract: goal.contract) } label: {
+                    Label("定时重复", systemImage: "calendar.badge.plus")
+                }.help("让这个任务每天、每周或每隔一段时间再做一次").disabled(!runtime.isReady || !model.isConnected)
+            }
             if let goal = model.selected, goal.state.isTerminal {
                 Button { Task { await model.archive(goal, archived: !goal.isArchived) } } label: {
                     Label(goal.isArchived ? "移回最近任务" : "存档任务", systemImage: goal.isArchived ? "arrow.uturn.backward" : "archivebox")

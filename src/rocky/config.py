@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     api_token: SecretStr | None = None
     host: str = "127.0.0.1"
     port: int = 8000
+    # Plan steps (see rocky.agenda) that may run at the same time, across all
+    # plans; scheduled runs do not count. The agenda loop wakes this often.
+    agenda_concurrency: int = Field(default=1, ge=1, le=8)
+    agenda_interval_seconds: float = Field(default=10, ge=1, le=300)
     # Tool runs and state writes share these slots; model calls have their own.
     max_concurrent_activities: int = Field(default=8, ge=1, le=64)
     max_concurrent_model_calls: int = Field(default=4, ge=1, le=32)

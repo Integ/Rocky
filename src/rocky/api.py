@@ -21,6 +21,16 @@ from pydantic import Field
 from sqlalchemy.exc import IntegrityError
 
 from rocky import __version__
+from rocky.agenda import (
+    AgendaStore,
+    PlanDraftReview,
+    PlanRequest,
+    PlanStepDraft,
+    PlanView,
+    ScheduleBusyError,
+    ScheduleRequest,
+    ScheduleView,
+)
 from rocky.approval_policy import ApprovalRule, ApprovalSettings
 from rocky.backup import BackupError, create_backup, default_backup_dir, list_backups
 from rocky.config import Settings
@@ -156,6 +166,10 @@ class ContractReview(Model):
 
 class FollowUpRequest(Model):
     message: str = Field(min_length=1, max_length=2000)
+
+
+class StepsRequest(Model):
+    steps: list[PlanStepDraft] = Field(max_length=20)
 
 
 class WakeRequest(Model):
@@ -746,6 +760,125 @@ def create_app(
             database.delete_approval_rule(rule_id)
         except KeyError:
             raise HTTPException(404, "Approval rule not found") from None
+        return Response(status_code=204)
+
+    # Long-running agenda: plans run their steps as goals; schedules start goals.
+    agenda = AgendaStore(database)
+
+    def agenda_call(call, missing: str):
+        try:
+            return call()
+        except KeyError:
+            raise HTTPException(404, missing) from None
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @app.post("/plans/draft", response_model=PlanDraftReview, dependencies=auth)
+    async def draft_plan(draft: GoalDraft):
+        """Break a large objective into steps for owner review; nothing starts yet."""
+        check_folders(draft)
+        try:
+            result, tokens = await planner.decompose_goal(draft, get_default_model_settings())
+        except PlannerError:
+            raise HTTPException(502, "Could not break the goal into steps; retry") from None
+        return PlanDraftReview(steps=result.steps, concerns=result.concerns, drafting_tokens=tokens)
+
+    @app.post("/plans", response_model=PlanView, status_code=201, dependencies=auth)
+    def create_plan(request: PlanRequest):
+        check_folders(
+            GoalDraft(objective=request.objective, folders=request.folders, files=request.files)
+        )
+        return agenda.create_plan(request)
+
+    @app.get("/plans", response_model=list[PlanView], dependencies=auth)
+    def list_plans():
+        return agenda.plans()
+
+    @app.get("/plans/{plan_id}", response_model=PlanView, dependencies=auth)
+    def get_plan(plan_id: str):
+        if (plan := agenda.plan(plan_id)) is None:
+            raise HTTPException(404, "Plan not found")
+        return plan
+
+    @app.post("/plans/{plan_id}/cancel", response_model=PlanView, dependencies=auth)
+    def cancel_plan(plan_id: str):
+        """Stop the plan and the task of its running step."""
+        return agenda_call(lambda: agenda.cancel_plan(plan_id), "Plan not found")
+
+    @app.post("/plans/{plan_id}/{action}", response_model=PlanView, dependencies=auth)
+    def plan_action(plan_id: str, action: Literal["pause", "resume", "retry", "skip"]):
+        """Pause or resume the plan, or retry or skip its current step."""
+        return agenda_call(lambda: agenda.owner_action(plan_id, action), "Plan not found")
+
+    @app.put("/plans/{plan_id}/steps", response_model=PlanView, dependencies=auth)
+    def replace_plan_steps(plan_id: str, request: StepsRequest):
+        """Replace the steps that have not started."""
+        return agenda_call(
+            lambda: agenda.replace_remaining(plan_id, request.steps), "Plan not found"
+        )
+
+    @app.delete("/plans/{plan_id}", status_code=204, dependencies=auth)
+    def delete_plan(plan_id: str):
+        """Remove the plan record; the tasks it ran stay in the task list."""
+        agenda_call(lambda: agenda.delete_plan(plan_id), "Plan not found")
+        return Response(status_code=204)
+
+    def schedule_request(request: ScheduleRequest, call):
+        check_folders(request.contract)
+        try:
+            return call()
+        except KeyError:
+            raise HTTPException(404, "Schedule not found") from None
+        except ValueError as exc:
+            # A one-time schedule in the past is invalid input, not a conflict.
+            code = 422 if "already passed" in str(exc) else 409
+            raise HTTPException(code, str(exc)) from None
+
+    @app.get("/schedules", response_model=list[ScheduleView], dependencies=auth)
+    def list_schedules():
+        return agenda.schedules()
+
+    @app.post("/schedules", response_model=ScheduleView, status_code=201, dependencies=auth)
+    def create_schedule(request: ScheduleRequest):
+        return schedule_request(request, lambda: agenda.create_schedule(request))
+
+    @app.get("/schedules/{schedule_id}", response_model=ScheduleView, dependencies=auth)
+    def get_schedule(schedule_id: str):
+        if (schedule := agenda.schedule(schedule_id)) is None:
+            raise HTTPException(404, "Schedule not found")
+        return schedule
+
+    @app.put("/schedules/{schedule_id}", response_model=ScheduleView, dependencies=auth)
+    def update_schedule(schedule_id: str, request: ScheduleRequest):
+        return schedule_request(request, lambda: agenda.update_schedule(schedule_id, request))
+
+    @app.post(
+        "/schedules/{schedule_id}/run", response_model=GoalView, status_code=202, dependencies=auth
+    )
+    def run_schedule(schedule_id: str):
+        """Start one run now; the regular times are unchanged."""
+        current = agenda.schedule(schedule_id)
+        if current is None:
+            raise HTTPException(404, "Schedule not found")
+        check_folders(current.contract)
+        try:
+            return agenda.run_schedule_now(schedule_id, get_default_model_settings())
+        except ScheduleBusyError:
+            raise HTTPException(409, "The previous run has not ended yet") from None
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @app.post("/schedules/{schedule_id}/{action}", response_model=ScheduleView, dependencies=auth)
+    def toggle_schedule(schedule_id: str, action: Literal["pause", "resume"]):
+        return agenda_call(
+            lambda: agenda.set_schedule_enabled(schedule_id, action == "resume"),
+            "Schedule not found",
+        )
+
+    @app.delete("/schedules/{schedule_id}", status_code=204, dependencies=auth)
+    def delete_schedule(schedule_id: str):
+        """Remove the schedule; the tasks it started stay in the task list."""
+        agenda_call(lambda: agenda.delete_schedule(schedule_id), "Schedule not found")
         return Response(status_code=204)
 
     return app

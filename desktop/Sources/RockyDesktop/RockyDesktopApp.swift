@@ -37,6 +37,7 @@ struct RockyDesktopApp: App {
             }
             CommandMenu("任务") {
                 Button("显示任务详情") { model.showInspector.toggle() }.keyboardShortcut("i", modifiers: [.command, .option])
+                Button("议程…") { model.showAgenda = true }.keyboardShortcut("l", modifiers: [.command, .shift])
                 Button("刷新") { Task { await model.refresh() } }.keyboardShortcut("r")
             }
         }

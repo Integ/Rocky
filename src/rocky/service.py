@@ -16,6 +16,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.worker import Worker
 
 from rocky.activities import Activities
+from rocky.agenda_runner import AgendaRunner
 from rocky.config import Settings
 from rocky.models import GoalView, RunCheckpoint, RunInput, RunState, WakeCommand
 from rocky.monitoring import HEARTBEAT_FILE, HEARTBEAT_SECONDS
@@ -319,6 +320,8 @@ async def run_worker(settings: Settings | None = None) -> None:
     )
     activities = Activities(store, WorkspaceTools(settings), planner)
     dispatcher = asyncio.create_task(Dispatcher(client, store, settings).run())
+    # Scheduled runs and plan steps become ordinary queued goals for the dispatcher.
+    agenda = asyncio.create_task(AgendaRunner(store, settings, planner).run())
     ready_path = (
         Path(os.environ["ROCKY_WORKER_READY_FILE"])
         if os.environ.get("ROCKY_WORKER_READY_FILE")
@@ -342,8 +345,9 @@ async def run_worker(settings: Settings | None = None) -> None:
         if ready_path:
             ready_path.unlink(missing_ok=True)
             ready_path.with_name(HEARTBEAT_FILE).unlink(missing_ok=True)
-        dispatcher.cancel()
-        with suppress(asyncio.CancelledError):
-            await dispatcher
+        for task in (agenda, dispatcher):
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
         store.close()
         await planner.close()

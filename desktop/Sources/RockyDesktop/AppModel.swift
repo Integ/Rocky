@@ -31,6 +31,10 @@ final class AppModel: ObservableObject {
     @Published var provider: ProviderSettings?
     @Published var showSettings = false
     @Published var showApprovals = false
+    @Published var showAgenda = false
+    /// A task to repeat on a schedule, shown in the schedule editor.
+    @Published var scheduleSeed: ScheduleSeed?
+    lazy var agenda = AgendaModel(api: { [unowned self] in self.api })
     @Published var approvalPolicy: ApprovalPolicy?
     /// A drafted contract shown for review; nothing is submitted until the owner confirms.
     @Published var contractReview: PendingReview?
@@ -134,7 +138,11 @@ final class AppModel: ObservableObject {
     func run() async {
         await runtime.start()
         while !Task.isCancelled {
-            if runtime.isReady { await refresh() }
+            if runtime.isReady {
+                await refresh()
+                // Keeps the sidebar badge for plans that wait for the owner current.
+                if isConnected { await agenda.refresh() }
+            }
             // Poll slowly while no window is in front; alerts still arrive.
             let seconds: Double = NSApp?.isActive == true ? 3 : 15
             do { try await Task.sleep(for: .seconds(seconds)) } catch { break }

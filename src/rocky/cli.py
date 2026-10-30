@@ -22,6 +22,8 @@ def main() -> None:
     submit.add_argument("file", type=Path)
     submit.add_argument("--idempotency-key")
     commands.add_parser("list", help="List recent goals")
+    commands.add_parser("plans", help="List long-running plans and their steps")
+    commands.add_parser("schedules", help="List scheduled and recurring tasks")
     commands.add_parser(
         "status", help="Show service health: worker, Temporal, tasks, disk, backups"
     )
@@ -96,6 +98,8 @@ def main() -> None:
                 response = client.post("/goals", json=data, headers=extra)
             elif args.command == "list":
                 response = client.get("/goals")
+            elif args.command in {"plans", "schedules"}:
+                response = client.get(f"/{args.command}")
             elif args.command == "status":
                 response = client.get("/status")
             elif args.command == "cancel":

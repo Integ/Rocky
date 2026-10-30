@@ -377,6 +377,47 @@ GET retrieval and descriptor-relative workspace file operations. Receipt storage
 and exported deliverables retain structural validation in either mode. Credentials
 are never copied into error messages or HTTP response-header summaries.
 
+## Long-running agenda
+
+Plans and schedules (`rocky.agenda`) turn larger or recurring work into ordinary
+goals; they add no new execution path. Both are rows in the goal database with
+a revision column, and every change is a compare-and-set update, so owner API
+calls and the worker's agenda loop (`rocky.agenda_runner`, every 10 seconds)
+cannot overwrite each other.
+
+A plan holds an objective and up to 20 sequential steps. `POST /plans/draft`
+asks the model for a breakdown (`PlanDecomposition`, 1–12 steps plus concerns)
+without starting anything; the owner edits it and submits `POST /plans`. When a
+step's turn comes the loop drafts its contract with the same
+`prepare_contract` call the client uses, from the step objective plus the plan
+objective and earlier step summaries (bounded to the 8000-character objective
+limit). Deliverables of finished steps are copied into the new goal's workspace
+under `inputs/step-N/` before it starts. The goal is inserted in the same
+transaction that marks the step running, and its ID is derived from plan, step
+and attempt, so a crash cannot start a step twice.
+
+The loop follows each running step's goal. Success records the goal's handoff
+summary and delivered files; when replanning is on, the model then reviews the
+plan (`PlanRevision`): it may keep, replace or extend the remaining steps, or
+declare the objective achieved, at most 10 times per plan. Any other terminal
+result puts the plan in `attention`: the owner retries the step (a new attempt
+and goal), skips it, or continues the step's goal in place (extend, follow-up,
+recover), after which the plan follows that goal again. Failed model calls back
+off 2, then 4 minutes; a third failure asks the owner. Plan steps share
+`ROCKY_AGENDA_CONCURRENCY` slots (default 1), granted by priority then age.
+Pausing stops new steps; cancelling also cancels the running step's goal.
+Drafting and review tokens are reported per plan, not charged to any goal.
+
+A schedule stores a fixed contract and a recurrence: once, every N minutes
+(at least 5), daily or weekly at a wall-clock time in an IANA time zone (the
+Mac's by default; a time skipped by a DST change runs an hour later). Each run
+inserts a goal whose objective names the schedule and run time, with an ID
+derived from the schedule and the planned time, in the transaction that
+advances `next_run_at`. Runs missed while the Mac slept collapse into one; a run
+whose previous run has not ended is skipped and counted. `POST
+/schedules/{id}/run` starts an extra run without changing the rhythm. Deleting
+a plan or schedule keeps the goals it started.
+
 ## macOS client and local API boundary
 
 The SwiftUI macOS application is the only client. It bundles the Python backend

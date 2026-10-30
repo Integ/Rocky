@@ -23,6 +23,7 @@ import openai
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ValidationError
 
+from rocky.agenda import PlanDecomposition, PlanRevision
 from rocky.config import Settings
 from rocky.credentials import CredentialStore
 from rocky.inference import ModelSettings
@@ -1474,6 +1475,76 @@ never change the criteria or limits. Return only DeliveryRequirements.
             concerns=requirements.concerns,
             drafting_tokens=input_tokens + output_tokens,
         )
+
+    async def decompose_goal(
+        self, draft: GoalDraft, model_settings: ModelSettings
+    ) -> tuple[PlanDecomposition, int]:
+        """Break a large objective into sequential steps; returns the plan and tokens used."""
+        result, input_tokens, output_tokens, _ = await self._request(
+            instructions="""Break a large objective into the steps Rocky will run for the owner.
+Each step becomes one autonomous task with its own contract, workspace and budget,
+which an independent reviewer checks against files it delivers. Steps run one
+after another in the order given. Each later step starts with copies of the files
+earlier steps delivered (under inputs/), plus a summary of what they reported.
+Make every step a coherent piece of work that produces checkable files: research
+notes, a design, a change with its verification report, a final report. A
+moderate task fits one step; split only where the work is too large or long for
+one task (about an hour and 100 tool steps) or where a later step depends on
+what an earlier one finds. Prefer 2 to 6 steps and never pad the plan. A
+self-contained objective may be a single step. Give each step a short title and
+a self-contained objective that states what to do, what to deliver and how it
+builds on earlier steps; it must make sense without the other steps' text.
+Do not invent requirements or facts. Use the owner's language.
+granted_folders lists folders every step may change; attached_files lists
+reference files every step can read.
+In concerns, list at most eight short problems the owner should resolve before
+starting, in their language: missing information, credentials, accounts or
+approvals the objective needs; a goal that cannot be checked from files. Use an
+empty list when there is nothing to resolve. Return only PlanDecomposition.
+""",
+            payload={"objective": draft.objective}
+            | ({"granted_folders": draft.folders} if draft.folders else {})
+            | ({"attached_files": draft.files} if draft.files else {}),
+            schema=PlanDecomposition,
+            max_output_tokens=self._response_tokens(
+                "plan_response_tokens", _PLAN_RESPONSE_TOKENS, model_settings
+            ),
+            inference=model_settings,
+            cache_key="rocky-plan-decomposition-v1",
+        )
+        log.info(
+            "Decomposed a goal with %d input and %d output tokens", input_tokens, output_tokens
+        )
+        return result, input_tokens + output_tokens
+
+    async def revise_plan(
+        self, progress: dict[str, Any], model_settings: ModelSettings
+    ) -> tuple[PlanRevision, int]:
+        """Review a plan after a step finished; returns the revision and tokens used."""
+        result, input_tokens, output_tokens, _ = await self._request(
+            instructions="""Review the owner's long-running plan after one of its steps finished.
+plan.objective is the overall goal. finished lists completed or skipped steps with
+the summary and files each delivered; remaining lists steps that have not started.
+Each step runs as one autonomous task that receives copies of earlier deliverables.
+Set complete to true only when the finished steps already achieve the overall
+objective, so the remaining steps are unnecessary. Otherwise return in remaining
+the steps still needed, in order: keep the planned ones when they still fit,
+adjust them to what earlier steps found, add a step a finding requires, or drop
+one that is no longer needed. Never repeat finished work, except to fix a gap a
+summary reports. Keep each objective self-contained. At most max_remaining steps.
+In note, give the owner one short sentence on what changed and why, or leave it
+empty when the plan stands. Use the owner's language. Return only PlanRevision.
+""",
+            payload=progress,
+            schema=PlanRevision,
+            max_output_tokens=self._response_tokens(
+                "plan_response_tokens", _PLAN_RESPONSE_TOKENS, model_settings
+            ),
+            inference=model_settings,
+            cache_key="rocky-plan-revision-v1",
+        )
+        log.info("Revised a plan with %d input and %d output tokens", input_tokens, output_tokens)
+        return result, input_tokens + output_tokens
 
     async def plan(self, request: PlanInput) -> PlanResult:
         access = (

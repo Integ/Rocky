@@ -27,6 +27,7 @@
 - **记忆建议**（[`f60b056`](https://github.com/Integ/Rocky/commit/f60b056)）：任务完成或停下时模型最多提出三条，所有者确认后才写入；设置里可管理长期记忆。
 - **离线启动**（[`5883210`](https://github.com/Integ/Rocky/commit/5883210)）：应用内置 Python 和锁定依赖，首次打开不需要网络。
 - **浏览器工具 `browse`**（[`8d5881d`](https://github.com/Integ/Rocky/commit/8d5881d)）：用本机 Chrome 打开需要 JavaScript 的页面，只读打开与 GET 同级，交互步骤逐次批准。
+- **长期目标与定时任务（议程）**：大目标由 AI 拆成步骤（`POST /plans/draft`），所有者核对后开始（`POST /plans`）；每一步作为独立任务依次执行，开始前自动拟定合同，前面步骤的交付文件复制到后面步骤的 `inputs/step-N/`；每完成一步，模型可调整剩余步骤或判断目标已达成。某步没完成时计划停下等所有者重试、跳过，或在原任务上继续后自动接上。定时任务（`/schedules`）按一次、间隔、每天、每周（本地时区）启动同一份合同；错过的多次只补一次，上次未结束则跳过。worker 内的议程循环每 10 秒推进，同时运行的计划步骤默认 1 个（`ROCKY_AGENDA_CONCURRENCY`）。客户端侧栏新增“议程”，任务工具栏新增“定时重复”。
 - **运维**（`8d5881d`）：`GET /status`、`GET /metrics`（Prometheus）、每日备份与 `rocky restore`、日志按大小轮转、`rocky rotate-token`。
 
 ### 变更

@@ -172,6 +172,39 @@ struct APIClient {
         let path = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? id
         _ = try await rawRequest("/memory-proposals/\(path)/\(save ? "save" : "dismiss")", method: "POST", body: body)
     }
+    /// Breaks a large objective into steps for review; nothing starts yet.
+    func draftPlan(_ draft: GoalDraft) async throws -> PlanDraftReview {
+        try await request("/plans/draft", method: "POST", body: JSONEncoder().encode(draft), timeout: 330)
+    }
+    func createPlan(_ plan: PlanRequest) async throws -> Plan {
+        try await request("/plans", method: "POST", body: JSONEncoder().encode(plan))
+    }
+    func plans() async throws -> [Plan] { try await request("/plans") }
+    /// pause, resume, retry, skip or cancel.
+    func planAction(_ id: String, _ action: String) async throws -> Plan {
+        try await request("/plans/\(id)/\(action)", method: "POST")
+    }
+    func deletePlan(_ id: String) async throws {
+        _ = try await rawRequest("/plans/\(id)", method: "DELETE")
+    }
+    func schedules() async throws -> [Schedule] { try await request("/schedules") }
+    func createSchedule(_ schedule: ScheduleRequest) async throws -> Schedule {
+        try await request("/schedules", method: "POST", body: JSONEncoder().encode(schedule))
+    }
+    func updateSchedule(_ id: String, _ schedule: ScheduleRequest) async throws -> Schedule {
+        try await request("/schedules/\(id)", method: "PUT", body: JSONEncoder().encode(schedule))
+    }
+    /// pause or resume.
+    func scheduleAction(_ id: String, _ action: String) async throws -> Schedule {
+        try await request("/schedules/\(id)/\(action)", method: "POST")
+    }
+    /// Starts one run now; the regular times are unchanged.
+    func runSchedule(_ id: String) async throws -> Goal {
+        try await request("/schedules/\(id)/run", method: "POST")
+    }
+    func deleteSchedule(_ id: String) async throws {
+        _ = try await rawRequest("/schedules/\(id)", method: "DELETE")
+    }
     func artifact(_ id: String, path: String) async throws -> ArtifactContent {
         var parts = URLComponents()
         parts.path = "/goals/\(id)/artifacts/content"

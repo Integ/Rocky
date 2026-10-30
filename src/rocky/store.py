@@ -314,6 +314,9 @@ class Store:
         self.sessions = sessionmaker(self.engine, expire_on_commit=False)
 
     def initialize(self) -> None:
+        # Registers the agenda tables, which live in their own module.
+        import rocky.agenda  # noqa: F401
+
         existing = inspect(self.engine).has_table(GoalRow.__tablename__)
         Base.metadata.create_all(self.engine)
         for attempt in range(2):
@@ -527,41 +530,52 @@ class Store:
         model_settings: ModelSettings | None = None,
     ) -> GoalView:
         with self.sessions.begin() as session:
-            existing = session.get(GoalRow, goal_id)
-            if existing:
-                lifecycle = session.get(GoalLifecycleRow, goal_id)
-                if lifecycle and lifecycle.deleted:
-                    raise ValueError("Idempotency key belongs to a deleted goal")
-                if not equivalent_contracts(existing.contract, contract):
-                    raise ValueError("Idempotency key is already associated with a different goal")
-                return self._view(existing, session)
-            now = datetime.now(UTC).isoformat()
-            state = RunState(goal_id=goal_id, updated_at=now)
-            row = GoalRow(
+            return self.insert_goal(session, goal_id, contract, model_settings)
+
+    def insert_goal(
+        self,
+        session: Session,
+        goal_id: str,
+        contract: GoalContract,
+        model_settings: ModelSettings | None = None,
+    ) -> GoalView:
+        """create_goal inside a caller's transaction, so agenda bookkeeping and
+        the new goal commit together."""
+        existing = session.get(GoalRow, goal_id)
+        if existing:
+            lifecycle = session.get(GoalLifecycleRow, goal_id)
+            if lifecycle and lifecycle.deleted:
+                raise ValueError("Idempotency key belongs to a deleted goal")
+            if not equivalent_contracts(existing.contract, contract):
+                raise ValueError("Idempotency key is already associated with a different goal")
+            return self._view(existing, session)
+        now = datetime.now(UTC).isoformat()
+        state = RunState(goal_id=goal_id, updated_at=now)
+        row = GoalRow(
+            goal_id=goal_id,
+            contract=contract.model_dump(mode="json"),
+            state=state.model_dump(mode="json"),
+            created_at=now,
+        )
+        session.add(row)
+        session.add(
+            MessageRow(
                 goal_id=goal_id,
-                contract=contract.model_dump(mode="json"),
-                state=state.model_dump(mode="json"),
+                message_id="task",
+                role="user",
+                content=self._task_message(contract),
+                priority=0,
                 created_at=now,
             )
-            session.add(row)
+        )
+        if model_settings is not None:
             session.add(
-                MessageRow(
-                    goal_id=goal_id,
-                    message_id="task",
-                    role="user",
-                    content=self._task_message(contract),
-                    priority=0,
-                    created_at=now,
+                GoalModelSettingsRow(
+                    goal_id=goal_id, settings=model_settings.model_dump(mode="json")
                 )
             )
-            if model_settings is not None:
-                session.add(
-                    GoalModelSettingsRow(
-                        goal_id=goal_id, settings=model_settings.model_dump(mode="json")
-                    )
-                )
-            session.flush()
-            return self._view(row, session)
+        session.flush()
+        return self._view(row, session)
 
     def get_goal(self, goal_id: str) -> GoalView | None:
         with self.sessions() as session:

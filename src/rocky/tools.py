@@ -543,6 +543,37 @@ class WorkspaceTools:
                     parent, parts[-1], max_bytes=None if self.full_access else MAX_BYTES
                 )
 
+    def copy_goal_files(
+        self,
+        source_goal: str,
+        paths: list[str],
+        target_goal: str,
+        prefix: str,
+        *,
+        max_bytes: int = 20_000_000,
+    ) -> list[str]:
+        """Copy files of one goal into another goal's workspace under prefix.
+
+        A later step of a plan starts with the deliverables of earlier steps
+        as ordinary workspace files. Missing, unreadable or oversized files are
+        skipped; returns the target-relative paths that were copied.
+        """
+        copied: list[str] = []
+        for path in paths:
+            try:
+                target = [*_parts(prefix), *_parts(path)]
+                data = self.read_artifact_bytes(source_goal, path)
+                if len(data) > max_bytes:
+                    continue
+                with self._goal(target_goal) as (goal_fd, _):
+                    with _parent_directory(goal_fd, target, create=True) as parent:
+                        _atomic_write(parent, target[-1], data)
+            except (OSError, ToolError):
+                continue
+            max_bytes -= len(data)
+            copied.append("/".join(target))
+        return copied
+
     @contextmanager
     def _goal(
         self, goal_id: str, *, create: bool = True, shared: bool = False
