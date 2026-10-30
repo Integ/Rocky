@@ -49,8 +49,40 @@ final class AppModel: ObservableObject {
     /// Last applied server page per history filter, revalidated by its tag on each poll.
     private var goalLists: [Bool: APIClient.GoalList] = [:]
     private let client: APIClient?
+    private var attention = AttentionTracker()
+    private var runTask: Task<Void, Never>?
+    /// Notifications and the Dock badge; nil outside a bundled app.
+    let delivery: AttentionDelivery?
+    /// Brings the main window back after it was closed; set by the window.
+    var openMainWindow: (() -> Void)?
 
-    init(client: APIClient? = nil) { self.client = client }
+    init(client: APIClient? = nil, delivery: AttentionDelivery? = nil) {
+        self.client = client
+        self.delivery = delivery
+        self.delivery?.onOpen = { [weak self] id in self?.reveal(id) }
+    }
+
+    /// Tasks waiting for the owner: an approval request or a question.
+    var attentionGoals: [Goal] { goals.filter { !$0.isArchived && AttentionTracker.needsOwner($0.state) } }
+
+    /// Polls for the life of the app, not of the window, so alerts keep
+    /// arriving while the window is closed and Rocky stays in the menu bar.
+    func startIfNeeded() {
+        guard runTask == nil else { return }
+        runTask = Task { await run() }
+    }
+
+    /// Opens a task from a notification or the menu bar.
+    func reveal(_ id: String) {
+        if let window = NSApp.mainWorkspaceWindow {
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            openMainWindow?()
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        if let goal = goals.first(where: { $0.id == id }) { showArchived = goal.isArchived }
+        select(id)
+    }
 
     var api: APIClient { client ?? APIClient(baseURL: runtime.apiURL, token: runtime.apiToken) }
     var selected: Goal? { goals.first { $0.id == selectedID } }
@@ -87,6 +119,8 @@ final class AppModel: ObservableObject {
                 let fresh = (recentList.goals + archivedList.goals).filter { seen.insert($0.id).inserted }
                 if goals != fresh { goals = fresh }
                 if selectedID != nil, selected == nil { select(nil) }
+                delivery?.deliver(attention.update(goals))
+                delivery?.updateBadge(attentionGoals.count)
             }
             provider = settings
             isConnected = true

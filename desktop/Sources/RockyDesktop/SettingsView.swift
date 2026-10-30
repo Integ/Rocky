@@ -15,6 +15,7 @@ struct SettingsView: View {
     @State private var saving = false
     @State private var message: String?
     @State private var saved = false
+    @AppStorage(keepInMenuBarKey) private var keepInMenuBar = true
 
     private var currentEndpoint: Bool {
         model.provider?.provider == provider && model.provider?.base_url?.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == baseURL.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -99,6 +100,14 @@ struct SettingsView: View {
                     } header: { Text("思考设置") } footer: {
                         Text("仅显示所选模型支持的档位。更高的思考程度可能增加响应时间和用量。")
                     }
+                }
+                Section {
+                    Toggle("关闭窗口后留在菜单栏", isOn: $keepInMenuBar)
+                    Button("打开系统通知设置") {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") { NSWorkspace.shared.open(url) }
+                    }
+                } header: { Text("通知") } footer: {
+                    Text("任务需要审批、等你回复或结束时，Rocky 会发系统通知，Dock 图标显示待处理数；任务一直等你时每 3 小时再提醒一次。留在菜单栏时，关闭窗口也能继续收到通知。")
                 }
                 Section {
                     HStack(spacing: 10) {
