@@ -1,0 +1,82 @@
+{
+  "engine": "F5-TTS",
+  "implementation": "f5-tts-mlx",
+  "model": "lucasnewman/f5-tts-mlx",
+  "model_revisions": {
+    "lucasnewman/f5-tts-mlx": "2d719cadec8fd3887c8599475a5f65924d523654",
+    "lucasnewman/vocos-mel-24khz": "ee89d00fac94b61e1235e0869f3e8d49711b7484"
+  },
+  "packages": {
+    "f5-tts-mlx": "0.2.6",
+    "mlx": "0.21.1",
+    "vocos-mlx": "0.0.7"
+  },
+  "quantization_bits": 8,
+  "steps": 32,
+  "method": "euler",
+  "sample_rate": 24000,
+  "reference": {
+    "file": "f5-reference.wav",
+    "sha256": "a7d6366ba72575953232e2a8f2a45495ff2a2f965715e7287f61e791b72a8fb6",
+    "transcript": "先核对目标、验收标准、交付文件和预算，再开始执行。",
+    "origin": "Synthetic macOS Tingting narration from the previous README video; no human recording."
+  },
+  "scenes": [
+    {
+      "scene": 1,
+      "text": "Rocky，在你的苹果电脑上规划、执行和核验。",
+      "seed": 20261102,
+      "duration_seconds": 4.631833,
+      "sha256": "0d70b4854ff5dbaa62f982f3f14665d8ed2de893c54769ba9cc1bbe639a96718"
+    },
+    {
+      "scene": 2,
+      "text": "先核对目标、验收标准、交付文件和预算，再开始执行。",
+      "seed": 20261103,
+      "duration_seconds": 6.637167,
+      "sha256": "73c4f25e7898fd00001e2d1cb752766f2b5ba88226b802a555d2afa69dfb0dd4"
+    },
+    {
+      "scene": 3,
+      "text": "关闭窗口，后台任务继续；重启后从执行检查点恢复。",
+      "seed": 20261104,
+      "duration_seconds": 6.637167,
+      "sha256": "bdc94b0513e74221a418277a26fb1631f1b8bd7565c2df3681ae8bc3bb77bfac"
+    },
+    {
+      "scene": 4,
+      "text": "需要批准或补充资料时，在“待你处理”中接住下一步。",
+      "seed": 20261105,
+      "duration_seconds": 6.637167,
+      "sha256": "384ed4735d8b58d66425b7525ee3b0b0720b30782db4b514cf57ad8e7c74a119"
+    },
+    {
+      "scene": 5,
+      "text": "长期目标、定时与事件任务，按已确认的要求推进。",
+      "seed": 20261106,
+      "duration_seconds": 6.637167,
+      "sha256": "65bf78cc6ec50f36f6610f0b2e9eb180c9776551579b857530d4e895f83f00d1"
+    },
+    {
+      "scene": 6,
+      "text": "核验后保存文件快照；接受结果，或在原任务上要求修改。",
+      "seed": 20261107,
+      "duration_seconds": 6.637167,
+      "sha256": "2fec1307ab77ae6762e1a7da88bdd9cd937e3f2a34f7ca1e4a5724b265ff51bc"
+    },
+    {
+      "scene": 7,
+      "text": "看清排队、用量、提示词版本和空间占用，导出脱敏诊断。",
+      "seed": 20261108,
+      "duration_seconds": 6.637167,
+      "sha256": "e7c97eedacec85cd1dd4fdff40aad95b93a32b04f0a663cc8d26ed8154233ea1"
+    },
+    {
+      "scene": 8,
+      "text": "从一个目标开始，与 Rocky 一起推进工作。",
+      "seed": 20261109,
+      "duration_seconds": 4.631833,
+      "sha256": "20acd0ca5e18ad10ffdf374412222d4d3454221c886345c99266b34ffd7a39c8"
+    }
+  ]
+}
