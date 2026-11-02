@@ -86,6 +86,15 @@ def synthesize_narration(work, tts_python, narration_dir=None):
         records = manifest.get("scenes", [])
         if manifest.get("engine") != "F5-TTS" or len(records) != len(STORYBOARD):
             raise ValueError("Narration must have an F5-TTS manifest for all eight scenes")
+        with (MEDIA / "voice-profile.json").open("rb") as handle:
+            profile_digest = hashlib.file_digest(handle, "sha256").hexdigest()
+        with (MEDIA / "f5-reference.wav").open("rb") as handle:
+            reference_digest = hashlib.file_digest(handle, "sha256").hexdigest()
+        if (
+            manifest.get("voice_profile_sha256") != profile_digest
+            or manifest.get("reference", {}).get("sha256") != reference_digest
+        ):
+            raise ValueError("Narration was generated with a different voice profile")
         sources = []
         for i, (record, scene) in enumerate(zip(records, STORYBOARD, strict=True)):
             source = narration_dir / f"voice-{i}.wav"
@@ -151,6 +160,33 @@ def verify_video(video):
     }
 
 
+def build_voice_preview(work):
+    run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(work / "voice-0.wav"),
+            "-i",
+            str(work / "voice-1.wav"),
+            "-filter_complex",
+            "[0:a]apad=pad_dur=0.5[a0];[a0][1:a]concat=n=2:v=0:a=1,loudnorm=I=-18:TP=-2:LRA=7[a]",
+            "-map",
+            "[a]",
+            "-ar",
+            "48000",
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "160k",
+            str(work / "rocky-voice-preview.mp3"),
+        ]
+    )
+
+
 def replace_audio(work, tts_python, narration_dir=None):
     synthesize_narration(work, tts_python, narration_dir)
     command = [
@@ -192,7 +228,9 @@ def replace_audio(work, tts_python, narration_dir=None):
     ]
     run(command)
     verify_video(video)
+    build_voice_preview(work)
     shutil.copyfile(video, MEDIA / "rocky-intro.mp4")
+    shutil.copyfile(work / "rocky-voice-preview.mp3", MEDIA / "rocky-voice-preview.mp3")
     shutil.copyfile(work / "voice-generation.json", MEDIA / "voice-generation.json")
     print("Replaced the narration with F5-TTS; copied existing video/subtitle streams.")
 
@@ -291,10 +329,17 @@ def build(work, frames_only=False, audio_only=False, tts_python=sys.executable, 
     ]
     run(command)
     build_preview(work)
+    build_voice_preview(work)
     verify_video(video)
     # Copy only finished products; intermediate images/audio stay outside the repository.
     MEDIA.mkdir(exist_ok=True)
-    for name in ("rocky-intro.mp4", "rocky-intro.gif", "rocky-intro.srt", "voice-generation.json"):
+    for name in (
+        "rocky-intro.mp4",
+        "rocky-intro.gif",
+        "rocky-intro.srt",
+        "rocky-voice-preview.mp3",
+        "voice-generation.json",
+    ):
         shutil.copyfile(work / name, MEDIA / name)
     shutil.copyfile(work / "scene-00.png", MEDIA / "rocky-v0.2-overview.png")
     print("Published local media files to docs/media.")

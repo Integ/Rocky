@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import re
 from importlib.metadata import version
 from pathlib import Path
 
@@ -31,31 +32,53 @@ def synthesize(output, reference_audio, reference_text):
     transcript = reference_text.read_text(encoding="utf-8").strip()
     if not transcript:
         raise ValueError("Reference transcript is empty")
+    profile_path = ROOT / "docs/media/voice-profile.json"
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    if profile["reference"]["sha256"] != digest(reference_audio):
+        raise ValueError("Reference audio does not match the selected voice profile")
+    settings = profile["synthesis"]
     rms = float(np.sqrt(np.mean(reference**2)))
     if rms < 0.001:
         raise ValueError("Reference audio is silent")
     if rms < 0.1:
         reference = reference * (0.1 / rms)
     condition = mx.array(reference)[None, :]
-    model = F5TTS.from_pretrained(MODEL, quantization_bits=8)
+    # Keep the reference's speaking cadence and punctuation pauses, rather than
+    # forcing every sentence into the same six-second duration.
+    active = np.flatnonzero(np.abs(reference) > 0.01)
+    speech_span = (active[-1] - active[0] + 1) / rate
+
+    def units(text):
+        return len(text.encode("utf-8")) + 3 * len(re.findall(r"[。，、；：？！]", text))
+
+    reference_units = units(transcript)
+    model = None
     storyboard = json.loads((ROOT / "scripts/readme_storyboard.json").read_text(encoding="utf-8"))
     output.mkdir(parents=True, exist_ok=True)
     records = []
     for i, scene in enumerate(storyboard):
         narrative = scene.get("narration", scene["caption"])
-        target_seconds = scene["end"] - scene["start"] - 1.4
+        target_seconds = max(
+            1.5, speech_span * units(narrative) / reference_units / settings["speed"] + 0.25
+        )
+        if target_seconds + 0.08 > scene["end"] - scene["start"] - 1.0:
+            raise ValueError(
+                f"Shorten scene {i + 1}; natural narration needs {target_seconds:.2f}s"
+            )
         total_frames = round((len(reference) / rate + target_seconds) * rate / HOP_LENGTH)
         text = convert_char_to_pinyin([transcript + " " + narrative])
         print(f"F5-TTS: synthesizing scene {i + 1}/{len(storyboard)}", flush=True)
+        if model is None:
+            model = F5TTS.from_pretrained(MODEL, quantization_bits=settings["quantization_bits"])
         wave, trajectory = model.sample(
             condition,
             text=text,
             duration=total_frames,
-            steps=32,
-            method="euler",
-            cfg_strength=2.0,
+            steps=settings["steps"],
+            method=settings["method"],
+            cfg_strength=settings["cfg_strength"],
             sway_sampling_coef=-1.0,
-            seed=20261102 + i,
+            seed=settings["seed"] + i,
         )
         wave = wave[len(reference) :]
         mx.eval(wave)
@@ -72,7 +95,7 @@ def synthesize(output, reference_audio, reference_text):
             {
                 "scene": i + 1,
                 "text": narrative,
-                "seed": 20261102 + i,
+                "seed": settings["seed"] + i,
                 "duration_seconds": round(len(audio) / SAMPLE_RATE, 6),
                 "sha256": digest(path),
             }
@@ -91,15 +114,17 @@ def synthesize(output, reference_audio, reference_text):
         "model": MODEL,
         "model_revisions": revisions,
         "packages": {name: version(name) for name in ("f5-tts-mlx", "mlx", "vocos-mlx")},
-        "quantization_bits": 8,
-        "steps": 32,
-        "method": "euler",
+        **settings,
+        "voice_profile": profile["name"],
+        "voice_profile_sha256": digest(profile_path),
         "sample_rate": SAMPLE_RATE,
         "reference": {
             "file": reference_audio.name,
             "sha256": digest(reference_audio),
             "transcript": transcript,
-            "origin": "Synthetic macOS Tingting narration from the previous README video; no human recording.",
+            "origin": profile["reference"]["origin"],
+            "provider": profile["reference"]["provider"],
+            "voice": profile["reference"]["voice"],
         },
         "scenes": records,
     }

@@ -1,0 +1,19 @@
+{
+  "name": "沉稳中文播音男声",
+  "reference": {
+    "provider": "Microsoft Edge Read Aloud",
+    "voice": "zh-CN-YunyangNeural",
+    "rate": "-5%",
+    "origin": "Synthetic Mandarin news-style male voice; no human recording or named-person imitation.",
+    "sha256": "876a5688bfa69d67c9aa0cbbe8e03fef44314f12ec44c293e4cfb3a995198c39"
+  },
+  "synthesis": {
+    "quantization_bits": 8,
+    "steps": 48,
+    "method": "euler",
+    "cfg_strength": 2.0,
+    "speed": 1.0,
+    "timing": "reference-paced",
+    "seed": 20261102
+  }
+}

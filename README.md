@@ -15,7 +15,8 @@ Rocky 是一个长期运行的自主数字代理。你确认目标、验收标�
 
 ## 一分钟了解 v0.2
 
-▶ [观看介绍视频](docs/media/rocky-intro.mp4)（60 秒，F5-TTS 中文合成旁白与字幕） ·
+▶ [观看介绍视频](docs/media/rocky-intro.mp4)（60 秒，F5-TTS 中文播音男声与字幕） ·
+[男声试听](docs/media/rocky-voice-preview.mp3) ·
 [下载字幕](docs/media/rocky-intro.srt)
 
 图片和视频为**功能示意与示例数据，不是真实任务录屏**。从确认任务要求出发，依次展示持续执行、
