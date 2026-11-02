@@ -212,9 +212,24 @@ class MemoryProposal(Model):
     keywords: str = Field(default="", max_length=200)
 
 
+class OwnerQuestion(Model):
+    """One concrete request for information; never grants tool permission."""
+
+    text: str = Field(min_length=1, max_length=1000)
+    options: list[
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    ] = Field(default_factory=list, max_length=4)
+
+
+class PendingQuestion(OwnerQuestion):
+    question_id: str
+    requested_at: str
+
+
 class Decision(Model):
     kind: Literal["act", "wait", "finish", "blocked"]
     reason: str = Field(max_length=2000)
+    question: OwnerQuestion | None = None
     action: Action | None = None
     # Independent read-only actions dispatched concurrently in one step.
     actions: list[Action] | None = Field(default=None, max_length=MAX_PARALLEL_ACTIONS)
@@ -314,6 +329,7 @@ class RunState(Model):
     cached_input_tokens: int = 0
     observations: list[Observation] = Field(default_factory=list)
     artifacts: list[Artifact] = Field(default_factory=list)
+    delivery_archive: str | None = None
     wake_at: str | None = None
     updated_at: str = ""
     cycle: int = 0
@@ -324,6 +340,7 @@ class RunState(Model):
     recovery_attempts: int = 0
     task_progress: TaskProgress = Field(default_factory=TaskProgress)
     pending_approval: PendingApproval | None = None
+    pending_question: PendingQuestion | None = None
     deadline_at: str | None = None
     approved_command_prefixes: list[list[str]] = Field(default_factory=list)
     approved_http_scopes: list[HttpScope] = Field(default_factory=list)
@@ -343,10 +360,13 @@ class PlanInput(Model):
     memory: dict[str, Any] = Field(default_factory=dict)
     # Owner approval rules in effect, added by the planning Activity.
     approvals: dict[str, Any] = Field(default_factory=dict)
+    interactive: bool = False
 
 
 class PlanResult(Model):
     decision: Decision
+    # Application-collected IDs of complete user messages in the final model envelope.
+    consumed_message_ids: list[str] = Field(default_factory=list, max_length=128)
     input_tokens: int = 0
     output_tokens: int = 0
     # Part of input_tokens served from the provider's prompt cache.
@@ -394,6 +414,7 @@ class VerificationResult(Model):
     passed: bool
     feedback: str
     artifacts: list[Artifact] = Field(default_factory=list)
+    delivery_archive: str | None = None
     # Reviewer claims with the application's audit result for each.
     claims: list[dict[str, Any]] = Field(default_factory=list, max_length=90)
     input_tokens: int = 0
@@ -440,6 +461,7 @@ class ReviewVerdict(Model):
 
 
 class GoalView(Model):
+    delivery_review: Literal["pending", "accepted", "changes_requested"] | None = None
     goal_id: str
     contract: GoalContract
     state: RunState
@@ -465,6 +487,8 @@ class RunCheckpoint(Model):
     last_batch_progress: list[str] = Field(default_factory=list)
     wake_generation: int = 0
     consumed_wake_generation: int = 0
+    prioritized_wake_generation: int = 0
+    interactive_pending: bool = False
     wake_feedback: str = ""
     seen_wake_commands: list[str] = Field(default_factory=list)
     cancel_requested: bool = False

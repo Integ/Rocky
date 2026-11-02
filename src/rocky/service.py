@@ -18,12 +18,15 @@ from temporalio.worker import Worker
 from rocky.activities import Activities
 from rocky.agenda_runner import AgendaRunner
 from rocky.config import Settings
+from rocky.inference import ModelSettings
+from rocky.model_queue import ModelQueue
 from rocky.models import GoalView, RunCheckpoint, RunInput, RunState, WakeCommand
 from rocky.monitoring import HEARTBEAT_FILE, HEARTBEAT_SECONDS
 from rocky.planner import OpenAIPlanner
 from rocky.store import EXTENSION_REASON, FOLLOW_UP_REASON, TERMINAL_STATUSES, Store
 from rocky.tools import WorkspaceTools
-from rocky.workflow import MODEL_QUEUE_SUFFIX, GoalWorkflow
+from rocky.triggers import TriggerStore
+from rocky.workflow import INTERACTIVE_QUEUE_SUFFIX, MODEL_QUEUE_SUFFIX, GoalWorkflow
 
 log = logging.getLogger(__name__)
 _RECONCILIATION_INTERVAL_SECONDS = 30
@@ -192,6 +195,7 @@ class Dispatcher:
                             # numbers and progress from the saved projection.
                             checkpoint=RunCheckpoint(
                                 state=goal.state,
+                                interactive_pending=True,
                                 feedback=_REQUEUE_FEEDBACK.get(
                                     goal.state.reason, _RECOVERY_FEEDBACK
                                 ),
@@ -259,9 +263,9 @@ async def goal_workers(
     model_slots: int | None = None,
     **options,
 ):
-    """Run goal workflows with tools on one queue and model calls on another.
+    """Run tools, normal model calls, and owner-priority calls on separate queues.
 
-    Both workers register every activity, so activities scheduled on the
+    All workers register every activity, so activities scheduled on the
     workflow queue by histories recorded before the split still run.
     """
     limits = {"max_concurrent_activities": tool_slots} if tool_slots else {}
@@ -281,6 +285,16 @@ async def goal_workers(
             Worker(
                 client,
                 task_queue=task_queue + MODEL_QUEUE_SUFFIX,
+                activities=activities,
+                **model_limits,
+            )
+        )
+        # Waiting normal Activities cannot occupy this lane. Actual provider
+        # concurrency across both lanes and the API is bounded by ModelQueue.
+        await stack.enter_async_context(
+            Worker(
+                client,
+                task_queue=task_queue + MODEL_QUEUE_SUFFIX + INTERACTIVE_QUEUE_SUFFIX,
                 activities=activities,
                 **model_limits,
             )
@@ -312,7 +326,16 @@ async def run_worker(settings: Settings | None = None) -> None:
     store = Store(settings.database_url)
     store.initialize()
     # Settings must remain accessible on first launch before a key is saved.
-    planner = OpenAIPlanner(settings, defer_client=True)
+    from rocky.prompt_archive import PromptArchive
+
+    admission = ModelQueue(store, settings)
+    await asyncio.to_thread(admission.configure)
+    planner = OpenAIPlanner(
+        settings,
+        defer_client=True,
+        prompt_archive=PromptArchive(store),
+        model_queue=admission,
+    )
     client = await Client.connect(
         settings.temporal_address,
         namespace=settings.temporal_namespace,
@@ -322,6 +345,11 @@ async def run_worker(settings: Settings | None = None) -> None:
     dispatcher = asyncio.create_task(Dispatcher(client, store, settings).run())
     # Scheduled runs and plan steps become ordinary queued goals for the dispatcher.
     agenda = asyncio.create_task(AgendaRunner(store, settings, planner).run())
+    triggers = asyncio.create_task(
+        TriggerStore(store, WorkspaceTools(settings)).run(
+            ModelSettings(model=settings.model, reasoning_effort=settings.reasoning_effort)
+        )
+    )
     ready_path = (
         Path(os.environ["ROCKY_WORKER_READY_FILE"])
         if os.environ.get("ROCKY_WORKER_READY_FILE")
@@ -345,7 +373,7 @@ async def run_worker(settings: Settings | None = None) -> None:
         if ready_path:
             ready_path.unlink(missing_ok=True)
             ready_path.with_name(HEARTBEAT_FILE).unlink(missing_ok=True)
-        for task in (agenda, dispatcher):
+        for task in (agenda, triggers, dispatcher):
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task

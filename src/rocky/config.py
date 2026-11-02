@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     # Tool runs and state writes share these slots; model calls have their own.
     max_concurrent_activities: int = Field(default=8, ge=1, le=64)
     max_concurrent_model_calls: int = Field(default=4, ge=1, le=32)
+    # Shared by API drafting, agenda preparation, and both model worker lanes.
+    # At least one normal slot remains when capacity is 1 or reserve >= capacity.
+    model_interactive_reserve: int = Field(default=1, ge=0, le=8)
 
     @field_validator("auto_approve_commands", mode="before")
     @classmethod

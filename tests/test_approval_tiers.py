@@ -395,6 +395,7 @@ def offline_goal(
     """Run the workflow loop with scripted Activities and approval waits."""
     run = RunInput(
         goal_id="tiers",
+        model_task_queue="offline-model",
         contract=contract,
         checkpoint=RunCheckpoint(state=state) if state else None,
     )

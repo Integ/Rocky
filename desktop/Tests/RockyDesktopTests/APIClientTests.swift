@@ -23,6 +23,16 @@ final class APIClientTests: XCTestCase {
         APIClient(baseURL: URL(string: "http://127.0.0.1:18741")!, token: "desktop-test-token", session: session)
     }
 
+    func testQuestionAnswerUsesItsOwnEndpointAndConcreteQuestionID() async throws {
+        InterceptingProtocol.handle = { request in
+            XCTAssertEqual(request.url?.path, "/goals/task/answer")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer desktop-test-token")
+            return (202, Data("{\"status\":\"queued\"}".utf8))
+        }
+        try await api.answerQuestion("task", questionID: "question-2", answer: "2026")
+    }
+
     func testTaskSubmissionUsesLocalAuthenticationAndStableIdempotencyHeader() async throws {
         InterceptingProtocol.handle = { request in
             XCTAssertEqual(request.url?.host, "127.0.0.1")
@@ -368,7 +378,7 @@ final class APIClientTests: XCTestCase {
     """#
 }
 
-private final class InterceptingProtocol: URLProtocol {
+final class InterceptingProtocol: URLProtocol {
     private static let lock = NSLock()
     private static var storedHandler: ((URLRequest) throws -> (Int, Data))?
     static var handle: ((URLRequest) throws -> (Int, Data))? {

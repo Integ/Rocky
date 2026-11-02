@@ -150,6 +150,16 @@ async def test_api_submission_runs_actual_tools_and_independent_review(temporal_
         independently_checked = tools.verify_files(run)
         assert independently_checked.passed
         assert result.artifacts == independently_checked.artifacts
+        assert result.delivery_archive
+        history = api.get(f"/goals/{goal_id}/deliveries", headers=AUTH).json()
+        assert history["total"] == 1
+        assert history["items"][0]["archive_id"] == result.delivery_archive
+        assert (
+            tools.read_frozen_artifact(
+                goal_id, result.delivery_archive, result.artifacts[0]
+            ).decode()
+            == REPORT
+        )
         status = api.get(f"/goals/{goal_id}", headers=AUTH)
         assert status.json()["state"]["status"] == "succeeded"
         assert store.pending_goals() == []

@@ -15,6 +15,7 @@ struct SettingsView: View {
     @State private var saving = false
     @State private var message: String?
     @State private var saved = false
+    @State private var showPrompts = false
     @AppStorage(keepInMenuBarKey) private var keepInMenuBar = true
 
     private var currentEndpoint: Bool {
@@ -102,6 +103,12 @@ struct SettingsView: View {
                     }
                 }
                 MemorySection(model: model)
+                ModelQueueSection(api: model.api)
+                Section {
+                    Button("查看提示词与技能…") { showPrompts = true }
+                } header: { Text("执行指导") } footer: {
+                    Text("查看内置指令、领域指导及组合预览。任务实际使用的版本记录在任务详情中。")
+                }
                 Section {
                     Toggle("关闭窗口后留在菜单栏", isOn: $keepInMenuBar)
                     Button("打开系统通知设置") {
@@ -138,6 +145,7 @@ struct SettingsView: View {
             }.padding(20)
         }
         .frame(width: 610, height: 600).tint(.rockyAccent)
+        .sheet(isPresented: $showPrompts) { PromptLibraryView(api: model.api) }
         .task { if let value = model.provider { populate(value) } else { await load() } }
         .onChange(of: model.provider?.model) { _, _ in
             if selection.isEmpty, let value = model.provider { message = nil; populate(value) }

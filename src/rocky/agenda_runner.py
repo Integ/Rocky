@@ -93,6 +93,8 @@ class AgendaRunner:
         self.store, self.settings, self.planner = store, settings, planner
         self.agenda = AgendaStore(store)
         self.tools = tools or WorkspaceTools(settings)
+        self._jobs: dict[str, tuple[str, asyncio.Task]] = {}
+        self._tick_lock = asyncio.Lock()
 
     def _model_settings(self) -> ModelSettings:
         return self.store.get_model_settings(
@@ -102,51 +104,101 @@ class AgendaRunner:
         )
 
     async def tick(self, now: datetime | None = None) -> None:
+        async with self._tick_lock:
+            await self._tick(now)
+
+    def _spawn(self, plan_id: str, kind: str, work) -> None:
+        async def perform():
+            try:
+                await work
+            except Exception:
+                log.warning("Plan operation deferred; will retry")
+
+        self._jobs[plan_id] = (kind, asyncio.create_task(perform()))
+
+    async def wait_idle(self) -> None:
+        """Wait for currently dispatched work, without dispatching another round."""
+        await asyncio.gather(*(job for _, job in self._jobs.values()))
+
+    async def close(self) -> None:
+        for _, job in self._jobs.values():
+            job.cancel()
+        await asyncio.gather(*(job for _, job in self._jobs.values()), return_exceptions=True)
+        self._jobs.clear()
+
+    async def _tick(self, now: datetime | None = None) -> None:
+        self._jobs = {key: value for key, value in self._jobs.items() if not value[1].done()}
         now = now or datetime.now(UTC)
         model_settings = await asyncio.to_thread(self._model_settings)
         started = await asyncio.to_thread(self.agenda.fire_due_schedules, model_settings, now)
         if started:
             log.info("Started %d scheduled run(s)", len(started))
         plans = await asyncio.to_thread(self.agenda.plans, ("active", "paused", "attention"))
-        busy = await asyncio.to_thread(self.agenda.busy_plan_goals)
-        slots = self.settings.agenda_concurrency - busy
+        observed = set()
+        # Reconcile owner-continued steps before calculating free slots. A task
+        # that was failed in the plan may already be running again in the engine.
         for plan in plans:
+            step = plan.current()
+            if (
+                plan.plan_id not in self._jobs
+                and step
+                and step.goal_id
+                and step.status in {"running", "failed"}
+            ):
+                try:
+                    changed = await asyncio.to_thread(self._observe, plan, step)
+                except Exception:
+                    log.warning("Plan observation deferred; other plans will continue")
+                    observed.add(plan.plan_id)
+                    continue
+                if changed:
+                    observed.add(plan.plan_id)
+        busy = await asyncio.to_thread(self.agenda.busy_plan_goals)
+        slots = (
+            self.settings.agenda_concurrency
+            - busy
+            - sum(kind == "launch" for kind, _ in self._jobs.values())
+        )
+        model_slots = self.settings.max_concurrent_model_calls - sum(
+            kind == "model" for kind, _ in self._jobs.values()
+        )
+        for plan in plans:
+            if plan.plan_id in self._jobs or plan.plan_id in observed:
+                continue
             try:
-                if await self._advance(plan, slots > 0, now, model_settings):
-                    slots -= 1
+                step = plan.current()
+                if plan.status != "active" or (plan.retry_at and plan.retry_at > _stamp(now)):
+                    continue
+                if plan.review_pending:
+                    if model_slots > 0:
+                        self._spawn(plan.plan_id, "model", self._review(plan, now, model_settings))
+                        model_slots -= 1
+                elif step is None:
+                    await asyncio.to_thread(self._update, plan, self._finish)
+                elif step.status == "pending":
+                    if step.prepared_contract is not None:
+                        if slots > 0:
+                            self._spawn(plan.plan_id, "launch", self._launch(plan, step))
+                            slots -= 1
+                    elif model_slots > 0:
+                        self._spawn(
+                            plan.plan_id, "model", self._prepare(plan, step, now, model_settings)
+                        )
+                        model_slots -= 1
             except Exception:
                 # Never log plan text or model output; other plans continue.
                 log.warning("Plan step deferred; will retry")
 
     async def run(self) -> None:
-        while True:
-            try:
-                await self.tick()
-            except Exception:
-                log.warning("Agenda tick deferred; will retry")
-            await asyncio.sleep(self.settings.agenda_interval_seconds)
-
-    async def _advance(
-        self, plan: PlanView, may_start: bool, now: datetime, model_settings: ModelSettings
-    ) -> bool:
-        """One move for one plan; True when it started a step's goal."""
-        step = plan.current()
-        if step is not None and step.goal_id and step.status in {"running", "failed"}:
-            if await asyncio.to_thread(self._observe, plan, step):
-                return False
-        if plan.status != "active":
-            return False
-        if plan.retry_at and plan.retry_at > _stamp(now):
-            return False
-        if plan.review_pending:
-            await self._review(plan, now, model_settings)
-            return False
-        if step is None:
-            await asyncio.to_thread(self._update, plan, self._finish)
-            return False
-        if step.status == "pending" and may_start:
-            return await self._start(plan, step, now, model_settings)
-        return False
+        try:
+            while True:
+                try:
+                    await self.tick()
+                except Exception:
+                    log.warning("Agenda tick deferred; will retry")
+                await asyncio.sleep(self.settings.agenda_interval_seconds)
+        finally:
+            await self.close()
 
     def _update(self, plan: PlanView, change) -> PlanView | None:
         return self.agenda.update_plan(plan.plan_id, change, expected_revision=plan.revision)
@@ -269,10 +321,9 @@ class AgendaRunner:
 
         self._update(plan, apply)
 
-    async def _start(
+    async def _prepare(
         self, plan: PlanView, step: PlanStep, now: datetime, model_settings: ModelSettings
     ) -> bool:
-        goal_id = step_goal_id(plan.plan_id, step)
         planned = {
             item.step_id: [f"inputs/step-{index}/{path}" for path in item.outputs]
             for index, item in enumerate(plan.steps, 1)
@@ -282,10 +333,33 @@ class AgendaRunner:
             objective=step_objective(plan, step, planned), folders=plan.folders, files=plan.files
         )
         try:
-            drafted = await self.planner.prepare_contract(draft, model_settings)
+            drafted = await self.planner.prepare_contract(draft, model_settings, interactive=False)
         except PlannerError:
             await asyncio.to_thread(self._defer, plan, now)
             return False
+
+        def prepared(view: PlanView) -> None:
+            current = next(item for item in view.steps if item.step_id == step.step_id)
+            current.prepared_contract = drafted.contract()
+            current.prepared_model = model_settings
+            current.prepared_tokens = drafted.drafting_tokens
+            view.planning_tokens += drafted.drafting_tokens
+            view.reason = "下一步已准备好，等待执行名额。"
+
+        return await asyncio.to_thread(self._update, plan, prepared) is not None
+
+    async def _launch(self, plan: PlanView, step: PlanStep) -> bool:
+        # Revalidate before copying files; the final transactional CAS also
+        # rejects a pause, cancellation or edit during the copy.
+        current = await asyncio.to_thread(self.agenda.plan, plan.plan_id)
+        if current is None or current.revision != plan.revision or current.status != "active":
+            return False
+        goal_id = step_goal_id(plan.plan_id, step)
+        planned = {
+            item.step_id
+            for item in plan.steps
+            if item.status == "succeeded" and item.goal_id and item.outputs
+        }
 
         def copy() -> list[str]:
             copied = []
@@ -301,9 +375,9 @@ class AgendaRunner:
             self.agenda.start_step,
             plan,
             step.step_id,
-            drafted.contract(),
-            model_settings,
+            step.prepared_contract,
+            step.prepared_model,
             copied,
-            drafted.drafting_tokens,
+            0,
         )
         return started is not None

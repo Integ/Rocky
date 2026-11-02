@@ -5,7 +5,7 @@ import SwiftUI
 struct RockyMark: View {
     private static let viewBox = CGRect(x: 272, y: 184, width: 480, height: 614)
     private static let stone: [CGFloat] = [276.7, 743.1, 274.2, 695.6, 357.6, 664.0, 489.6, 657.1, 621.6, 650.2, 745.5, 670.9, 747.7, 713.0, 750.3, 761.9, 671.1, 783.8, 525.0, 791.4, 378.9, 799.1, 279.0, 786.6, 276.7, 743.1]
-    private static let sparkGradient = Gradient(colors: [Color(red: 0.93, green: 0.58, blue: 0.37), .rockyAccent])
+    private static let sparkGradient = Gradient(colors: [Color(red: 129 / 255, green: 216 / 255, blue: 208 / 255), .rockyAccent])
 
     var body: some View {
         Canvas { context, size in

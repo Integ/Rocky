@@ -200,7 +200,8 @@ def request(**overrides) -> RunInput:
 
 
 def worker(env, queue: str, activities: Activities):
-    return goal_workers(env.client, queue, activities.registered())
+    # Replacement tests must replay history rather than wait on an old sticky queue.
+    return goal_workers(env.client, queue, activities.registered(), max_cached_workflows=0)
 
 
 async def test_goal_requires_independent_verification(temporal_env):
@@ -315,7 +316,7 @@ async def test_worker_replacement_resumes_existing_wait(temporal_env):
     replacement = Activities(decisions=[finish()])
     async with worker(temporal_env, run.goal_id, replacement):
         await handle.signal(GoalWorkflow.wake, "Worker replaced; continue the same goal")
-        result = await handle.result()
+        result = await asyncio.wait_for(handle.result(), timeout=20)
     assert result.status == "succeeded"
     assert result.model_calls == 3
     assert len(first.plans) == len(replacement.plans) == 1
@@ -539,7 +540,13 @@ async def test_execution_records_actual_work_and_replays_completed_rounds(tempor
     assert all(item.completed_at is not None for item in steps.values())
     assert result.handoff_summary
     history = await handle.fetch_history()
-    assert not any(event.HasField("marker_recorded_event_attributes") for event in history.events)
+    # Compatibility patches may record markers; execution phases remain actual work.
+    markers = [
+        event.marker_recorded_event_attributes
+        for event in history.events
+        if event.HasField("marker_recorded_event_attributes")
+    ]
+    assert {marker.marker_name for marker in markers} <= {"core_patch"}
     replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
     await asyncio.wait_for(replayer.replay_workflow(history), timeout=15)
 

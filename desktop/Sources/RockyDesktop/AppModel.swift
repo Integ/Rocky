@@ -27,10 +27,14 @@ final class AppModel: ObservableObject {
     @Published private(set) var executionEntries: [ExecutionEntry] = []
     @Published private(set) var eventsTruncated = false
     @Published var messages: [FeedbackMessage] = []
+    @Published private(set) var diagnostic: GoalDiagnostic?
+    private var diagnosticTask: Task<Void, Never>?
     @Published var truncatedArtifacts: Set<String> = []
     @Published var provider: ProviderSettings?
     @Published var showSettings = false
     @Published var showApprovals = false
+    @Published var showAttention = false
+    @Published private(set) var reviewingDelivery = false
     @Published var showAgenda = false
     /// A task to repeat on a schedule, shown in the schedule editor.
     @Published var scheduleSeed: ScheduleSeed?
@@ -49,6 +53,7 @@ final class AppModel: ObservableObject {
     @Published var isConnected = false
     @Published var pendingCommand: String?
     @Published var artifactContents: [String: String] = [:]
+    private var artifactHashes: [String: String] = [:]
     @Published var artifactErrors: [String: String] = [:]
     @Published var searchResults: [Goal] = []
     private var searchTask: Task<Void, Never>?
@@ -93,6 +98,39 @@ final class AppModel: ObservableObject {
     /// Tasks waiting for the owner: an approval request or a question.
     var attentionGoals: [Goal] { goals.filter { !$0.isArchived && AttentionTracker.needsOwner($0.state) } }
 
+    var attentionItems: [GoalAttention] {
+        goals.compactMap { GoalAttention(goal: $0, reviewed: $0.delivery_review == "accepted") }
+            .sorted { $0.priority == $1.priority ? $0.goal.created_at < $1.goal.created_at : $0.priority < $1.priority }
+    }
+
+    @discardableResult
+    func reviewDelivery(_ goal: Goal, action: String, feedback: String = "") async -> Bool {
+        guard isConnected, !reviewingDelivery, goal.state.status == "succeeded" else { return false }
+        reviewingDelivery = true
+        defer { reviewingDelivery = false }
+        do {
+            let result = try await api.reviewDelivery(goal.id, revision: goal.state.revision, action: action, feedback: feedback.trimmingCharacters(in: .whitespacesAndNewlines))
+            if let index = goals.firstIndex(where: { $0.id == goal.id }) { goals[index] = result.goal }
+            if let index = searchResults.firstIndex(where: { $0.id == goal.id }) { searchResults[index] = result.goal }
+            error = nil
+            await refresh()
+            return true
+        } catch {
+            await refresh()
+            self.error = error.localizedDescription
+            return false
+        }
+    }
+
+    func answerQuestion(_ goal: Goal, question: PendingQuestion, answer: String) async throws {
+        let text = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isConnected, !text.isEmpty, text.count <= 4000 else {
+            throw InputError.invalid("请连接后台服务，并填写不超过 4,000 字的回答。")
+        }
+        try await api.answerQuestion(goal.id, questionID: question.id, answer: text)
+        await refresh()
+    }
+
     /// Polls for the life of the app, not of the window, so alerts keep
     /// arriving while the window is closed and Rocky stays in the menu bar.
     func startIfNeeded() {
@@ -133,7 +171,7 @@ final class AppModel: ObservableObject {
             if !Task.isCancelled { self.searchResults = found }
         }
     }
-    var canSend: Bool { runtime.isReady && isConnected && !isSubmitting && !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (selected != nil || provider?.isConfigured == true) && (selected.map { !$0.state.isTerminal || $0.state.acceptsFollowUp } ?? true) && pendingCommand == nil }
+    var canSend: Bool { runtime.isReady && isConnected && !isSubmitting && !reviewingDelivery && !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (selected != nil || provider?.isConfigured == true) && (selected.map { !$0.state.isTerminal || $0.state.acceptsFollowUp } ?? true) && pendingCommand == nil }
 
     func run() async {
         await runtime.start()
@@ -190,12 +228,16 @@ final class AppModel: ObservableObject {
         guard id != selectedID else { return nil }
         selectedID = id
         selectionGeneration += 1
+        diagnosticTask?.cancel()
+        diagnosticTask = nil
         input = ""
         events = []
         eventCursor = 0
         messages = []
+        diagnostic = nil
         truncatedArtifacts = []
         artifactContents = [:]
+        artifactHashes = [:]
         artifactErrors = [:]
         pendingCommand = nil
         error = nil
@@ -248,6 +290,15 @@ final class AppModel: ObservableObject {
     func loadSelection() async {
         guard let goal = selected else { return }
         let generation = selectionGeneration
+        if diagnosticTask == nil {
+            diagnosticTask = Task { [weak self] in
+                guard let self else { return }
+                let value = try? await self.api.diagnostics(goal.id)
+                guard generation == self.selectionGeneration, self.selectedID == goal.id else { return }
+                self.diagnostic = value
+                self.diagnosticTask = nil
+            }
+        }
         selectionLoadGeneration += 1
         let loadGeneration = selectionLoadGeneration
         do {
@@ -267,11 +318,14 @@ final class AppModel: ObservableObject {
             // Only finished artifacts are presented as final output. Each file is
             // read from the service, never synthesized from planner explanations.
             if goal.state.isTerminal {
-                for artifact in goal.state.artifacts where artifactContents[artifact.path] == nil {
+                for artifact in goal.state.artifacts where artifactContents[artifact.path] == nil || artifactHashes[artifact.path] != artifact.sha256 {
+                    artifactContents.removeValue(forKey: artifact.path)
+                    truncatedArtifacts.remove(artifact.path)
                     do {
                         let result = try await api.artifact(goal.id, path: artifact.path)
                         guard generation == selectionGeneration, loadGeneration == selectionLoadGeneration, selectedID == goal.id else { return }
                         artifactContents[artifact.path] = result.content
+                        artifactHashes[artifact.path] = artifact.sha256
                         if result.truncated { truncatedArtifacts.insert(artifact.path) }
                         artifactErrors.removeValue(forKey: artifact.path)
                     } catch {

@@ -101,9 +101,12 @@ def test_trace_messages_and_knowledge_survive_restart_without_duplicate_retries(
         records = reopened.memory_records("task-1")
         assert records[:-1] == messages
         assert records[-1]["kind"] == "knowledge" and records[-1]["id"] == "fact"
-        assert reopened.goal_messages("task-1") == [
-            {"command_id": command_id, "message": "Use the new evidence", "sent": False}
-        ]
+        receipts = reopened.goal_messages("task-1")
+        assert [
+            {key: item[key] for key in ("command_id", "message", "sent")} for item in receipts
+        ] == [{"command_id": command_id, "message": "Use the new evidence", "sent": False}]
+        assert receipts[0]["delivery_status"] == "saved"
+        assert receipts[0]["consumed_at"] is None
     finally:
         reopened.close()
 

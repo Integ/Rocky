@@ -6,36 +6,104 @@ import SwiftUI
 final class AgendaModel: ObservableObject {
     @Published var plans: [Plan] = []
     @Published var schedules: [Schedule] = []
+    @Published var triggerRules: [TriggerRule] = []
+    @Published private(set) var pendingFeed = TriggerFeedState()
+    @Published private(set) var historyFeed = TriggerFeedState()
+    @Published private(set) var pagingTriggers = false
     @Published var error: String?
     @Published var working = false
     private let api: () -> APIClient
+    private var refreshGeneration = 0
+    private var triggerNavigation = 0
 
     init(api: @escaping () -> APIClient) { self.api = api }
 
-    var attentionCount: Int { plans.filter(\.needsOwner).count }
+    var pendingTriggerDecisions: [TriggerDecision] {
+        pendingFeed.items.filter { decision in
+            decision.needsOwner && triggerRules.contains { $0.id == decision.rule_id && $0.revision == decision.rule_revision && $0.mode != "off" }
+        }
+    }
+    var triggerDecisions: [TriggerDecision] { historyFeed.items }
+    var pendingTriggerCount: Int { pendingFeed.total }
+    var problemTriggerRules: [TriggerRule] { triggerRules.filter { $0.mode != "off" && !$0.problem.isEmpty } }
+    var attentionCount: Int { plans.filter(\.needsOwner).count + pendingTriggerCount + problemTriggerRules.count }
 
     func refresh() async {
+        guard !pagingTriggers else { return }
+        refreshGeneration += 1
+        let generation = refreshGeneration, navigation = triggerNavigation
         let client = api()
         do {
             async let plans = client.plans()
             async let schedules = client.schedules()
-            let (freshPlans, freshSchedules) = try await (plans, schedules)
+            async let rules = client.triggerRules()
+            async let pending = loadFeed(pendingFeed, pending: true, client: client)
+            async let history = loadFeed(historyFeed, pending: false, client: client)
+            let (freshPlans, freshSchedules, freshRules, freshPending, freshHistory) = try await (plans, schedules, rules, pending, history)
+            guard generation == refreshGeneration, navigation == triggerNavigation else { return }
             if freshPlans != self.plans { self.plans = freshPlans }
             if freshSchedules != self.schedules { self.schedules = freshSchedules }
+            if freshRules != triggerRules { triggerRules = freshRules }
+            pendingFeed = freshPending
+            historyFeed = freshHistory
         } catch {
+            guard generation == refreshGeneration, navigation == triggerNavigation else { return }
             self.error = error.localizedDescription
         }
     }
 
+    private func loadFeed(_ feed: TriggerFeedState, pending: Bool, client: APIClient) async throws -> TriggerFeedState {
+        var value = feed
+        var page = try await client.triggerDecisionPage(pendingOnly: pending, cursor: value.cursor)
+        if page.items.isEmpty, value.cursor != nil, page.total > 0 {
+            value = TriggerFeedState()
+            page = try await client.triggerDecisionPage(pendingOnly: pending)
+        }
+        value.apply(page)
+        return value
+    }
+
+    func navigateTriggers(pending: Bool, direction: Int) async {
+        guard !pagingTriggers, !working else { return }
+        var target = pending ? pendingFeed : historyFeed
+        if direction > 0 {
+            guard let next = target.nextCursor else { return }
+            target.previousCursors.append(target.cursor)
+            target.cursor = next
+        } else if direction < 0 {
+            guard !target.previousCursors.isEmpty else { return }
+            target.cursor = target.previousCursors.removeLast()
+        } else { target = TriggerFeedState() }
+        triggerNavigation += 1
+        pagingTriggers = true
+        defer { pagingTriggers = false }
+        do {
+            let value = try await loadFeed(target, pending: pending, client: api())
+            if pending { pendingFeed = value } else { historyFeed = value }
+            error = nil
+        } catch { self.error = error.localizedDescription }
+    }
+
+    private func resetTriggerPages() {
+        triggerNavigation += 1
+        pendingFeed.cursor = nil; pendingFeed.nextCursor = nil; pendingFeed.previousCursors = []
+        historyFeed.cursor = nil; historyFeed.nextCursor = nil; historyFeed.previousCursors = []
+    }
+
     /// Runs one owner action, shows its error, and reloads the lists.
     @discardableResult
-    func perform(_ work: (APIClient) async throws -> Void) async -> Bool {
+    func perform(resetTriggers: Bool = false, _ work: (APIClient) async throws -> Void) async -> Bool {
         working = true
         defer { working = false }
         do {
             try await work(api())
+            if resetTriggers { resetTriggerPages() }
             error = nil
         } catch {
+            if resetTriggers {
+                resetTriggerPages()
+                await refresh()
+            }
             self.error = error.localizedDescription
             return false
         }
@@ -50,6 +118,10 @@ final class AgendaModel: ObservableObject {
     /// A schedule needs a contract; an objective without one is drafted by the AI.
     func contract(for objective: String) async throws -> GoalContract {
         try await api().prepareContract(try GoalDraft(objective: objective)).contract
+    }
+
+    func prepareTrigger(_ objective: String, files: [String]) async throws -> ContractReview {
+        try await api().prepareContract(GoalDraft(objective: objective, files: files))
     }
 }
 
@@ -74,16 +146,18 @@ struct AgendaView: View {
                 Image(systemName: "calendar.badge.clock").font(.system(size: 20)).foregroundStyle(Color.rockyAccent)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("议程").font(.title2.weight(.semibold))
-                    Text("长期目标按步骤自动推进；定时任务按时启动。").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text("按计划、时间或事件推进任务。").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Picker("", selection: $tab) {
                     Text("长期目标").tag(0)
                     Text("定时任务").tag(1)
-                }.pickerStyle(.segmented).labelsHidden().frame(width: 200)
+                    Text("事件任务").tag(2)
+                }.pickerStyle(.segmented).labelsHidden().frame(width: 270)
             }.padding(.horizontal, 24).padding(.vertical, 20)
             Divider()
-            if tab == 0 { plans } else { schedules }
+            if tab == 0 { plans } else if tab == 1 { schedules }
+            else { TriggerRulesView(agenda: agenda, openGoal: open) }
             Divider()
             HStack {
                 if let error = agenda.error {
@@ -92,7 +166,7 @@ struct AgendaView: View {
                 Spacer()
                 if tab == 0 {
                     Button("新建长期目标…") { composing = true }
-                } else {
+                } else if tab == 1 {
                     Button("新建定时任务…") { editing = ScheduleSeed() }
                 }
                 Button("完成") { dismiss() }.keyboardShortcut(.defaultAction)

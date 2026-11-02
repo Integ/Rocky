@@ -183,6 +183,7 @@ struct RunState: Codable, Equatable {
     var observations: [ToolObservation]?
     var wake_at: String?
     var pending_approval: PendingApproval?
+    var pending_question: PendingQuestion?
     /// Requests declined because no one answered in time; the owner may still approve them.
     var deferred_approvals: [PendingApproval]?
 
@@ -336,6 +337,7 @@ struct ProposedAction: Codable, Equatable {
 }
 
 struct Goal: Codable, Identifiable, Equatable {
+    var delivery_review: String?
     var goal_id: String
     var contract: GoalContract
     var state: RunState
@@ -441,7 +443,25 @@ struct FeedbackMessage: Decodable, Identifiable {
     var command_id: String
     var message: String
     var sent: Bool
+    var delivery_status: String?
+    var consumed_at: String?
     var id: String { command_id }
+    var statusLabel: String {
+        switch delivery_status {
+        case "consumed": "已纳入执行"
+        case "delivered": "已送达，等待模型读取"
+        case "saved": "已保存，等待送达"
+        default: sent ? "已送达，读取状态未知" : "已保存，等待送达"
+        }
+    }
+}
+
+struct PendingQuestion: Codable, Equatable, Identifiable {
+    var question_id: String
+    var text: String
+    var options: [String]
+    var requested_at: String
+    var id: String { question_id }
 }
 
 struct ModelOption: Decodable, Identifiable, Equatable {

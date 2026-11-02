@@ -39,11 +39,12 @@ struct PlanStep: Codable, Identifiable, Equatable {
     var attempts: Int?
     var summary: String?
     var outputs: [String]?
+    var prepared_contract: GoalContract?
     var id: String { step_id }
 
     var statusLabel: String {
         switch status {
-        case "pending": "等待"
+        case "pending": prepared_contract == nil ? "等待" : "已准备，等待名额"
         case "running": "进行中"
         case "succeeded": "已完成"
         case "skipped": "已跳过"

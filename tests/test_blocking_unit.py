@@ -72,6 +72,7 @@ async def test_blocking_stops_inference_without_deliverables(monkeypatch, empty_
 
 @pytest.mark.parametrize("review", [False, True])
 async def test_failed_model_usage_exhausts_budget_before_another_call(monkeypatch, review):
+    monkeypatch.setattr("rocky.workflow.workflow.patched", lambda _: True)
     task = evaluation.load_tasks(["missing-info"])[0]
     contract = task.contract().model_copy(update={"limits": ExecutionLimits(max_tokens=100)})
     run = RunInput(goal_id="usage", contract=contract)

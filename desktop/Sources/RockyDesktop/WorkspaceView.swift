@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 extension Color {
-    static let rockyAccent = Color(red: 0.72, green: 0.34, blue: 0.23)
+    static let rockyAccent = Color(red: 10 / 255, green: 186 / 255, blue: 181 / 255)
     static let rockyCanvas = Color(nsColor: .textBackgroundColor)
 }
 
@@ -12,6 +12,8 @@ struct WorkspaceView: View {
     @ObservedObject private var agenda: AgendaModel
     @State private var confirmStop = false
     @State private var deletingGoal: Goal?
+    @State private var promptGoal: Goal?
+    @State private var deliveryGoal: Goal?
     @FocusState private var composerFocused: Bool
 
     init(model: AppModel) { self.model = model; self.runtime = model.runtime; self.agenda = model.agenda }
@@ -24,9 +26,14 @@ struct WorkspaceView: View {
                 inspector.inspectorColumnWidth(min: 240, ideal: 270, max: 340)
             }
         }
+        // Let the sidebar's full-height background define one continuous divider.
+        .toolbarBackground(.hidden, for: .windowToolbar)
         .tint(.rockyAccent)
         .sheet(isPresented: $model.showSettings) { SettingsView(model: model) }
+        .sheet(item: $promptGoal) { goal in PromptLibraryView(api: model.api, goalID: goal.id) }
+        .sheet(item: $deliveryGoal) { goal in DeliveryHistoryView(api: model.api, goalID: goal.id) }
         .sheet(isPresented: $model.showApprovals) { ApprovalsView(model: model) }
+        .sheet(isPresented: $model.showAttention) { AttentionInboxView(model: model, agenda: agenda) }
         .sheet(isPresented: $model.showAgenda) { AgendaView(model: model, agenda: agenda) }
         .sheet(item: $model.scheduleSeed) { seed in ScheduleEditorView(agenda: agenda, seed: seed) }
         .sheet(isPresented: Binding(get: { model.contractReview != nil }, set: { if !$0 { model.contractReview = nil } })) {
@@ -49,7 +56,9 @@ struct WorkspaceView: View {
     private var sidebar: some View {
         List(selection: Binding(get: { model.selectedID }, set: { id in
             // Clicking empty space clears a List selection; keep the open task instead.
-            if let id, id != model.selectedID { model.select(id) }
+            if let id, id != model.selectedID {
+                model.select(id)
+            }
         })) {
             ForEach(model.visibleGoals) { goal in
                 goalRow(goal).tag(goal.id).contextMenu {
@@ -100,6 +109,18 @@ struct WorkspaceView: View {
 
     private var sidebarFooter: some View {
         VStack(spacing: 2) {
+            Button { model.showAttention = true } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "tray.full").font(.system(size: 14)).frame(width: 18)
+                    Text("待你处理").font(.system(size: 12, weight: .medium))
+                    Spacer()
+                    let count = model.attentionItems.count + agenda.attentionCount
+                    if count > 0 {
+                        Text("\(count)").font(.system(size: 10, weight: .semibold)).foregroundStyle(Color.rockyAccent)
+                            .padding(.horizontal, 6).padding(.vertical, 2).background(Color.rockyAccent.opacity(0.12), in: Capsule())
+                    }
+                }.padding(.horizontal, 10).frame(height: 32)
+            }.buttonStyle(HoverButtonStyle(cornerRadius: 8)).disabled(!runtime.isReady)
             Button { model.showApprovals = true } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "hand.raised").font(.system(size: 14)).frame(width: 18)
@@ -220,7 +241,7 @@ struct WorkspaceView: View {
                                 ForEach(model.messages) { item in
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(item.message).textSelection(.enabled)
-                                        Text(item.sent ? "已接收" : "等待接收").font(.system(size: 9)).foregroundStyle(.secondary)
+                                        Text(item.statusLabel).font(.system(size: 10)).foregroundStyle(.secondary)
                                     }.font(.system(size: 12)).padding(12).frame(maxWidth: .infinity, alignment: .leading).background(.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 9))
                                 }
                             }.padding(.top, 10)
@@ -237,6 +258,12 @@ struct WorkspaceView: View {
                             Text(goal.state.reason.isEmpty ? "目标已保存，正在等待代理开始执行。" : goal.state.displayReason)
                                 .font(.system(size: 14)).lineSpacing(6).textSelection(.enabled)
                                 .help(goal.state.displayReason == goal.state.reason ? "" : goal.state.reason)
+                            if let diagnostic = model.diagnostic, diagnostic.goal_id == goal.id, diagnostic.status == goal.state.status {
+                                ExecutionDiagnosticView(diagnostic: diagnostic)
+                            }
+                            if goal.state.status == "blocked", goal.state.pending_approval == nil, let question = goal.state.pending_question {
+                                OwnerQuestionCard(model: model, goal: goal, question: question).id(question.id)
+                            }
                             if let approval = goal.state.pending_approval {
                                 VStack(alignment: .leading, spacing: 10) {
                                     Label("操作需要批准", systemImage: "hand.raised").font(.system(size: 12, weight: .medium))
@@ -281,8 +308,13 @@ struct WorkspaceView: View {
                                     Label("执行记录 · \(ExecutionLogGroup.build(executionEntries).count) 项", systemImage: "list.bullet").font(.system(size: 11)).foregroundStyle(.secondary)
                                 }
                             }
-                            ForEach(goal.state.artifacts) { artifact in
-                                artifactCard(artifact)
+                            if goal.state.status == "succeeded" {
+                                DeliveryReviewCard(model: model, goal: goal).id("\(goal.id):\(goal.state.revision)")
+                            } else {
+                                Button("查看交付历史…") { deliveryGoal = goal }.buttonStyle(.link)
+                            }
+                            if goal.state.isTerminal {
+                                ForEach(goal.state.artifacts) { artifact in artifactCard(artifact) }
                             }
                             let proposals = model.proposals(for: goal)
                             if !proposals.isEmpty {
@@ -322,7 +354,6 @@ struct WorkspaceView: View {
 
     private var welcome: some View {
         VStack(spacing: 17) {
-            RockyMark().frame(height: 60).padding(.bottom, 5)
             Text("把想法交给 Rocky。").font(.system(size: 30, weight: .medium, design: .serif))
             Text("一个目标，从规划到交付。\n你的本地 AI 伙伴，会接着把事情做完。重要结果请自行核验。")
                 .font(.system(size: 13)).foregroundStyle(.secondary).lineSpacing(6).multilineTextAlignment(.center)
@@ -388,7 +419,7 @@ struct WorkspaceView: View {
                         model.addFolders(urls)
                         return true
                     }
-                    .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(Color.accentColor.opacity(composerFocused ? 0.45 : 0)))
+                    .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(Color.rockyAccent.opacity(composerFocused ? 0.45 : 0)))
                     .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous)).onTapGesture { composerFocused = true }
             }
         }.frame(maxWidth: 780).frame(maxWidth: .infinity)
@@ -469,6 +500,9 @@ struct WorkspaceView: View {
             Text("提交时确定。修改设置只影响新任务。").foregroundStyle(.tertiary)
         }
         detailSection("验收标准") { ForEach(goal.contract.acceptance_criteria, id: \.self) { Text("• \($0)").fixedSize(horizontal: false, vertical: true) } }
+        detailSection("执行指导") {
+            inspectorAction("查看提示词版本…", systemImage: "text.document") { promptGoal = goal }.disabled(!runtime.isReady)
+        }
         detailSection("执行用量") {
             HStack { Text("步骤"); Spacer(); Text("\(goal.state.steps)").foregroundStyle(.secondary) }
             HStack { Text("模型调用"); Spacer(); Text("\(goal.state.model_calls) 次").foregroundStyle(.secondary) }

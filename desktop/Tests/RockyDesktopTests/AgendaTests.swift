@@ -58,6 +58,8 @@ final class AgendaTests: XCTestCase {
             switch request.url?.path {
             case "/plans": return (200, Data("[\(Self.planJSON)]".utf8))
             case "/schedules": return (200, Data("[\(Self.scheduleJSON)]".utf8))
+            case "/trigger-rules", "/trigger-decisions": return (200, Data("[]".utf8))
+            case "/trigger-decisions/page": return (200, Data(#"{"items":[],"total":0,"next_cursor":null}"#.utf8))
             case let path? where path.hasPrefix("/plans/"): return (200, Data(Self.planJSON.utf8))
             default: return (409, Data("{}".utf8))
             }
@@ -99,4 +101,149 @@ private final class AgendaProtocol: URLProtocol {
         } catch { client?.urlProtocol(self, didFailWithError: error) }
     }
     override func stopLoading() {}
+}
+
+extension AgendaTests {
+    @MainActor
+    func testEventInboxCountsAllPendingItemsAndRefreshPreservesPage() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [AgendaProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); AgendaProtocol.handle = nil }
+        let contract = try JSONDecoder().decode(Goal.self, from: Data(DesktopContractTests.goalJSON.utf8)).contract
+        let rule = TriggerRule(rule_id: "r1", name: "Build", source: "event", match: "build.failed", mode: "observe", contract: contract, revision: 1, problem: "")
+        func item(_ id: String) -> TriggerDecision {
+            TriggerDecision(decision_id: id, rule_id: "r1", rule_name: "Build", rule_revision: 1, event: TriggerEvent(event_id: id, name: "build.failed", summary: "Failed"), mode: "observe", outcome: "observed", received_at: "now", reason: "")
+        }
+        let first = item("oldest"), second = item("page-two")
+        var cursors: [String?] = []
+        AgendaProtocol.handle = { request in
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer paging-test")
+            switch request.url!.path {
+            case "/plans", "/schedules": return (200, Data("[]".utf8))
+            case "/trigger-rules": return (200, try JSONEncoder().encode([rule]))
+            case "/trigger-decisions/page":
+                let values = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
+                if values.first(where: { $0.name == "pending_only" })?.value == "true" {
+                    let cursor = values.first { $0.name == "cursor" }?.value
+                    cursors.append(cursor)
+                    XCTAssertEqual(values.first { $0.name == "limit" }?.value, "25")
+                    let page = cursor == nil ? TriggerDecisionPage(items: [first], total: 141, next_cursor: "page+two/=cursor") : TriggerDecisionPage(items: [second], total: 141)
+                    return (200, try JSONEncoder().encode(page))
+                }
+                return (200, try JSONEncoder().encode(TriggerDecisionPage(items: [], total: 200)))
+            default: return (404, Data())
+            }
+        }
+        let api = APIClient(baseURL: URL(string: "http://127.0.0.1:18741")!, token: "paging-test", session: session)
+        let model = AgendaModel(api: { api })
+        await model.refresh()
+        XCTAssertEqual(model.pendingTriggerCount, 141)
+        XCTAssertEqual(model.attentionCount, 141)
+        XCTAssertEqual(model.pendingTriggerDecisions.map(\.id), ["oldest"])
+        await model.navigateTriggers(pending: true, direction: 1)
+        XCTAssertEqual(model.pendingTriggerDecisions.map(\.id), ["page-two"])
+        await model.refresh()
+        XCTAssertEqual(model.pendingFeed.cursor, "page+two/=cursor")
+        XCTAssertEqual(model.pendingFeed.previousCursors.count, 1)
+        await model.navigateTriggers(pending: true, direction: -1)
+        XCTAssertEqual(model.pendingTriggerDecisions.map(\.id), ["oldest"])
+        XCTAssertEqual(cursors, [nil, "page+two/=cursor", "page+two/=cursor", nil])
+    }
+
+    @MainActor
+    func testEventPageFailureKeepsVisibleItemsAndCount() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [AgendaProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); AgendaProtocol.handle = nil }
+        var failing = false
+        AgendaProtocol.handle = { request in
+            if request.url!.path == "/trigger-decisions/page" {
+                return failing ? (503, Data()) : (200, Data(#"{"items":[],"total":123,"next_cursor":"next"}"#.utf8))
+            }
+            return (200, Data("[]".utf8))
+        }
+        let api = APIClient(baseURL: URL(string: "http://127.0.0.1:18741")!, token: "t", session: session)
+        let model = AgendaModel(api: { api })
+        await model.refresh()
+        failing = true
+        await model.navigateTriggers(pending: true, direction: 1)
+        XCTAssertEqual(model.pendingTriggerCount, 123)
+        XCTAssertNil(model.pendingFeed.cursor)
+        XCTAssertEqual(model.pendingFeed.previousCursors.count, 0)
+        XCTAssertNotNil(model.error)
+    }
+
+    func testQuotaLimitedSuggestionRemainsActionableAndStatusDecodes() throws {
+        let data = Data(#"{"decision_id":"d1","rule_id":"r1","rule_name":"Build","rule_revision":1,"event":{"event_id":"e1","name":"build.failed","summary":"Failed"},"mode":"auto","outcome":"quota_limited","received_at":"now","reason":"Daily limit reached"}"#.utf8)
+        let value = try JSONDecoder().decode(TriggerDecision.self, from: data)
+        XCTAssertTrue(value.needsOwner)
+        XCTAssertEqual(value.statusLabel, "今日自动启动已达上限")
+    }
+
+    func testTriggerRuleDefaultsToObservationAndOldSuggestionsLeaveAttentionCount() throws {
+        let goal = try JSONDecoder().decode(Goal.self, from: Data(DesktopContractTests.goalJSON.utf8))
+        let request = TriggerRuleRequest(name: "Build", source: "event", match: "build.failed", contract: goal.contract)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? [String: Any])
+        XCTAssertEqual(body["mode"] as? String, "observe")
+        XCTAssertEqual(body["debounce_seconds"] as? Int, 30)
+        XCTAssertEqual(body["daily_auto_limit"] as? Int, 5)
+        XCTAssertEqual(body["daily_timezone"] as? String, "UTC")
+        XCTAssertEqual(TriggerRule.label("auto"), "自动执行")
+    }
+
+    @MainActor
+    func testTriggerRequestsCarryPolicyRevisionAndRefreshNewCollections() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [AgendaProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); AgendaProtocol.handle = nil }
+        let goal = try JSONDecoder().decode(Goal.self, from: Data(DesktopContractTests.goalJSON.utf8))
+        var rule = TriggerRule(rule_id: "r1", name: "Build", source: "event", match: "build.failed", mode: "observe", contract: goal.contract, revision: 1, problem: "")
+        let decision = TriggerDecision(decision_id: "d1", rule_id: "r1", rule_name: "Build", rule_revision: 1,
+            event: TriggerEvent(event_id: "e1", name: "build.failed", summary: "Failed"), mode: "observe", outcome: "observed", received_at: "now", reason: "")
+        var seen: [String] = []
+        AgendaProtocol.handle = { request in
+            seen.append(request.url!.path)
+            switch request.url!.path {
+            case "/plans", "/schedules": return (200, Data("[]".utf8))
+            case "/trigger-rules": return (200, try JSONEncoder().encode([rule]))
+            case "/trigger-decisions": return (200, try JSONEncoder().encode([decision]))
+            case "/trigger-decisions/page":
+                let pending = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "pending_only" }?.value == "true"
+                let items = pending && (rule.revision != decision.rule_revision || rule.mode == "off") ? [] : [decision]
+                return (200, try JSONEncoder().encode(TriggerDecisionPage(items: items, total: items.count)))
+            case "/trigger-rules/r1/mode": return (200, try JSONEncoder().encode(rule))
+            case "/trigger-decisions/d1/dismiss": return (200, try JSONEncoder().encode(decision))
+            default: return (404, Data())
+            }
+        }
+        let api = APIClient(baseURL: URL(string: "http://127.0.0.1:18741")!, token: "t", session: session)
+        let agenda = AgendaModel(api: { api })
+        await agenda.refresh()
+        XCTAssertNil(agenda.error)
+        XCTAssertEqual(agenda.pendingTriggerDecisions.count, 1)
+        XCTAssertEqual(agenda.attentionCount, 1)
+        rule.revision = 2
+        await agenda.refresh()
+        XCTAssertEqual(agenda.pendingTriggerDecisions.count, 0)
+        _ = try await api.setTriggerMode("r1", mode: "auto", revision: 2)
+        _ = try await api.actOnTrigger("d1", action: "dismiss")
+        XCTAssertTrue(seen.contains("/trigger-rules/r1/mode"))
+        XCTAssertTrue(seen.contains("/trigger-decisions/d1/dismiss"))
+    }
+}
+
+extension AgendaTests {
+    @MainActor
+    func testBrokenActiveFileRulesAppearInAttentionButDisabledRulesDoNot() throws {
+        let goal = try JSONDecoder().decode(Goal.self, from: Data(DesktopContractTests.goalJSON.utf8))
+        let model = AgendaModel(api: { APIClient(baseURL: URL(string: "http://127.0.0.1:18741")!, token: "test") })
+        model.triggerRules = [TriggerRule(rule_id: "file", name: "File", source: "file", match: "/tmp/source.csv", mode: "observe", contract: goal.contract, revision: 1, problem: "Missing file")]
+        XCTAssertEqual(model.attentionCount, 1)
+        XCTAssertEqual(model.problemTriggerRules.count, 1)
+        model.triggerRules[0].mode = "off"
+        XCTAssertEqual(model.attentionCount, 0)
+    }
 }

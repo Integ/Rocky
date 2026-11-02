@@ -36,6 +36,7 @@ struct APIClient {
             case 401, 403: message = "本地服务认证失败，请重新启动应用。"
             case 404: message = "任务或文件不存在。"
             case 409: message = "任务状态已变化，请刷新后重试。"
+            case 410: message = "此版本文件未存档、已变化或无法通过完整性校验。"
             case 422: message = "设置不符合要求，请检查目标、授权文件夹、模型名称和 API 地址。"
             case 502: message = "AI 未能完成任务评估，请检查模型配置后重新提交。"
             case 503: message = "服务暂时不可用，请检查本地服务与钥匙串权限。"
@@ -86,6 +87,28 @@ struct APIClient {
     func followUp(_ id: String, message: String) async throws -> Goal {
         try await request("/goals/\(id)/follow-up", method: "POST", body: JSONEncoder().encode(["message": message]))
     }
+    func reviewDelivery(_ id: String, revision: Int, action: String, feedback: String) async throws -> DeliveryReviewReceipt {
+        try await request("/goals/\(id)/deliveries/\(revision)/review", method: "POST", body: JSONEncoder().encode(["action": action, "feedback": feedback]))
+    }
+    func deliveries(_ id: String, before: Int? = nil) async throws -> DeliveryPage {
+        var parts = URLComponents()
+        parts.path = "/goals/\(id)/deliveries"
+        parts.queryItems = [URLQueryItem(name: "limit", value: "20")]
+        if let before { parts.queryItems?.append(URLQueryItem(name: "before_revision", value: String(before))) }
+        return try await request(parts.string!)
+    }
+    func deliveryArtifact(_ id: String, revision: Int, path: String) async throws -> ArtifactContent {
+        var parts = URLComponents()
+        parts.path = "/goals/\(id)/deliveries/\(revision)/artifacts/content"
+        parts.queryItems = [URLQueryItem(name: "path", value: path)]
+        return try await request(parts.string!)
+    }
+    func downloadDeliveryArtifact(_ id: String, revision: Int, path: String) async throws -> Data {
+        var parts = URLComponents()
+        parts.path = "/goals/\(id)/deliveries/\(revision)/artifacts/download"
+        parts.queryItems = [URLQueryItem(name: "path", value: path)]
+        return try await rawRequest(parts.string!)
+    }
     func deleteGoal(_ id: String) async throws {
         _ = try await rawRequest("/goals/\(id)", method: "DELETE")
     }
@@ -101,6 +124,10 @@ struct APIClient {
         }
     }
     func messages(_ id: String) async throws -> [FeedbackMessage] { try await request("/goals/\(id)/messages") }
+    func answerQuestion(_ id: String, questionID: String, answer: String) async throws {
+        _ = try await rawRequest("/goals/\(id)/answer", method: "POST",
+            body: JSONEncoder().encode(["question_id": questionID, "answer": answer]))
+    }
     func downloadArtifact(_ id: String, path: String) async throws -> Data {
         var parts = URLComponents()
         parts.path = "/goals/\(id)/artifacts/download"
@@ -108,6 +135,15 @@ struct APIClient {
         return try await rawRequest(parts.string!)
     }
     func providerSettings() async throws -> ProviderSettings { try await request("/provider-settings") }
+    func modelQueue() async throws -> ModelQueueStatus { try await request("/model-queue") }
+    func diagnostics(_ id: String) async throws -> GoalDiagnostic { try await request("/goals/\(id)/diagnostics") }
+    func promptModules() async throws -> [PromptModule] { try await request("/prompt-modules") }
+    func promptUses(_ id: String) async throws -> [PromptUse] { try await request("/goals/\(id)/prompts") }
+    func promptSnapshot(_ id: String) async throws -> PromptComparison { try await request("/prompt-snapshots/\(id)") }
+    func previewPrompt(_ purpose: String, guidance: [String]) async throws -> PromptSnapshot {
+        struct Preview: Encodable { var purpose: String; var guidance: [String] }
+        return try await request("/prompts/preview", method: "POST", body: JSONEncoder().encode(Preview(purpose: purpose, guidance: guidance)))
+    }
     func saveProvider(_ settings: ProviderUpdate) async throws -> ProviderSettings {
         try await request("/provider-settings", method: "PUT", body: JSONEncoder().encode(settings))
     }
@@ -188,6 +224,32 @@ struct APIClient {
         _ = try await rawRequest("/plans/\(id)", method: "DELETE")
     }
     func schedules() async throws -> [Schedule] { try await request("/schedules") }
+    func triggerRules() async throws -> [TriggerRule] { try await request("/trigger-rules") }
+    func deleteTriggerRule(_ rule: TriggerRule) async throws {
+        _ = try await rawRequest("/trigger-rules/\(rule.id)?revision=\(rule.revision)", method: "DELETE")
+    }
+    func triggerDecisions() async throws -> [TriggerDecision] { try await request("/trigger-decisions") }
+    func createTriggerRule(_ rule: TriggerRuleRequest) async throws -> TriggerRule {
+        try await request("/trigger-rules", method: "POST", body: JSONEncoder().encode(rule))
+    }
+    func setTriggerMode(_ id: String, mode: String, revision: Int) async throws -> TriggerRule {
+        struct Update: Encodable { var mode: String; var revision: Int }
+        return try await request("/trigger-rules/\(id)/mode", method: "POST", body: JSONEncoder().encode(Update(mode: mode, revision: revision)))
+    }
+    func actOnTrigger(_ id: String, action: String) async throws -> TriggerDecision {
+        try await request("/trigger-decisions/\(id)/\(action)", method: "POST")
+    }
+    func triggerDecisionPage(pendingOnly: Bool, cursor: String? = nil) async throws -> TriggerDecisionPage {
+        var parts = URLComponents()
+        parts.path = "/trigger-decisions/page"
+        parts.queryItems = [URLQueryItem(name: "pending_only", value: String(pendingOnly)), URLQueryItem(name: "limit", value: "25")]
+        if let cursor { parts.queryItems?.append(URLQueryItem(name: "cursor", value: cursor)) }
+        return try await request(parts.string!)
+    }
+    func setTriggerLimits(_ rule: TriggerRule, limit: Int, timezone: String) async throws -> TriggerRule {
+        struct Limits: Encodable { var revision: Int; var daily_auto_limit: Int; var daily_timezone: String }
+        return try await request("/trigger-rules/\(rule.id)/limits", method: "POST", body: JSONEncoder().encode(Limits(revision: rule.revision, daily_auto_limit: limit, daily_timezone: timezone)))
+    }
     func createSchedule(_ schedule: ScheduleRequest) async throws -> Schedule {
         try await request("/schedules", method: "POST", body: JSONEncoder().encode(schedule))
     }

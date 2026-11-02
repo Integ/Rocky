@@ -59,6 +59,7 @@ struct AttentionTracker {
     struct Entry: Equatable {
         var status: String
         var approval: String?
+        var question: String?
         var waitingSince: Date?
         var lastAlert: Date?
     }
@@ -80,6 +81,7 @@ struct AttentionTracker {
             var entry = Entry(
                 status: state.status,
                 approval: state.pending_approval?.fingerprint,
+                question: state.pending_question?.id,
                 waitingSince: waiting ? (previous?.waitingSince ?? now) : nil,
                 lastAlert: waiting ? previous?.lastAlert : nil
             )
@@ -89,8 +91,8 @@ struct AttentionTracker {
                 if waiting { entry.lastAlert = now }
             } else if let approval = state.pending_approval, approval.fingerprint != previous?.approval {
                 alert = .approval(summary: approval.summary, unsandboxed: approval.action.isUnsandboxed)
-            } else if waiting, previous?.status != "blocked" {
-                alert = .blocked(reason: state.displayReason)
+            } else if waiting, previous?.status != "blocked" || previous?.question != state.pending_question?.id {
+                alert = .blocked(reason: state.pending_question?.text ?? state.displayReason)
             } else if waiting, let last = entry.lastAlert, now.timeIntervalSince(last) >= reminderInterval {
                 alert = .reminder(since: entry.waitingSince ?? last)
             } else if state.isTerminal, let previous, !Self.terminal(previous.status) {

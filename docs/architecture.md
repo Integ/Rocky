@@ -176,6 +176,53 @@ path; normal worker restart replays this version's durable execution history.
 
 ## Lifecycles
 
+Event rules live in additive `trigger_rules`, `trigger_envelopes`,
+`trigger_decisions` and `trigger_file_cursors` tables. `GET/POST /trigger-rules`
+lists or creates rules. `POST /trigger-rules/{id}/mode` requires the current
+`revision` and an `off`, `observe` or `auto` mode. `DELETE /trigger-rules/{id}`
+also requires `?revision=N` and keeps past decisions and goals.
+
+Local integrations submit authenticated `POST /trigger-events` requests with
+`{"event_id":"unique-build-id","name":"build.failed","summary":"Job 12 failed"}`.
+An event rule matches the exact event name. A repeated ID with identical content
+returns the stored decisions, even after a mode change; changed content is a
+conflict. The default observe mode records a suggestion without starting a goal.
+`POST /trigger-decisions/{id}/run` explicitly runs a current suggestion;
+`.../dismiss` dismisses it. Mode changes invalidate old suggestions for execution.
+
+Automatic runs use only the owner's stored contract and ordinary goal outbox;
+the event body is untrusted tool evidence in memory and cannot alter the task's
+objective, acceptance criteria, grants or approval policy. Decision storage and
+goal creation share one transaction. A busy previous goal produces a skipped
+decision rather than an overlapping run. File sources poll metadata with a
+persisted baseline and debounce candidate, and revalidate file grants before
+every check and launch. External intake uses the existing local API authentication.
+
+Agenda ticks only dispatch bounded background model jobs and launches. Prepared
+step contracts and model snapshots persist on the step separately from active
+execution capacity. Reconciliation of owner-continued steps precedes admission;
+launches reserve capacity before dispatch, and each plan has at most one active
+preparation, review or launch. A final revision-fenced transaction refuses stale
+results after an owner pause, cancellation or edit. Shutdown cancels and joins
+the agenda's dispatched jobs before closing the store.
+
+Owner questions are distinct from tool approvals. A blocked decision may carry
+one question and up to four suggested answers. The workflow assigns its stable
+question ID and persists it with the blocked checkpoint. `POST /goals/{id}/answer`
+validates that exact question under the goal's write lock and creates an ordinary
+wake command. Duplicate identical answers return the existing command; stale or
+conflicting answers are rejected. An answer never grants tool authority.
+
+An additive `input_receipts` table records new wake messages as saved, delivered
+or consumed. Delivery means the dispatcher signaled the workflow. Consumption
+is confirmed atomically with a revision-fenced completed planning record, using
+application-collected IDs of whole messages actually present in the final bounded
+model request (including a message deduplicated into full feedback). Clipped,
+omitted and failed model requests do not confirm consumption. Old messages retain
+unknown consumption rather than gaining a guessed read receipt. Workflow patch
+markers preserve replay while new executions replan after owner input arrives
+during planning, action or verification, before reporting a stale success.
+
 `queued` → `running` ↔ `waiting` / `blocked` → terminal result.
 
 - `waiting` is a model-requested bounded timer, interrupted by owner input/cancel.
@@ -494,3 +541,198 @@ The Compose Temporal dev server persists SQLite history and is suitable for loca
 evaluation. Production requires an authenticated Temporal deployment, TLS/secrets
 configuration, migrations, monitoring, quotas, backup/restore drills and storage
 coordination beyond this single-host prototype. Ports bind only to loopback.
+
+## Versioned application instructions
+
+`src/rocky/prompt_modules/` contains nine bundled Markdown modules. `prompts.py`
+assembles the planner core, the configured tool policy, and only the coding and
+research guidance matched by deterministic keywords in the confirmed objective,
+criteria, and deliverable extensions. History, tool output, files, and recalled
+knowledge cannot supply module names or module content. Reviewer, contract,
+decomposition, and revision instructions have separate compositions. Tool
+authorization and independent evidence audits remain enforced by code.
+
+Every module has a declared version in `prompts.py` and a SHA-256 of its actual
+text. Bump that module's version when changing its instructions; the content hash
+also catches edits made without a version bump. Composition identity hashes the
+ordered module definitions, rendered application instructions, and declared
+Pydantic output schema. Provider-specific schema transformations and protocol
+wrappers remain in the transport adapter, outside this preview.
+
+The API and worker inject `PromptArchive` into the planner. Before dispatch, a
+transaction saves the immutable composition once in `prompt_snapshots`, and
+links planning/review configurations to their goal in `prompt_uses` with first
+and most recent recording times. A failed archive write prevents dispatch and
+is retried as a transient model failure; no model tokens have been spent yet.
+These records describe selected request configurations, including failed network
+requests, rather than proving that a provider received or completed a request.
+They contain only application instructions and schema, never task envelopes,
+credentials, or evidence. Deleting a goal removes its links under the same row
+lock used by recording; shared snapshots contain only bundled application text.
+No Workflow payload or deterministic replay behavior changes. Older tasks get
+no invented historical version; later requests add records normally. Upgrades
+may add a new composition to an existing task while preserving its old ones.
+
+Authenticated inspection endpoints:
+
+- `GET /prompt-modules`: installed modules, versions, loading rules, and content.
+- `POST /prompts/preview`: no model call or archive write; accepts one of the five
+  purposes and the fixed coding/research guidance IDs. Tool mode comes from
+  service settings, never from preview input.
+- `GET /goals/{id}/prompts`: compact historical configuration references.
+- `GET /prompt-snapshots/{id}`: immutable saved composition and a unified
+  instruction/schema diff against the installed versions of the same modules.
+
+There are no prompt-editing or module-installation endpoints. Inspection does
+not change the model, grants, task contract, or running execution.
+
+## Global model admission and execution diagnostics
+
+`ModelQueue` coordinates actual model requests across the API and worker through
+additive `model_gate` and `model_requests` tables. Startup writes the configured
+capacity and reserved interactive slots into the shared gate; admissions read
+that central configuration under a write lock, rather than trusting each
+caller's local limit. At the default capacity 4, normal requests may use 3 slots.
+Owner-priority requests may use any free slot. Capacity 1 still admits normal
+work. FIFO order applies within each class, with interactive waiters first.
+Running requests are not preempted, and queueing consumes the task's existing
+runtime allowance. Reducing capacity takes effect as existing work completes.
+
+The API's manual contract drafting and decomposition are interactive; agenda
+preparation and revision are normal. An authenticated owner's wake or requeue
+prioritizes its next planning call only. The Workflow records a patch marker
+`interactive-model-lane-v1`, and checkpoints the prioritized wake generation.
+A new wake after rollover or worker replacement therefore retains priority,
+while ordinary later rounds return to normal. Model activity retries retain
+their original priority. Owner planning calls use `<queue>-model-interactive`,
+so normal Activities waiting for admission cannot occupy their worker slots.
+The shared database gate caps both model queues and API/agenda calls together.
+Older histories replay their previous routing, and all three workers continue
+to register the legacy activities. Model/tool text never grants priority.
+
+Waiting callers refresh 60-second queue leases while polling. Dispatched leases
+last 960 seconds, beyond the transport's hard 900-second request limit; a lost
+process cannot free capacity early while its provider may still be running.
+Expired leases are reclaimed during admission. Cancellation removes a waiter
+without contacting a provider. Before admission, the goal is checked under the
+same row lock as cancellation and deletion. Completed/cancelled goals cannot
+dispatch another request. Diagnostic finalization errors cannot replace an
+already obtained model result or lose its usage and cause a paid retry.
+
+Request rows hold IDs, purpose, priority, timestamps, state, and attempt number,
+without prompts, model output, command arguments, URLs, or raw provider errors.
+Transient failures release capacity and record a suggested retry time; Temporal
+retains control of the actual retry policy. Non-active diagnostic rows older
+than a day are pruned on enqueue. Goal deletion removes its diagnostic rows.
+Full execution history and input receipts remain in their existing stores.
+
+`GET /model-queue` reports current capacity and live running/waiting counts.
+`GET /goals/{id}/diagnostics` combines the current execution step, admission
+record, worker heartbeat, and contract limits. Terminal/blocked states take
+precedence over old request rows, and a prior step's request cannot describe
+a new step. Tool status includes only its type; retries expose no raw errors.
+The native client loads diagnostics independently of its committed event
+cursor, tolerates unavailable diagnostic endpoints, and calculates elapsed
+time locally between normal polls. These endpoints require the existing API
+authentication and make no model requests.
+
+## Event inbox pagination and daily automatic quotas
+
+`GET /trigger-decisions/page?pending_only=true&limit=25` selects pending outcomes
+(`observed`, `skipped_busy`, `unavailable`, `quota_limited`) across all records,
+joined to an existing, enabled rule at the same revision. It returns `items`,
+a filter-wide `total`, and `next_cursor`. Pending items sort oldest first;
+history (`pending_only=false`) sorts newest first. Both use the timestamp and
+decision ID as a stable keyset boundary, including when timestamps tie or the
+boundary item has since been dismissed. The bounded base64 cursor includes the
+filter and is validated before use. `limit` is 1–100. The original unpaginated
+`GET /trigger-decisions` remains compatible for older clients.
+
+The desktop maintains independent pending and history page cursors and uses
+the server-wide pending total for attention counts. Routine refreshes reload
+the current pages. Navigation invalidates older refresh responses; failed
+navigation retains the visible page and counts. A now-empty page with remaining
+records returns to the first page. Owner actions reset navigation before
+refreshing, while retaining cached records if the service cannot be read.
+Totals are live, not a frozen historical snapshot, so concurrent intake or
+owner actions may change them between requests.
+
+Each rule has `daily_auto_limit` (default 5, 1–100) and `daily_timezone` (default
+UTC for compatibility). New desktop rules use the local IANA timezone. Automatic
+admission counts successful automatic starts under that rule's write lock and
+within its current local calendar day, using timezone-aware midnight boundaries
+so DST days can be shorter or longer. A new `started_at` field records actual
+start time; older automatic starts use `received_at`. Manual starts are excluded.
+The immutable start outcome and source are already in decision records, so no
+new quota counter or schema migration is needed. Usage survives restarts and
+mode changes. Replay of an existing event returns its saved result and cannot
+spend another allowance or retroactively start a quota-limited suggestion.
+
+At the limit, new events produce `quota_limited` suggestions, available for
+explicit owner execution or dismissal. A failed start transaction does not
+spend an allowance. The next local day admits only new events.
+`GET /trigger-rules` now adds `auto_runs_today` and `quota_resets_at`.
+`POST /trigger-rules/{id}/limits` validates the current revision, limit, and
+timezone, then advances the rule revision without clearing its launch history.
+As with a mode change, suggestions from earlier revisions remain visible in
+history but cannot launch. These routes retain the existing authentication and
+never invoke a model merely to list or change limits.
+
+## Delivery review and versioned artifacts
+
+Execution success and owner acceptance are separate states. A succeeded goal
+has `delivery_review=pending` until the owner explicitly accepts it. Opening a
+task or previewing a file does not change that decision. Agenda and schedule
+progress still follows execution success; review does not introduce an approval
+gate for automatic steps. Goal-list ETags include the current review status,
+so accepting a result invalidates cached attention lists without changing the
+Workflow revision.
+
+The additive `deliveries` table uses `(goal_id, revision)` as its primary key.
+Successful state persistence records the original contract, summary, artifacts,
+archive reference and independent verifier feedback in the same transaction.
+Review status, feedback, review time and the continuation revision are separate
+columns. Reconciliation records successful terminal states through the same
+path. An immutable payload can acquire a previously missing archive reference
+once, only for the identical verified artifact set.
+
+After deterministic checks and the independent review pass, the verification
+Activity streams each declared artifact into the protected
+`.rocky/<goal_id>/deliveries/<archive_id>/<sha256>` directory. The archive ID is
+the content hash of the full sorted artifact metadata. Copies verify the exact
+size and SHA-256, reject symlinks and hard links, and use fsynced temporary files
+with atomic renames. Changed files fail verification without losing model usage
+or automatically repeating the paid review. The Workflow adopts the archive
+reference under the `delivery-archive-v1` replay patch. Tools cannot access this
+private control directory. File reads and acceptance verify the saved bytes;
+current workspace files never replace a missing archived version.
+
+Authenticated routes:
+
+- `GET /goals/{id}/deliveries?before_revision=N&limit=20`: newest-first keyset
+  pages with a live total and `next_before_revision`; limit is 1–100.
+- `POST /goals/{id}/deliveries/{revision}/review`: `accept`, or
+  `request_changes` with nonblank feedback (at most 2,000 characters).
+- `GET /goals/{id}/deliveries/{revision}/artifacts/content?path=...`: UTF-8
+  preview limited to 100,000 characters, with an explicit truncation flag.
+- `GET /goals/{id}/deliveries/{revision}/artifacts/download?path=...`: complete
+  bytes of that declared artifact, with no-store caching.
+
+Review locks the goal row and checks its current completed revision. A change
+request saves the old delivery's decision, amends the contract and requeues the
+existing task with the ordinary follow-up budget in one SQL transaction. The
+same action and feedback return the original receipt even after continuation;
+a conflicting decision or stale undecided revision returns 409. File capture
+occurs before the transaction, while the locked revision check prevents an old
+request from applying to a new execution. Failure to amend the contract rolls
+back the review too.
+
+Older completed tasks appear as a metadata-only current delivery; no past
+contracts, decisions or files are invented. Reading the current legacy file
+requires its size and hash to match the original verification. Before acceptance
+or follow-up, the API attempts to capture those matching bytes. Unavailable or
+corrupt originals return 410; they block acceptance but do not block an explicit
+request for changes. Existing local viewed-result flags are not migrated into
+acceptance. Goal deletion removes delivery rows and the protected archives;
+archiving a goal preserves both. The desktop keys current preview caches by
+artifact hash as well as path, so a new result at the same path reloads its text.

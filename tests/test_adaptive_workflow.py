@@ -32,6 +32,63 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")
 temporal_env = _temporal_env
 
 
+@dataclass
+class InteractiveLaneActivities(Activities):
+    owner_id: str = ""
+    busy_id: str = ""
+    busy_started: asyncio.Event = field(default_factory=asyncio.Event)
+    busy_gate: asyncio.Event = field(default_factory=asyncio.Event)
+    owner_resumed: asyncio.Event = field(default_factory=asyncio.Event)
+    owner_requests: list[tuple[bool, str]] = field(default_factory=list)
+
+    @activity.defn(name="rocky.plan")
+    async def plan(self, request: PlanInput) -> PlanResult:
+        if request.run.goal_id == self.busy_id:
+            self.busy_started.set()
+            await self.busy_gate.wait()
+            return PlanResult(decision=finish())
+        self.owner_requests.append((request.interactive, activity.info().task_queue))
+        count = len(self.owner_requests)
+        if count == 1:
+            return PlanResult(decision=Decision(kind="blocked", reason="Need an answer"))
+        if count == 2:
+            self.owner_resumed.set()
+            return PlanResult(decision=act())
+        return PlanResult(decision=finish())
+
+
+async def test_owner_input_uses_reserved_lane_while_normal_model_worker_is_full(temporal_env):
+    owner, busy = request(), request()
+    queue = owner.goal_id
+    owner.model_task_queue = busy.model_task_queue = queue + "-model"
+    activities = InteractiveLaneActivities(owner_id=owner.goal_id, busy_id=busy.goal_id)
+    async with goal_workers(
+        temporal_env.client, queue, activities.registered(), model_slots=1, max_cached_workflows=0
+    ):
+        handle = await temporal_env.client.start_workflow(
+            GoalWorkflow.run, owner, id=owner.goal_id, task_queue=queue
+        )
+        await asyncio.wait_for(activities.blocked.wait(), 15)
+        other = await temporal_env.client.start_workflow(
+            GoalWorkflow.run, busy, id=busy.goal_id, task_queue=queue
+        )
+        try:
+            await asyncio.wait_for(activities.busy_started.wait(), 15)
+            await handle.signal(GoalWorkflow.wake, "Here is the missing information")
+            await asyncio.wait_for(activities.owner_resumed.wait(), 15)
+            assert activities.owner_requests[:2] == [
+                (False, queue + "-model"),
+                (True, queue + "-model-interactive"),
+            ]
+        finally:
+            activities.busy_gate.set()
+        assert (await handle.result()).status == "succeeded"
+        assert (await other.result()).status == "succeeded"
+        assert activities.owner_requests[-1] == (False, queue + "-model")
+    replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
+    await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)
+
+
 def worker(env, run, activities, workflow_type=GoalWorkflow):
     return goal_workers(
         env.client,
@@ -278,7 +335,7 @@ async def test_exact_owner_approval_survives_worker_replacement_and_wake_cannot_
     run = request()
     action = Action(tool="run_command", content="printf prepared > mutation.txt")
     first = ApprovalActivities(
-        decisions=[Decision(kind="act", reason="Prepare the requested result", action=action)],
+        decisions=[Decision(kind="act", reason="Prepare the requested result", action=action)] * 2,
         workspace_tools=WorkspaceTools(settings),
     )
     destination = settings.workspace_root / run.goal_id / "mutation.txt"
@@ -293,12 +350,25 @@ async def test_exact_owner_approval_survives_worker_replacement_and_wake_cannot_
         assert state.pending_approval.action == action
         assert state.pending_approval.operation_id == first.tools[0].operation_id
         assert not destination.exists()
+        first.plan_gate = asyncio.Event()
+        first.plan_started.clear()
         await handle.signal(GoalWorkflow.wake, fingerprint)
+        await asyncio.wait_for(first.plan_started.wait(), timeout=15)
         unchanged = await handle.query(GoalWorkflow.state)
-        assert unchanged.pending_approval is not None
-        assert unchanged.model_calls == 1
+        assert unchanged.pending_approval is None
+        assert unchanged.model_calls == 2
         assert len(first.tools) == 1
         assert not destination.exists()
+        first.plan_gate.set()
+
+        async def renewed_request():
+            while True:
+                current = await handle.query(GoalWorkflow.state)
+                if current.pending_approval and current.steps == 2:
+                    return current.pending_approval
+                await asyncio.sleep(0.01)
+
+        fingerprint = (await asyncio.wait_for(renewed_request(), timeout=15)).fingerprint
 
     replacement = ApprovalActivities(decisions=[finish()], workspace_tools=WorkspaceTools(settings))
     async with worker(temporal_env, run, replacement):
@@ -320,10 +390,10 @@ async def test_exact_owner_approval_survives_worker_replacement_and_wake_cannot_
     assert result.pending_approval is None
     assert destination.read_text() == "prepared"
     assert len(replacement.tools) == 1
-    assert replacement.tools[0].operation_id == first.tools[0].operation_id
+    assert replacement.tools[0].operation_id == first.tools[-1].operation_id
     assert replacement.tools[0].action == action
     assert replacement.tools[0].approved_action_fingerprints == [fingerprint]
-    assert len(first.plans) == len(replacement.plans) == 1
+    assert len(first.plans) == 2 and len(replacement.plans) == 1
     replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
     await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)
 
@@ -476,6 +546,7 @@ async def test_task_scoped_approval_covers_later_similar_commands_only(temporal_
         ),
     ]
     activities = ApprovalActivities(decisions=decisions, workspace_tools=WorkspaceTools(settings))
+    activities.decisions.insert(0, decisions[0])
     workspace = settings.workspace_root / run.goal_id
     async with worker(temporal_env, run, activities):
         handle = await temporal_env.client.start_workflow(
@@ -486,12 +557,24 @@ async def test_task_scoped_approval_covers_later_similar_commands_only(temporal_
         pending = state.pending_approval
         assert pending.command_prefix == ["touch"]
         # A wake message or an unscoped mismatch cannot grant the prefix.
+        activities.plan_gate = asyncio.Event()
+        activities.plan_started.clear()
         await handle.signal(GoalWorkflow.wake, "task:" + pending.fingerprint)
         await handle.signal(
             GoalWorkflow.approval_command, WakeCommand(command_id="bad", message="all:" + "0" * 64)
         )
         assert (await handle.query(GoalWorkflow.state)).approved_command_prefixes == []
-        activities.blocked.clear()
+        await asyncio.wait_for(activities.plan_started.wait(), timeout=15)
+        activities.plan_gate.set()
+
+        async def renewed_request():
+            while True:
+                current = await handle.query(GoalWorkflow.state)
+                if current.pending_approval and current.steps == 2:
+                    return current.pending_approval
+                await asyncio.sleep(0.01)
+
+        pending = await asyncio.wait_for(renewed_request(), timeout=15)
         await handle.signal(
             GoalWorkflow.approval_command,
             WakeCommand(command_id="task-grant", message="task:" + pending.fingerprint),
@@ -500,7 +583,7 @@ async def test_task_scoped_approval_covers_later_similar_commands_only(temporal_
         async def chained_pending():
             while True:
                 current = await handle.query(GoalWorkflow.state)
-                if current.pending_approval and current.steps == 3:
+                if current.pending_approval and current.steps == 4:
                     return current
                 await asyncio.sleep(0.05)
 
@@ -518,7 +601,7 @@ async def test_task_scoped_approval_covers_later_similar_commands_only(temporal_
         for state in activities.snapshots
         if state.pending_approval
     }
-    assert paused == {"step-0001", "step-0003"}
+    assert paused == {"step-0001", "step-0002", "step-0004"}
     replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
     await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)
 
@@ -717,5 +800,60 @@ async def test_batched_rereads_follow_the_refresh_rule(temporal_env):
         result = await asyncio.wait_for(handle.result(), timeout=20)
     assert result.status == "succeeded"
     assert recovered(activities) == [4]
+    replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
+    await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)
+
+
+async def test_structured_question_survives_worker_replacement_and_replay(temporal_env):
+    from rocky.models import OwnerQuestion
+
+    activities = Activities(
+        decisions=[
+            Decision(
+                kind="blocked",
+                reason="Need the reporting year",
+                question=OwnerQuestion(text="Which year?", options=["2025", "2026"]),
+            ),
+            finish(),
+        ]
+    )
+    run = request()
+    async with worker(temporal_env, run, activities):
+        handle = await temporal_env.client.start_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        await asyncio.wait_for(activities.blocked.wait(), timeout=15)
+        state = await handle.query(GoalWorkflow.state)
+        assert state.pending_question.text == "Which year?"
+        question_id = state.pending_question.question_id
+    async with worker(temporal_env, run, activities):
+        state = await handle.query(GoalWorkflow.state)
+        assert state.pending_question.question_id == question_id
+        await handle.signal(
+            GoalWorkflow.wake_command, WakeCommand(command_id="answer-1", message="2026")
+        )
+        result = await asyncio.wait_for(handle.result(), timeout=20)
+    assert result.status == "succeeded" and result.pending_question is None
+    assert activities.plans[-1].feedback == "2026"
+    replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
+    await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)
+
+
+async def test_owner_message_during_model_call_replans_before_dispatch(temporal_env):
+    activities = Activities(decisions=[act(), finish()], plan_gate=asyncio.Event())
+    run = request()
+    async with worker(temporal_env, run, activities):
+        handle = await temporal_env.client.start_workflow(
+            GoalWorkflow.run, run, id=run.goal_id, task_queue=run.goal_id
+        )
+        await asyncio.wait_for(activities.plan_started.wait(), timeout=15)
+        await handle.signal(
+            GoalWorkflow.wake_command,
+            WakeCommand(command_id="steering-1", message="Use the new figures"),
+        )
+        activities.plan_gate.set()
+        result = await asyncio.wait_for(handle.result(), timeout=20)
+    assert result.status == "succeeded" and not activities.tools
+    assert activities.plans[-1].feedback == "Use the new figures"
     replayer = Replayer(workflows=[GoalWorkflow], data_converter=pydantic_data_converter)
     await asyncio.wait_for(replayer.replay_workflow(await handle.fetch_history()), timeout=15)

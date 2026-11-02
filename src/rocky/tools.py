@@ -543,6 +543,111 @@ class WorkspaceTools:
                     parent, parts[-1], max_bytes=None if self.full_access else MAX_BYTES
                 )
 
+    def freeze_artifacts(self, goal_id: str, artifacts) -> str:
+        """Copy exactly the verified bytes into protected, content-addressed storage."""
+        from rocky.artifact_archive import archive_identity
+
+        identity = archive_identity(artifacts)
+        with self._goal(goal_id, create=False) as (goal_fd, control_fd), ExitStack() as stack:
+            deliveries = _open_directory(control_fd, "deliveries", create=True)
+            stack.callback(os.close, deliveries)
+            target = _open_directory(deliveries, identity, create=True)
+            stack.callback(os.close, target)
+            for artifact in artifacts:
+                if not re.fullmatch(r"[a-f0-9]{64}", artifact.sha256):
+                    raise ToolError("Invalid artifact hash")
+                parts = _parts(artifact.path)
+                with _parent_directory(goal_fd, parts, create=False) as parent:
+                    source = os.open(
+                        parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent
+                    )
+                with os.fdopen(source, "rb") as handle:
+                    info = os.fstat(handle.fileno())
+                    if (
+                        not stat.S_ISREG(info.st_mode)
+                        or info.st_nlink != 1
+                        or info.st_size != artifact.size
+                    ):
+                        raise ToolError("Artifact changed before archival")
+                    temporary = ".rocky-tmp-" + uuid.uuid4().hex
+                    descriptor = os.open(
+                        temporary,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=target,
+                    )
+                    try:
+                        digest, size = hashlib.sha256(), 0
+                        with os.fdopen(descriptor, "wb") as output:
+                            while chunk := handle.read(1024 * 1024):
+                                size += len(chunk)
+                                if size > artifact.size:
+                                    raise ToolError("Artifact changed during archival")
+                                digest.update(chunk)
+                                output.write(chunk)
+                            output.flush()
+                            os.fsync(output.fileno())
+                        if size != artifact.size or digest.hexdigest() != artifact.sha256:
+                            raise ToolError("Artifact changed during archival")
+                        os.replace(temporary, artifact.sha256, src_dir_fd=target, dst_dir_fd=target)
+                        os.fsync(target)
+                    finally:
+                        try:
+                            os.unlink(temporary, dir_fd=target)
+                        except FileNotFoundError:
+                            pass
+            os.fsync(deliveries)
+            os.fsync(control_fd)
+        return identity
+
+    def read_frozen_artifact(self, goal_id: str, identity: str, artifact) -> bytes:
+        if not re.fullmatch(r"[a-f0-9]{64}", identity) or not re.fullmatch(
+            r"[a-f0-9]{64}", artifact.sha256
+        ):
+            raise ToolError("Invalid delivery archive")
+        with self._goal(goal_id, create=False, shared=True) as (_, control), ExitStack() as stack:
+            directory = _open_directory(control, "deliveries", create=False)
+            stack.callback(os.close, directory)
+            directory = _open_directory(directory, identity, create=False)
+            stack.callback(os.close, directory)
+            data = _read_regular(directory, artifact.sha256, max_bytes=None)
+        if len(data) != artifact.size or _digest(data) != artifact.sha256:
+            raise ToolError("Delivery archive integrity check failed")
+        return data
+
+    def verify_frozen_artifacts(self, goal_id: str, identity: str, artifacts) -> None:
+        from rocky.artifact_archive import archive_identity
+
+        if identity != archive_identity(artifacts):
+            raise ToolError("Invalid delivery archive identity")
+        with self._goal(goal_id, create=False, shared=True) as (_, control), ExitStack() as stack:
+            directory = _open_directory(control, "deliveries", create=False)
+            stack.callback(os.close, directory)
+            directory = _open_directory(directory, identity, create=False)
+            stack.callback(os.close, directory)
+            for artifact in artifacts:
+                if not re.fullmatch(r"[a-f0-9]{64}", artifact.sha256):
+                    raise ToolError("Invalid artifact hash")
+                descriptor = os.open(
+                    artifact.sha256, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory
+                )
+                with os.fdopen(descriptor, "rb") as handle:
+                    info = os.fstat(handle.fileno())
+                    if (
+                        not stat.S_ISREG(info.st_mode)
+                        or info.st_nlink != 1
+                        or info.st_size != artifact.size
+                    ):
+                        raise ToolError("Delivery archive integrity check failed")
+                    digest, size = hashlib.sha256(), 0
+                    while chunk := handle.read(1024 * 1024):
+                        size += len(chunk)
+                        if size > artifact.size:
+                            raise ToolError("Delivery archive integrity check failed")
+                        digest.update(chunk)
+                if size != artifact.size or digest.hexdigest() != artifact.sha256:
+                    raise ToolError("Delivery archive integrity check failed")
+
     def copy_goal_files(
         self,
         source_goal: str,

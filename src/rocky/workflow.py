@@ -22,6 +22,7 @@ with workflow.unsafe.imports_passed_through():
         ExecutionStep,
         Observation,
         PendingApproval,
+        PendingQuestion,
         Phase,
         PhaseInput,
         PhaseResult,
@@ -51,6 +52,7 @@ _TOOL_HEARTBEAT = timedelta(seconds=30)
 # Model calls run on their own task queue with their own worker slots, so
 # slow plans and reviews never hold up tool execution or state writes.
 MODEL_QUEUE_SUFFIX = "-model"
+INTERACTIVE_QUEUE_SUFFIX = "-interactive"
 _MODEL_TOTAL_SECONDS = _MODEL_ATTEMPT_SECONDS * _MODEL_ATTEMPTS + 120
 _MODEL_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=2),
@@ -85,6 +87,8 @@ class GoalWorkflow:
         self._cancel_requested = False
         self._wake_generation = 0
         self._consumed_wake_generation = 0
+        self._prioritized_wake_generation = 0
+        self._interactive_pending = False
         self._wake_feedback = ""
         self._no_progress = 0
         self._seen_progress: set[str] = set()
@@ -110,6 +114,8 @@ class GoalWorkflow:
             self._last_batch = set(checkpoint.last_batch_progress)
             self._wake_generation = checkpoint.wake_generation
             self._consumed_wake_generation = checkpoint.consumed_wake_generation
+            self._prioritized_wake_generation = checkpoint.prioritized_wake_generation
+            self._interactive_pending = checkpoint.interactive_pending
             self._wake_feedback = checkpoint.wake_feedback
             self._seen_wake_commands = set(checkpoint.seen_wake_commands)
             self._cancel_requested = checkpoint.cancel_requested
@@ -134,6 +140,8 @@ class GoalWorkflow:
             last_batch_progress=sorted(self._last_batch),
             wake_generation=self._wake_generation,
             consumed_wake_generation=self._consumed_wake_generation,
+            prioritized_wake_generation=self._prioritized_wake_generation,
+            interactive_pending=self._interactive_pending,
             wake_feedback=self._wake_feedback,
             seen_wake_commands=sorted(self._seen_wake_commands),
             cancel_requested=self._cancel_requested,
@@ -311,6 +319,7 @@ class GoalWorkflow:
         self._state.approval_timeouts = 0
         self._state.status = "running"
         self._state.wake_at = None
+        self._state.pending_question = None
         return self._take_wake_feedback() or "External input received; reconsider the goal."
 
     async def _persist(self) -> None:
@@ -337,6 +346,7 @@ class GoalWorkflow:
         self._state.reason = reason[:4000]
         self._state.wake_at = None
         self._state.pending_approval = None
+        self._state.pending_question = None
         await self._persist()
         return self._state.model_copy(deep=True)
 
@@ -355,11 +365,29 @@ class GoalWorkflow:
         self._state.steps += 1
         await self._persist()
         self._guard_dispatch()
+        interactive = False
+        queue = run.model_task_queue
+        if workflow.patched("interactive-model-lane-v1"):
+            interactive = (
+                self._interactive_pending
+                or self._wake_generation > self._prioritized_wake_generation
+            )
+            self._interactive_pending = False
+            self._prioritized_wake_generation = self._wake_generation
+            if interactive:
+                queue = (
+                    queue or workflow.info().task_queue + MODEL_QUEUE_SUFFIX
+                ) + INTERACTIVE_QUEUE_SUFFIX
         return await workflow.execute_activity(
             "rocky.plan",
-            PlanInput(run=run, state=self._state.model_copy(deep=True), feedback=feedback),
+            PlanInput(
+                run=run,
+                state=self._state.model_copy(deep=True),
+                feedback=feedback,
+                interactive=interactive,
+            ),
             result_type=PlanResult,
-            task_queue=run.model_task_queue,
+            task_queue=queue,
             start_to_close_timeout=self._timeout(_MODEL_ATTEMPT_SECONDS),
             schedule_to_close_timeout=self._timeout(_MODEL_TOTAL_SECONDS),
             heartbeat_timeout=_MODEL_HEARTBEAT,
@@ -479,6 +507,10 @@ class GoalWorkflow:
     def _decision_error(run: RunInput, decision: Decision | None) -> str:
         if decision is None:
             return "Planning produced no usable decision."
+        if decision.question is not None and decision.kind != "blocked":
+            return "Only a blocked decision may ask the owner a question."
+        if decision.question is not None and not decision.question.text.strip():
+            return "Ask one concrete, nonblank question."
         if decision.kind == "act":
             if decision.actions is not None:
                 if decision.action is not None or decision.wait_seconds is not None:
@@ -974,6 +1006,7 @@ class GoalWorkflow:
                     await self._start_phase(run, "perceive", cycle)
                     await self._end_phase({"feedback": cycle.feedback})
                 await self._start_phase(run, "think", cycle)
+                decision_generation = self._wake_generation
                 planned = await self._plan(run, cycle.feedback)
                 self._state.input_tokens += max(0, planned.input_tokens)
                 self._state.output_tokens += max(0, planned.output_tokens)
@@ -981,9 +1014,19 @@ class GoalWorkflow:
                 self._guard_dispatch()
                 cycle.decision = planned.decision
                 if "decide" in run.hook_phases:
-                    await self._end_phase({"decision": planned.decision.model_dump(mode="json")})
+                    await self._end_phase(
+                        {
+                            "decision": planned.decision.model_dump(mode="json"),
+                            "consumed_message_ids": planned.consumed_message_ids,
+                        }
+                    )
                     await self._start_phase(run, "decide", cycle)
                 cycle.error = self._decision_error(run, cycle.decision)
+                if (
+                    workflow.patched("owner-input-before-action-v1")
+                    and self._wake_generation != decision_generation
+                ):
+                    cycle.error = "New owner input arrived during planning. Reconsider it before taking another action."
                 # Existing histories may contain accepted empty reasons. Keep
                 # their recorded branches when replaying; validate new decisions.
                 if cycle.error == _BLOCKED_REASON_ERROR and not workflow.patched(
@@ -998,7 +1041,11 @@ class GoalWorkflow:
                         self._state.handoff_summary = decision.handoff_summary
                         self._state.handoff_is_model = True
                 await self._end_phase(
-                    {"decision": cycle.decision.model_dump(mode="json"), "error": cycle.error},
+                    {
+                        "decision": cycle.decision.model_dump(mode="json"),
+                        "error": cycle.error,
+                        "consumed_message_ids": planned.consumed_message_ids,
+                    },
                     failed=bool(cycle.error),
                 )
             except ActivityError as error:
@@ -1054,7 +1101,17 @@ class GoalWorkflow:
                     self._reflect_cycle(run, cycle)
                     await self._end_phase({"error": cycle.error}, failed=True)
             self._check_limits()
+            if (
+                workflow.patched("owner-input-before-action-v1")
+                and self._wake_generation != self._consumed_wake_generation
+            ):
+                # Input arriving during a tool or verifier must reach a new plan
+                # before an old finish/block decision can end or pause the goal.
+                feedback = cycle.feedback
+                continue
             if cycle.verification and cycle.verification.passed and not cycle.error:
+                if workflow.patched("delivery-archive-v1"):
+                    self._state.delivery_archive = cycle.verification.delivery_archive
                 # The model's own summary is for the owner; the reviewer's
                 # feedback stays in the execution record.
                 summary = (
@@ -1065,6 +1122,16 @@ class GoalWorkflow:
                 return await self._complete("succeeded", summary)
             if cycle.decision and cycle.decision.kind == "blocked" and not cycle.error:
                 cycle.blocked_reason = cycle.decision.reason
+                if workflow.patched("owner-questions-v1"):
+                    question = cycle.decision.question
+                    self._state.pending_question = PendingQuestion(
+                        question_id=f"question-{self._state.cycle}",
+                        requested_at=workflow.now().isoformat(),
+                        text=question.text.strip()
+                        if question
+                        else cycle.decision.reason.strip()[:1000],
+                        options=question.options if question else [],
+                    )
             if cycle.blocked_reason:
                 feedback = await self._await_external_input(cycle.blocked_reason)
                 self._state.recovery_attempts = 0

@@ -125,6 +125,10 @@ class PlanStep(Model):
     outputs: list[str] = Field(default_factory=list)
     started_at: str | None = None
     finished_at: str | None = None
+    # Prepared independently of execution slots; survives worker restart.
+    prepared_contract: GoalContract | None = None
+    prepared_model: ModelSettings | None = None
+    prepared_tokens: int = 0
 
 
 class PlanView(Model):
@@ -442,6 +446,7 @@ class AgendaStore:
                 step.goal_id = step_goal_id(view.plan_id, step)
                 self.store.insert_goal(session, step.goal_id, contract, model_settings)
                 step.status, step.started_at = "running", _stamp(_now())
+                step.prepared_contract, step.prepared_model, step.prepared_tokens = None, None, 0
                 step.finished_at, step.summary, step.outputs = None, "", []
                 view.draft_failures, view.retry_at = 0, None
                 view.planning_tokens += drafting_tokens

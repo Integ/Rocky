@@ -54,6 +54,7 @@ final class SelectionEventsTests: XCTestCase {
         var cursors: [Int] = []
         var messageRequests = 0
         SelectionProtocol.handle = { request, reply in
+            if request.url?.path.hasSuffix("/diagnostics") == true { reply(404, Data()); return }
             if request.url?.path.hasSuffix("/events") == true {
                 cursors.append(Self.cursor(request))
                 reply(200, cursors.count == 1 ? initial : delta)
@@ -161,6 +162,27 @@ final class SelectionEventsTests: XCTestCase {
             "/goals/other/events?after=0", "/goals/other/events?after=12",
             "/goals/first/events?after=0",
         ])
+    }
+
+    @MainActor
+    func testSlowDiagnosticDoesNotDelayCommittedHistory() async throws {
+        let model = try makeModel()
+        let history = try eventData([5])
+        let loaded = expectation(description: "history loaded independently")
+        let diagnosticStarted = expectation(description: "diagnostic requested")
+        var diagnosticReply: ((Int, Data) -> Void)?
+        SelectionProtocol.handle = { request, reply in
+            if request.url?.path.hasSuffix("/diagnostics") == true {
+                diagnosticReply = reply
+                diagnosticStarted.fulfill()
+            } else { reply(200, request.url?.path.hasSuffix("/events") == true ? history : Data("[]".utf8)) }
+        }
+        let loading = Task { await model.loadSelection(); loaded.fulfill() }
+        await fulfillment(of: [loaded, diagnosticStarted], timeout: 2)
+        XCTAssertEqual(model.events.map(\.id), [5])
+        XCTAssertNil(model.error)
+        diagnosticReply?(503, Data())
+        await loading.value
     }
 
     @MainActor

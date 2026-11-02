@@ -173,7 +173,7 @@ class FakePlanner:
         self.revision = PlanRevision(complete=False)
         self.fail_drafts = 0
 
-    async def prepare_contract(self, draft, model_settings):
+    async def prepare_contract(self, draft, model_settings, *, interactive=True):
         if self.fail_drafts:
             self.fail_drafts -= 1
             raise PlannerError("model unavailable")
@@ -206,6 +206,20 @@ def runner(store, tmp_path):
     return AgendaRunner(store, settings, FakePlanner())
 
 
+async def tick(runner, *args):
+    # Preparation and launch are independent persisted stages. Existing lifecycle
+    # tests advance both explicitly; concurrency tests exercise raw tick below.
+    await runner.tick(*args)
+    await runner.wait_idle()
+    prepared = {key for key, (kind, _) in runner._jobs.items() if kind == "model"}
+    if any(
+        plan.plan_id in prepared and plan.current() and plan.current().prepared_contract
+        for plan in runner.agenda.plans()
+    ):
+        await runner.tick(*args)
+        await runner.wait_idle()
+
+
 def two_step_plan(agenda: AgendaStore, **fields):
     return agenda.create_plan(
         PlanRequest(
@@ -233,22 +247,30 @@ def finish(runner: AgendaRunner, goal_id: str, status="succeeded", text="资料�
 async def test_plan_runs_steps_in_order_and_hands_files_forward(runner):
     agenda = runner.agenda
     plan = two_step_plan(agenda)
-    await runner.tick()
+    await tick(
+        runner,
+    )
     plan = agenda.plan(plan.plan_id)
     first, second = plan.steps
     assert first.status == "running" and second.status == "pending"
     assert store_goal(runner, first.goal_id).state.status == "queued"
     assert "第 1/2 步“调研”" in runner.planner.drafts[0].objective
-    await runner.tick()  # still running: nothing else starts
+    await tick(
+        runner,
+    )  # still running: nothing else starts
     assert len(runner.planner.drafts) == 1
 
     finish(runner, first.goal_id, text="三款门锁的参数")
-    await runner.tick()
+    await tick(
+        runner,
+    )
     plan = agenda.plan(plan.plan_id)
     assert plan.steps[0].status == "succeeded"
     assert plan.steps[0].outputs == ["notes.md"]
     assert plan.review_pending
-    await runner.tick()  # review keeps the remaining step
+    await tick(
+        runner,
+    )  # review keeps the remaining step
     plan = agenda.plan(plan.plan_id)
     assert not plan.review_pending and plan.revisions == 1
     assert plan.steps[1].step_id == second.step_id
@@ -256,7 +278,9 @@ async def test_plan_runs_steps_in_order_and_hands_files_forward(runner):
     assert review["finished"][0]["summary"] == "三款门锁的参数"
     assert review["remaining"] == [{"title": "成文", "objective": "根据资料写选购报告"}]
 
-    await runner.tick()
+    await tick(
+        runner,
+    )
     plan = agenda.plan(plan.plan_id)
     goal_id = plan.steps[1].goal_id
     copied = runner.settings.workspace_root / goal_id / "inputs" / "step-1" / "notes.md"
@@ -267,7 +291,9 @@ async def test_plan_runs_steps_in_order_and_hands_files_forward(runner):
     runner.planner.revision = PlanRevision(complete=True)
     finish(runner, goal_id)
     for _ in range(3):
-        await runner.tick()
+        await tick(
+            runner,
+        )
     plan = agenda.plan(plan.plan_id)
     assert plan.status == "succeeded"
     assert plan.reason.startswith("全部完成：2 步")
@@ -289,10 +315,16 @@ async def test_review_can_replace_remaining_steps_or_end_the_plan_early(runner):
         ],
         note="资料显示需要先做对比",
     )
-    await runner.tick()
+    await tick(
+        runner,
+    )
     finish(runner, agenda.plan(plan.plan_id).steps[0].goal_id)
-    await runner.tick()
-    await runner.tick()
+    await tick(
+        runner,
+    )
+    await tick(
+        runner,
+    )
     plan = agenda.plan(plan.plan_id)
     assert [step.title for step in plan.steps] == ["调研", "对比", "成文"]
     assert plan.notes == ["资料显示需要先做对比"]
@@ -300,10 +332,14 @@ async def test_review_can_replace_remaining_steps_or_end_the_plan_early(runner):
     other = two_step_plan(agenda)
     runner.planner.revision = PlanRevision(complete=True, note="一步就够了")
     agenda.cancel_plan(plan.plan_id)
-    await runner.tick()
+    await tick(
+        runner,
+    )
     finish(runner, agenda.plan(other.plan_id).steps[0].goal_id)
     for _ in range(3):
-        await runner.tick()
+        await tick(
+            runner,
+        )
     other = agenda.plan(other.plan_id)
     assert other.status == "succeeded"
     assert other.steps[1].status == "skipped"
@@ -313,40 +349,58 @@ async def test_review_can_replace_remaining_steps_or_end_the_plan_early(runner):
 async def test_failed_step_asks_the_owner_and_can_be_retried_or_skipped(runner):
     agenda = runner.agenda
     plan = two_step_plan(agenda, replan=False)
-    await runner.tick()
+    await tick(
+        runner,
+    )
     first_goal = agenda.plan(plan.plan_id).steps[0].goal_id
     finish(runner, first_goal, status="budget_exhausted")
-    await runner.tick()
+    await tick(
+        runner,
+    )
     plan = agenda.plan(plan.plan_id)
     assert plan.status == "attention" and plan.steps[0].status == "failed"
     assert "预算用完" in plan.reason
-    await runner.tick()  # waits for the owner
+    await tick(
+        runner,
+    )  # waits for the owner
     assert len(runner.planner.drafts) == 1
 
     plan = agenda.owner_action(plan.plan_id, "retry")
-    await runner.tick()
+    await tick(
+        runner,
+    )
     plan = agenda.plan(plan.plan_id)
     assert plan.status == "active"
     assert plan.steps[0].attempts == 1
     assert plan.steps[0].goal_id not in {None, first_goal}
 
     finish(runner, plan.steps[0].goal_id, status="failed")
-    await runner.tick()
+    await tick(
+        runner,
+    )
     plan = agenda.owner_action(plan.plan_id, "skip")
     assert plan.steps[0].status == "skipped"
-    await runner.tick()
+    await tick(
+        runner,
+    )
     assert agenda.plan(plan.plan_id).steps[1].status == "running"
 
 
 async def test_owner_continuing_a_failed_step_goal_resumes_the_plan(runner):
     agenda = runner.agenda
     plan = two_step_plan(agenda, replan=False)
-    await runner.tick()
+    await tick(
+        runner,
+    )
     goal_id = agenda.plan(plan.plan_id).steps[0].goal_id
     finish(runner, goal_id, status="budget_exhausted")
-    await runner.tick()
+    await tick(
+        runner,
+    )
     runner.store.follow_up_goal(goal_id, "再补充一款")
-    await runner.tick()
+    await tick(
+        runner,
+    )
     plan = agenda.plan(plan.plan_id)
     assert plan.status == "active" and plan.steps[0].status == "running"
     assert plan.steps[0].goal_id == goal_id
@@ -357,17 +411,19 @@ async def test_repeated_drafting_failures_back_off_then_need_the_owner(runner):
     plan = two_step_plan(agenda)
     runner.planner.fail_drafts = 3
     now = datetime.now(UTC)
-    await runner.tick(now)
+    await tick(runner, now)
     plan = agenda.plan(plan.plan_id)
     assert plan.draft_failures == 1 and plan.retry_at is not None
-    await runner.tick(now + timedelta(seconds=30))  # still backing off
+    await tick(runner, now + timedelta(seconds=30))  # still backing off
     assert runner.planner.fail_drafts == 2
-    await runner.tick(now + timedelta(minutes=3))
-    await runner.tick(now + timedelta(minutes=10))
+    await tick(runner, now + timedelta(minutes=3))
+    await tick(runner, now + timedelta(minutes=10))
     plan = agenda.plan(plan.plan_id)
     assert plan.status == "attention" and plan.steps[0].status == "pending"
     agenda.owner_action(plan.plan_id, "retry")
-    await runner.tick()
+    await tick(
+        runner,
+    )
     assert agenda.plan(plan.plan_id).steps[0].status == "running"
 
 
@@ -375,11 +431,15 @@ async def test_plans_share_the_agenda_slot_by_priority(runner):
     agenda = runner.agenda
     low = two_step_plan(agenda)
     high = two_step_plan(agenda, priority=5)
-    await runner.tick()
+    await tick(
+        runner,
+    )
     assert agenda.plan(high.plan_id).steps[0].status == "running"
     assert agenda.plan(low.plan_id).steps[0].status == "pending"
     agenda.owner_action(high.plan_id, "pause")
-    await runner.tick()
+    await tick(
+        runner,
+    )
     # The paused plan's running step still holds the slot.
     assert agenda.plan(low.plan_id).steps[0].status == "pending"
 
@@ -387,7 +447,9 @@ async def test_plans_share_the_agenda_slot_by_priority(runner):
 async def test_cancelling_a_plan_stops_its_running_step(runner):
     agenda = runner.agenda
     plan = two_step_plan(agenda)
-    await runner.tick()
+    await tick(
+        runner,
+    )
     goal_id = agenda.plan(plan.plan_id).steps[0].goal_id
     agenda.cancel_plan(plan.plan_id)
     assert runner.store.is_cancel_requested(goal_id)
@@ -522,3 +584,92 @@ def test_schedule_api_accepts_the_desktop_encoding(api):
     response = client.post("/schedules", json=body, headers=AUTH)
     assert response.status_code == 201
     assert response.json()["next_run_at"].startswith(soon[:16])
+
+
+async def test_slow_preparation_does_not_block_other_plans_or_due_schedules(runner):
+    import asyncio
+
+    gate, entered = asyncio.Event(), asyncio.Event()
+    slow = two_step_plan(runner.agenda, priority=10)
+    fast = two_step_plan(runner.agenda)
+    prepare = runner.planner.prepare_contract
+
+    async def delayed(draft, model, **options):
+        if "slow" in draft.objective:
+            entered.set()
+            await gate.wait()
+        return await prepare(draft, model, **options)
+
+    runner.agenda.update_plan(slow.plan_id, lambda view: setattr(view, "objective", "slow"))
+    runner.planner.prepare_contract = delayed
+    schedule = daily_schedule(runner.agenda)
+    due = datetime.fromisoformat(schedule.next_run_at)
+    try:
+        await asyncio.wait_for(runner.tick(due), timeout=1)
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        # Wait only for the independent, fast preparation.
+        await asyncio.wait_for(runner._jobs[fast.plan_id][1], timeout=1)
+        await asyncio.wait_for(runner.tick(due), timeout=1)
+        await asyncio.wait_for(runner._jobs[fast.plan_id][1], timeout=1)
+        assert runner.agenda.plan(fast.plan_id).steps[0].status == "running"
+        assert runner.agenda.plan(slow.plan_id).steps[0].status == "pending"
+        assert runner.agenda.schedule(schedule.schedule_id).runs == 1
+        # A further due run is checked even though the model is still waiting.
+        await asyncio.wait_for(runner.tick(due + timedelta(days=1)), timeout=1)
+        assert runner.agenda.schedule(schedule.schedule_id).skipped == 1
+        runner.agenda.owner_action(slow.plan_id, "pause")
+        gate.set()
+        await runner.wait_idle()
+        assert runner.agenda.plan(slow.plan_id).steps[0].prepared_contract is None
+    finally:
+        gate.set()
+        await runner.close()
+
+
+async def test_prepared_contract_survives_restart_without_redrafting(runner):
+    plan = two_step_plan(runner.agenda)
+    await runner.tick()
+    await runner.wait_idle()
+    assert runner.agenda.plan(plan.plan_id).steps[0].prepared_contract is not None
+    restarted = AgendaRunner(runner.store, runner.settings, FakePlanner())
+    await restarted.tick()
+    await restarted.wait_idle()
+    assert restarted.agenda.plan(plan.plan_id).steps[0].status == "running"
+    assert restarted.planner.drafts == []
+    assert restarted.agenda.plan(plan.plan_id).planning_tokens == 10
+    await restarted.close()
+
+
+async def test_owner_continued_step_reserves_capacity_before_new_launches(runner):
+    plan = two_step_plan(runner.agenda)
+    await tick(runner)
+    goal_id = runner.agenda.plan(plan.plan_id).steps[0].goal_id
+    finish(runner, goal_id, status="budget_exhausted")
+    await tick(runner)
+    other = two_step_plan(runner.agenda, priority=10)
+    await runner.tick()
+    await runner.wait_idle()
+    runner.store.follow_up_goal(goal_id, "Continue this step")
+    await runner.tick()
+    await runner.wait_idle()
+    assert runner.agenda.plan(plan.plan_id).steps[0].status == "running"
+    assert runner.agenda.plan(other.plan_id).steps[0].status == "pending"
+    await runner.close()
+
+
+async def test_one_failed_observation_does_not_block_other_plans(runner, monkeypatch):
+    broken = two_step_plan(runner.agenda)
+    await tick(runner)
+    finish(runner, runner.agenda.plan(broken.plan_id).steps[0].goal_id)
+    other = two_step_plan(runner.agenda)
+    observe = runner._observe
+
+    def fail_one(plan, step):
+        if plan.plan_id == broken.plan_id:
+            raise ValueError("Unavailable observation")
+        return observe(plan, step)
+
+    monkeypatch.setattr(runner, "_observe", fail_one)
+    await tick(runner)
+    assert runner.agenda.plan(other.plan_id).steps[0].status == "running"
+    await runner.close()

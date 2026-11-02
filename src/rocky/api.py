@@ -36,7 +36,10 @@ from rocky.backup import BackupError, create_backup, default_backup_dir, list_ba
 from rocky.config import Settings
 from rocky.contract_check import ContractWarning, contract_warnings
 from rocky.credentials import CredentialError, CredentialStore
+from rocky.deliveries import DeliveryPage, DeliveryReviewRequest, DeliveryStore
+from rocky.diagnostics import goal_diagnostics
 from rocky.inference import ModelSettings, model_catalog
+from rocky.model_queue import ModelQueue
 from rocky.models import (
     DraftedContract,
     ExecutionLimits,
@@ -46,10 +49,23 @@ from rocky.models import (
     Model,
 )
 from rocky.monitoring import prometheus, service_status
-from rocky.planner import OpenAIPlanner, PlannerError
+from rocky.planner import OpenAIPlanner, PlannerError, prompt_preview
+from rocky.prompt_archive import PromptArchive
+from rocky.prompts import PromptPreviewRequest, catalog, compare
 from rocky.providers import PRESETS, ProviderUpdate, credential_id, provider_model_catalog
 from rocky.store import MemoryConflictError, Store, equivalent_contracts
 from rocky.tools import ToolError, WorkspaceTools
+from rocky.triggers import (
+    Mode,
+    TriggerDecision,
+    TriggerDecisionPage,
+    TriggerEvent,
+    TriggerLimitsRequest,
+    TriggerRule,
+    TriggerRuleRequest,
+    TriggerRuleStatus,
+    TriggerStore,
+)
 
 log = logging.getLogger(__name__)
 _IPV6_AUTHORITY = re.compile(r"\[([0-9a-fA-F:.]+)\](?::([0-9]{1,5}))?\Z")
@@ -176,6 +192,16 @@ class WakeRequest(Model):
     message: str = Field(min_length=1, max_length=4000)
 
 
+class QuestionAnswer(Model):
+    question_id: str = Field(min_length=1, max_length=128)
+    answer: str = Field(min_length=1, max_length=4000)
+
+
+class TriggerModeRequest(Model):
+    mode: Mode
+    revision: int = Field(ge=1)
+
+
 class KnowledgeRequest(Model):
     content: str = Field(min_length=1, max_length=16000)
     key: str | None = Field(default=None, min_length=1, max_length=128)
@@ -232,11 +258,21 @@ def create_app(
     settings = settings or Settings()
     database = store or Store(settings.database_url)
     credentials = credential_store or CredentialStore(settings.credential_path)
-    planner = OpenAIPlanner(settings, defer_client=True, credential_store=credentials)
+    prompt_archive = PromptArchive(database)
+    model_queue = ModelQueue(database, settings)
+    deliveries = DeliveryStore(database)
+    planner = OpenAIPlanner(
+        settings,
+        defer_client=True,
+        credential_store=credentials,
+        prompt_archive=prompt_archive,
+        model_queue=model_queue,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await asyncio.to_thread(database.initialize)
+        await asyncio.to_thread(model_queue.configure)
         try:
             yield
         finally:
@@ -310,6 +346,39 @@ def create_app(
     @app.get("/model-settings", response_model=ModelSettings, dependencies=auth)
     def get_model_settings():
         return get_default_model_settings()
+
+    @app.get("/model-queue", dependencies=auth)
+    def model_queue_status():
+        return model_queue.summary()
+
+    @app.get("/goals/{goal_id}/diagnostics", dependencies=auth)
+    def diagnostic_status(goal_id: str):
+        return goal_diagnostics(require_goal(goal_id), model_queue, settings)
+
+    @app.get("/prompt-modules", dependencies=auth)
+    def prompt_modules():
+        return catalog()
+
+    @app.post("/prompts/preview", dependencies=auth)
+    def preview_prompt(request: PromptPreviewRequest):
+        return prompt_preview(request.purpose, settings.tool_access, request.guidance)
+
+    @app.get("/prompt-snapshots/{snapshot_id}", dependencies=auth)
+    def prompt_snapshot(snapshot_id: str):
+        try:
+            snapshot = prompt_archive.get(snapshot_id)
+        except KeyError:
+            raise HTTPException(404, "Instruction snapshot not found") from None
+        access = (
+            "scoped" if any(m.module_id == "tools-scoped" for m in snapshot.modules) else "full"
+        )
+        guidance = [m.module_id for m in snapshot.modules if m.module_id in {"coding", "research"}]
+        return compare(snapshot, prompt_preview(snapshot.purpose, access, guidance))
+
+    @app.get("/goals/{goal_id}/prompts", dependencies=auth)
+    def goal_prompts(goal_id: str):
+        require_goal(goal_id)
+        return prompt_archive.for_goal(goal_id)
 
     @app.put("/model-settings", response_model=ModelSettings, dependencies=auth)
     def put_model_settings(value: ModelSettings):
@@ -578,7 +647,14 @@ def create_app(
     def follow_up_goal(goal_id: str, request: FollowUpRequest):
         """Continue an ended goal in place with a follow-up request."""
         try:
-            return database.follow_up_goal(goal_id, request.message)
+            goal = require_goal(goal_id)
+            archive_id = capture_legacy_delivery(goal)
+            return database.follow_up_goal(
+                goal_id,
+                request.message,
+                expected_revision=goal.state.revision,
+                archive_id=archive_id,
+            )
         except KeyError:
             raise HTTPException(404, "Goal not found") from None
         except ValueError as exc:
@@ -655,7 +731,7 @@ def create_app(
         if path not in {item.path for item in goal.contract.deliverables}:
             raise HTTPException(404, "Artifact is not a declared deliverable")
         try:
-            content = WorkspaceTools(settings).read_artifact(goal_id, path)
+            content = current_artifact_bytes(goal, path).decode("utf-8")
         except (OSError, ToolError, UnicodeError):
             raise HTTPException(404, "Artifact is missing, unsafe or not readable text") from None
         limit = 100_000
@@ -667,9 +743,122 @@ def create_app(
         if path not in {item.path for item in goal.contract.deliverables}:
             raise HTTPException(404, "Artifact is not a declared deliverable")
         try:
-            content = WorkspaceTools(settings).read_artifact_bytes(goal_id, path)
+            content = current_artifact_bytes(goal, path)
         except (OSError, ToolError):
             raise HTTPException(404, "Artifact is missing, unsafe or inaccessible") from None
+        filename = quote(path.rsplit("/", 1)[-1], safe="")
+        return Response(
+            content,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
+                "Cache-Control": "no-store",
+            },
+        )
+
+    def capture_legacy_delivery(goal):
+        if goal.state.status != "succeeded":
+            return None
+        delivery = deliveries.get(goal.goal_id, goal.state.revision)
+        try:
+            if delivery.archive_id:
+                tools = WorkspaceTools(settings)
+                tools.verify_frozen_artifacts(goal.goal_id, delivery.archive_id, delivery.artifacts)
+                return delivery.archive_id
+            return WorkspaceTools(settings).freeze_artifacts(goal.goal_id, goal.state.artifacts)
+        except (OSError, ToolError):
+            return None
+
+    def delivery_bytes(delivery, path):
+        artifact = next((item for item in delivery.artifacts if item.path == path), None)
+        if artifact is None:
+            raise HTTPException(404, "Artifact is not part of this delivery")
+        tools = WorkspaceTools(settings)
+        try:
+            if delivery.archive_id:
+                return tools.read_frozen_artifact(delivery.goal_id, delivery.archive_id, artifact)
+            goal = require_goal(delivery.goal_id)
+            if goal.state.status != "succeeded" or goal.state.revision != delivery.revision:
+                raise HTTPException(410, "Original delivery files were not archived")
+            import hashlib
+
+            data = tools.read_artifact_bytes(delivery.goal_id, path)
+            if len(data) != artifact.size or hashlib.sha256(data).hexdigest() != artifact.sha256:
+                raise HTTPException(410, "Original delivery files have changed")
+            return data
+        except (OSError, ToolError):
+            raise HTTPException(
+                410, "Delivery archive is unavailable or failed its integrity check"
+            ) from None
+
+    def current_artifact_bytes(goal, path):
+        if goal.state.status == "succeeded":
+            delivery = deliveries.get(goal.goal_id, goal.state.revision)
+            if delivery.artifacts:
+                return delivery_bytes(delivery, path)
+        return WorkspaceTools(settings).read_artifact_bytes(goal.goal_id, path)
+
+    @app.get("/goals/{goal_id}/deliveries", response_model=DeliveryPage, dependencies=auth)
+    def delivery_history(
+        goal_id: str,
+        before_revision: Annotated[int | None, Query(ge=1)] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    ):
+        require_goal(goal_id)
+        return deliveries.page(goal_id, before_revision, limit)
+
+    @app.post("/goals/{goal_id}/deliveries/{revision}/review", dependencies=auth)
+    def review_delivery(goal_id: str, revision: int, request: DeliveryReviewRequest):
+        goal = require_goal(goal_id)
+        try:
+            target = deliveries.get(goal_id, revision)
+            archive_id = (
+                capture_legacy_delivery(goal)
+                if goal.state.revision == revision and target.review_status == "pending"
+                else None
+            )
+            if (
+                request.action == "accept"
+                and target.review_status == "pending"
+                and goal.state.revision == revision
+                and target.artifacts
+                and not archive_id
+            ):
+                raise HTTPException(
+                    410,
+                    "Delivery files could not be archived unchanged; request changes or verify them again",
+                )
+            return deliveries.review(
+                goal_id, revision, request.action, request.feedback, archive_id
+            )
+        except KeyError:
+            raise HTTPException(404, "Delivery not found") from None
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @app.get("/goals/{goal_id}/deliveries/{revision}/artifacts/content", dependencies=auth)
+    def historical_content(
+        goal_id: str, revision: int, path: Annotated[str, Query(min_length=1, max_length=240)]
+    ):
+        require_goal(goal_id)
+        try:
+            delivery = deliveries.get(goal_id, revision)
+            text = delivery_bytes(delivery, path).decode("utf-8")
+        except KeyError:
+            raise HTTPException(404, "Delivery not found") from None
+        except UnicodeError:
+            raise HTTPException(404, "Artifact is not readable text") from None
+        return {"path": path, "content": text[:100_000], "truncated": len(text) > 100_000}
+
+    @app.get("/goals/{goal_id}/deliveries/{revision}/artifacts/download", dependencies=auth)
+    def historical_download(
+        goal_id: str, revision: int, path: Annotated[str, Query(min_length=1, max_length=240)]
+    ):
+        require_goal(goal_id)
+        try:
+            content = delivery_bytes(deliveries.get(goal_id, revision), path)
+        except KeyError:
+            raise HTTPException(404, "Delivery not found") from None
         filename = quote(path.rsplit("/", 1)[-1], safe="")
         return Response(
             content,
@@ -701,6 +890,20 @@ def create_app(
     @app.post("/goals/{goal_id}/approve", status_code=202, dependencies=auth)
     def approve_goal(goal_id: str, request: ApprovalRequest):
         return command(goal_id, "approve", _approval_payload(request))
+
+    @app.post("/goals/{goal_id}/answer", status_code=202, dependencies=auth)
+    def answer_question(goal_id: str, request: QuestionAnswer):
+        if not request.answer.strip():
+            raise HTTPException(422, "An answer cannot be blank")
+        try:
+            command_id = database.enqueue_command(
+                goal_id, "wake", request.answer.strip(), question_id=request.question_id
+            )
+        except KeyError:
+            raise HTTPException(404, "Goal not found") from None
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        return {"goal_id": goal_id, "command_id": command_id, "status": "queued"}
 
     def default_approval_settings() -> ApprovalSettings:
         return ApprovalSettings(
@@ -880,5 +1083,85 @@ def create_app(
         """Remove the schedule; the tasks it started stay in the task list."""
         agenda_call(lambda: agenda.delete_schedule(schedule_id), "Schedule not found")
         return Response(status_code=204)
+
+    triggers = TriggerStore(database, WorkspaceTools(settings))
+
+    @app.get("/trigger-rules", response_model=list[TriggerRuleStatus], dependencies=auth)
+    def trigger_rules():
+        return triggers.rule_statuses()
+
+    @app.post("/trigger-rules/{rule_id}/limits", response_model=TriggerRule, dependencies=auth)
+    def set_trigger_limits(rule_id: str, request: TriggerLimitsRequest):
+        try:
+            return triggers.set_limits(
+                rule_id, request.revision, request.daily_auto_limit, request.daily_timezone
+            )
+        except KeyError:
+            raise HTTPException(404, "Rule not found") from None
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @app.post("/trigger-rules", response_model=TriggerRule, status_code=201, dependencies=auth)
+    def create_trigger_rule(request: TriggerRuleRequest):
+        try:
+            return triggers.create(request)
+        except (ToolError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @app.post("/trigger-rules/{rule_id}/mode", response_model=TriggerRule, dependencies=auth)
+    def trigger_mode(rule_id: str, request: TriggerModeRequest):
+        try:
+            return triggers.set_mode(rule_id, request.mode, request.revision)
+        except KeyError:
+            raise HTTPException(404, "Rule not found") from None
+        except (ToolError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @app.get("/trigger-decisions", response_model=list[TriggerDecision], dependencies=auth)
+    def trigger_decisions():
+        return triggers.decisions()
+
+    @app.get("/trigger-decisions/page", response_model=TriggerDecisionPage, dependencies=auth)
+    def trigger_decision_page(
+        pending_only: bool = False,
+        limit: Annotated[int, Query(ge=1, le=100)] = 25,
+        cursor: Annotated[str | None, Query(max_length=2048)] = None,
+    ):
+        try:
+            return triggers.decision_page(pending_only=pending_only, limit=limit, cursor=cursor)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @app.delete("/trigger-rules/{rule_id}", status_code=204, dependencies=auth)
+    def delete_trigger_rule(rule_id: str, revision: Annotated[int, Query(ge=1)]):
+        try:
+            triggers.delete(rule_id, revision)
+        except KeyError:
+            raise HTTPException(404, "Rule not found") from None
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        return Response(status_code=204)
+
+    @app.post(
+        "/trigger-events", response_model=list[TriggerDecision], status_code=202, dependencies=auth
+    )
+    def receive_trigger_event(request: TriggerEvent):
+        try:
+            return triggers.emit(request, get_default_model_settings())
+        except (ToolError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @app.post(
+        "/trigger-decisions/{decision_id}/{action}",
+        response_model=TriggerDecision,
+        dependencies=auth,
+    )
+    def act_on_trigger(decision_id: str, action: Literal["run", "dismiss"]):
+        try:
+            return triggers.decide(decision_id, action, get_default_model_settings())
+        except KeyError:
+            raise HTTPException(404, "Suggestion not found") from None
+        except (ToolError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from None
 
     return app

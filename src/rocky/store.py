@@ -6,6 +6,7 @@ import math
 import re
 import shlex
 from collections.abc import Callable
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -189,6 +190,19 @@ class EventRow(Base):
     state: Mapped[dict] = mapped_column(JSON)
 
 
+class InputReceiptRow(Base):
+    """Input lifecycle separate from old command rows; additive database upgrade."""
+
+    __tablename__ = "input_receipts"
+    __table_args__ = (UniqueConstraint("goal_id", "question_id"),)
+    command_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    goal_id: Mapped[str] = mapped_column(String(128), index=True)
+    question_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(64))
+    delivered_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    consumed_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
 class MessageRow(Base):
     """Conversation survives the workflow's bounded observation window."""
 
@@ -316,6 +330,10 @@ class Store:
     def initialize(self) -> None:
         # Registers the agenda tables, which live in their own module.
         import rocky.agenda  # noqa: F401
+        import rocky.deliveries  # noqa: F401
+        import rocky.model_queue  # noqa: F401
+        import rocky.prompt_archive  # noqa: F401
+        import rocky.triggers  # noqa: F401
 
         existing = inspect(self.engine).has_table(GoalRow.__tablename__)
         Base.metadata.create_all(self.engine)
@@ -363,8 +381,11 @@ class Store:
 
     @staticmethod
     def _view(row: GoalRow, session: Session) -> GoalView:
+        from rocky.deliveries import DeliveryRow
+
         snapshot = session.get(GoalModelSettingsRow, row.goal_id)
         lifecycle = session.get(GoalLifecycleRow, row.goal_id)
+        delivery = session.get(DeliveryRow, (row.goal_id, row.revision))
         return GoalView(
             goal_id=row.goal_id,
             contract=row.contract,
@@ -372,15 +393,32 @@ class Store:
             created_at=row.created_at,
             model_settings=ModelSettings.model_validate(snapshot.settings) if snapshot else None,
             archived=bool(lifecycle and lifecycle.archived),
+            delivery_review=delivery.review_status
+            if delivery
+            else "pending"
+            if row.state.get("status") == "succeeded"
+            else None,
         )
 
     @staticmethod
     def _views(session: Session, *where, order_by, limit: int) -> list[GoalView]:
         """Load goals with their settings and lifecycle in one query, not 1 + 2N."""
+        from rocky.deliveries import DeliveryRow
+
         rows = session.execute(
-            select(GoalRow, GoalModelSettingsRow.settings, GoalLifecycleRow.archived)
+            select(
+                GoalRow,
+                GoalModelSettingsRow.settings,
+                GoalLifecycleRow.archived,
+                DeliveryRow.review_status,
+            )
             .outerjoin(GoalModelSettingsRow, GoalModelSettingsRow.goal_id == GoalRow.goal_id)
             .outerjoin(GoalLifecycleRow, GoalLifecycleRow.goal_id == GoalRow.goal_id)
+            .outerjoin(
+                DeliveryRow,
+                (DeliveryRow.goal_id == GoalRow.goal_id)
+                & (DeliveryRow.revision == GoalRow.revision),
+            )
             .where(*where)
             .order_by(order_by)
             .limit(limit)
@@ -393,8 +431,13 @@ class Store:
                 created_at=row.created_at,
                 model_settings=ModelSettings.model_validate(settings) if settings else None,
                 archived=bool(archived),
+                delivery_review=review
+                if review
+                else "pending"
+                if row.state.get("status") == "succeeded"
+                else None,
             )
-            for row, settings, archived in rows
+            for row, settings, archived, review in rows
         ]
 
     def get_model_settings(self, fallback: ModelSettings) -> ModelSettings:
@@ -634,21 +677,28 @@ class Store:
     def list_goals_tag(self, limit: int = 50, *, archived: bool = False, query: str = "") -> str:
         """A validator for list_goals that reads no contract or state JSON.
 
-        Contracts, creation times and model settings never change after creation;
-        every state change advances the goal's revision. The listed IDs and their
-        revisions therefore determine the whole response.
+        State and contract changes advance the goal's revision. Owner acceptance
+        changes only the current delivery's review status, so include that status
+        alongside the listed IDs and revisions.
         """
+        from rocky.deliveries import DeliveryRow
+
         with self.sessions() as session:
             rows = session.execute(
-                select(GoalRow.goal_id, GoalRow.revision)
+                select(GoalRow.goal_id, GoalRow.revision, DeliveryRow.review_status)
                 .outerjoin(GoalLifecycleRow, GoalLifecycleRow.goal_id == GoalRow.goal_id)
+                .outerjoin(
+                    DeliveryRow,
+                    (DeliveryRow.goal_id == GoalRow.goal_id)
+                    & (DeliveryRow.revision == GoalRow.revision),
+                )
                 .where(*self._list_filter(limit, archived, query))
                 .order_by(GoalRow.created_at.desc())
                 .limit(limit if query else limit + MAX_LISTED_UNFINISHED)
             )
             digest = hashlib.sha256(f"{archived}:{limit}:{query}".encode())
-            for goal_id, revision in rows:
-                digest.update(f"\n{goal_id}:{revision}".encode())
+            for goal_id, revision, review in rows:
+                digest.update(f"\n{goal_id}:{revision}:{review or ''}".encode())
             return digest.hexdigest()[:32]
 
     def pending_goals(self) -> list[GoalView]:
@@ -711,6 +761,7 @@ class Store:
             state.status = "queued"
             state.reason = "Recovering from saved progress after an execution engine failure."
             state.wake_at = None
+            state.pending_question = None
             state.deadline_at = None
             state.revision = row.revision + 1
             state.updated_at = datetime.now(UTC).isoformat()
@@ -747,7 +798,16 @@ class Store:
 
         return self._requeue(goal_id, EXTENDABLE_STATUSES, amend, EXTENSION_REASON)
 
-    def follow_up_goal(self, goal_id: str, message: str, *, at: str = "") -> GoalView:
+    def follow_up_goal(
+        self,
+        goal_id: str,
+        message: str,
+        *,
+        at: str = "",
+        session=None,
+        expected_revision=None,
+        archive_id=None,
+    ) -> GoalView:
         """Continue an ended goal with an owner's follow-up request.
 
         The request joins the objective and becomes an acceptance criterion,
@@ -782,11 +842,31 @@ class Store:
                 timeout_seconds=limits.timeout_seconds,
             )
 
-        return self._requeue(goal_id, FOLLOW_UP_STATUSES, amend, FOLLOW_UP_REASON)
+        return self._requeue(
+            goal_id,
+            FOLLOW_UP_STATUSES,
+            amend,
+            FOLLOW_UP_REASON,
+            session=session,
+            expected_revision=expected_revision,
+            delivery_feedback=message,
+            archive_id=archive_id,
+        )
 
-    def _requeue(self, goal_id: str, statuses, amend, reason: str) -> GoalView:
+    def _requeue(
+        self,
+        goal_id: str,
+        statuses,
+        amend,
+        reason: str,
+        *,
+        session=None,
+        expected_revision=None,
+        delivery_feedback=None,
+        archive_id=None,
+    ) -> GoalView:
         """Queue an ended goal to continue from its projection with an amended contract."""
-        with self.sessions.begin() as session:
+        with self.sessions.begin() if session is None else nullcontext(session) as session:
             changed = session.execute(
                 update(GoalRow)
                 .where(
@@ -808,6 +888,15 @@ class Store:
                 raise ValueError("This goal cannot be continued in its current state")
             state = RunState.model_validate(row.state)
             contract = GoalContract.model_validate(row.contract)
+            if expected_revision is not None and state.revision != expected_revision:
+                raise ValueError("This delivery is no longer current")
+            delivery = None
+            if state.status == "succeeded":
+                from rocky.deliveries import DeliveryStore
+
+                delivery = DeliveryStore.record(session, row, state, archive_id)
+                if delivery_feedback is not None:
+                    DeliveryStore.changes(delivery, delivery_feedback)
             amend(contract, state)
             if state.pending_approval is not None:
                 state.deferred_approvals = [
@@ -818,9 +907,17 @@ class Store:
             state.status = "queued"
             state.reason = reason
             state.wake_at = None
+            state.pending_question = None
             state.deadline_at = None
+            state.delivery_archive = None
             state.revision = row.revision + 1
             state.updated_at = datetime.now(UTC).isoformat()
+            if (
+                delivery is not None
+                and delivery.review_status == "changes_requested"
+                and delivery.continued_revision is None
+            ):
+                delivery.continued_revision = state.revision
             data = state.model_dump(mode="json")
             row.contract = contract.model_dump(mode="json")
             row.state, row.revision, row.dispatched = data, state.revision, False
@@ -857,6 +954,7 @@ class Store:
         state.revision = max(expected_revision + 1, state.revision)
         state.updated_at = datetime.now(UTC).isoformat()
         state.wake_at = None
+        state.pending_question = None
         if state.execution_step and state.execution_step.status == "started":
             state.execution_step.status = "failed"
             state.execution_step.completed_at = state.updated_at
@@ -887,9 +985,15 @@ class Store:
             )
             if state.execution_step:
                 self._save_execution_step(session, goal_id, data["execution_step"], state.revision)
+            if state.status == "succeeded":
+                from rocky.deliveries import DeliveryStore
+
+                DeliveryStore.record(session, session.get(GoalRow, goal_id), state)
             return True
 
     def save_state(self, state: RunState) -> None:
+        from rocky.deliveries import DeliveryStore
+
         with self.sessions.begin() as session:
             data = state.model_dump(mode="json")
             # Atomic compare-and-set works on PostgreSQL AND SQLite. A delayed
@@ -916,6 +1020,8 @@ class Store:
                 )
                 if record := data.get("execution_step"):
                     self._save_execution_step(session, state.goal_id, record, state.revision)
+                if state.status == "succeeded":
+                    DeliveryStore.record(session, session.get(GoalRow, state.goal_id), state)
             elif session.get(GoalRow, state.goal_id) is None:
                 raise ValueError("Goal does not exist")
 
@@ -960,6 +1066,23 @@ class Store:
         if record["status"] not in {"completed", "failed"}:
             return
         output = record.get("output", {})
+        if record["phase"] == "think":
+            ids = output.get("consumed_message_ids", [])
+            command_ids = [
+                key.removeprefix("wake:")
+                for key in ids
+                if isinstance(key, str) and key.startswith("wake:")
+            ]
+            if command_ids:
+                session.execute(
+                    update(InputReceiptRow)
+                    .where(
+                        InputReceiptRow.goal_id == goal_id,
+                        InputReceiptRow.command_id.in_(command_ids),
+                        InputReceiptRow.consumed_at.is_(None),
+                    )
+                    .values(consumed_at=record.get("completed_at") or record["started_at"])
+                )
         if record["phase"] == "act" and isinstance(output.get("results"), list):
             # A parallel batch keeps one tool message per action, so recall can
             # rank and clip each result and still say which action produced it.
@@ -1052,6 +1175,10 @@ class Store:
             return self._view(row, session)
 
     def delete_goal(self, goal_id: str) -> None:
+        from rocky.deliveries import DeliveryRow
+        from rocky.model_queue import ModelRequestRow
+        from rocky.prompt_archive import PromptUseRow
+
         with self.sessions.begin() as session:
             row = self._lock_completed(session, goal_id)
             lifecycle = session.get(GoalLifecycleRow, goal_id)
@@ -1070,6 +1197,7 @@ class Store:
             for table in (
                 EventRow,
                 CommandRow,
+                InputReceiptRow,
                 GoalRecoveryRow,
                 GoalModelSettingsRow,
                 MessageRow,
@@ -1077,10 +1205,15 @@ class Store:
                 ExecutionEventRow,
                 KnowledgeRow,
                 MemoryProposalRow,
+                PromptUseRow,
+                ModelRequestRow,
+                DeliveryRow,
             ):
                 session.execute(delete(table).where(table.goal_id == goal_id))
 
-    def enqueue_command(self, goal_id: str, kind: str, payload: str = "") -> str:
+    def enqueue_command(
+        self, goal_id: str, kind: str, payload: str = "", *, question_id: str | None = None
+    ) -> str:
         if kind not in ("cancel", "wake", "approve"):
             raise ValueError("Unsupported command")
         with self.sessions.begin() as session:
@@ -1095,6 +1228,25 @@ class Store:
                 raise KeyError(goal_id)
             if row.state["status"] in TERMINAL_STATUSES:
                 raise ValueError("Goal has already ended")
+            if question_id is not None:
+                question = row.state.get("pending_question") or {}
+                if (
+                    kind != "wake"
+                    or row.state.get("pending_approval")
+                    or row.state["status"] != "blocked"
+                    or question.get("question_id") != question_id
+                ):
+                    raise ValueError("This question is no longer current; refresh the task")
+                existing = session.scalar(
+                    select(InputReceiptRow).where(
+                        InputReceiptRow.goal_id == goal_id,
+                        InputReceiptRow.question_id == question_id,
+                    )
+                )
+                if existing:
+                    if session.get(CommandRow, existing.command_id).payload == payload:
+                        return existing.command_id
+                    raise ValueError("An answer to this question is already saved")
             if kind == "approve":
                 scope, _, fingerprint = payload.rpartition(":")
                 if scope not in APPROVAL_SCOPES:
@@ -1140,6 +1292,14 @@ class Store:
                 CommandRow(command_id=command_id, goal_id=goal_id, kind=kind, payload=payload)
             )
             if kind == "wake":
+                session.add(
+                    InputReceiptRow(
+                        command_id=command_id,
+                        goal_id=goal_id,
+                        question_id=question_id,
+                        created_at=datetime.now(UTC).isoformat(),
+                    )
+                )
                 session.add(
                     MessageRow(
                         goal_id=goal_id,
@@ -1200,14 +1360,28 @@ class Store:
             ]
 
     def goal_messages(self, goal_id: str) -> list[dict]:
-        """Saved user feedback, in stable ID order (not a claimed chronology)."""
+        """Saved user feedback, ordered by timestamp with a stable legacy fallback."""
         with self.sessions() as session:
             return [
-                {"command_id": row.command_id, "message": row.payload, "sent": row.sent}
-                for row in session.scalars(
-                    select(CommandRow)
+                {
+                    "command_id": row.command_id,
+                    "message": row.payload,
+                    "sent": row.sent,
+                    "delivery_status": "consumed"
+                    if receipt and receipt.consumed_at
+                    else "delivered"
+                    if row.sent
+                    else "saved",
+                    "created_at": receipt.created_at if receipt else None,
+                    "delivered_at": receipt.delivered_at if receipt else None,
+                    "consumed_at": receipt.consumed_at if receipt else None,
+                    "question_id": receipt.question_id if receipt else None,
+                }
+                for row, receipt in session.execute(
+                    select(CommandRow, InputReceiptRow)
+                    .outerjoin(InputReceiptRow, InputReceiptRow.command_id == CommandRow.command_id)
                     .where(CommandRow.goal_id == goal_id, CommandRow.kind == "wake")
-                    .order_by(CommandRow.command_id)
+                    .order_by(InputReceiptRow.created_at, CommandRow.command_id)
                 )
             ]
 
@@ -1841,6 +2015,9 @@ class Store:
             row = session.get(CommandRow, command_id)
             if row:
                 row.sent = True
+                receipt = session.get(InputReceiptRow, command_id)
+                if receipt and receipt.delivered_at is None:
+                    receipt.delivered_at = datetime.now(UTC).isoformat()
 
     def events(self, goal_id: str, after: int = 0, limit: int = 100) -> list[dict]:
         with self.sessions() as session:

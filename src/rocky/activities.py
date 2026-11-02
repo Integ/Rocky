@@ -15,6 +15,7 @@ from rocky.evidence import (
 )
 from rocky.harness import HarnessHooks
 from rocky.memory import MemoryManager, StoreMemoryProvider
+from rocky.model_queue import ModelRequestCancelled
 from rocky.models import (
     PhaseInput,
     PhaseResult,
@@ -97,6 +98,10 @@ class Activities:
         await self.check_cancelled(request.run.goal_id)
         try:
             result = await self.planner.plan(request)
+        except ModelRequestCancelled:
+            raise ApplicationError(
+                "Goal cancelled", type="GoalCancelled", non_retryable=True
+            ) from None
         except PlannerError as error:
             raise _model_failure(error) from None
         decision = result.decision
@@ -165,6 +170,10 @@ class Activities:
                     if (item["deliverable"], item["pointer"]) in verified
                 ],
             )
+        except ModelRequestCancelled:
+            raise ApplicationError(
+                "Goal cancelled", type="GoalCancelled", non_retryable=True
+            ) from None
         except PlannerError as error:
             # A completed but unusable review consumed tokens; never repeat it.
             raise _model_failure(error) from None
@@ -196,6 +205,15 @@ class Activities:
                     output_tokens=verdict.output_tokens,
                     cached_input_tokens=verdict.cached_input_tokens,
                 )
+            try:
+                freeze = getattr(self.tools, "freeze_artifacts", None)
+                if freeze is not None:
+                    verdict.delivery_archive = await asyncio.to_thread(
+                        freeze, request.run.goal_id, verdict.artifacts
+                    )
+            except (OSError, ValueError):
+                verdict.passed = False
+                verdict.feedback = "Delivery files could not be archived unchanged. Inspect the files, stop concurrent writers, and request verification again."
         return verdict
 
     def deliverable_texts(self, run: RunInput) -> dict[str, str]:
