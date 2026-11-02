@@ -8,7 +8,7 @@
 | 文件 | 用途 |
 | --- | --- |
 | [rocky-v0.2-overview.png](rocky-v0.2-overview.png) | README 概览图，1920 × 1080 |
-| [rocky-intro.mp4](rocky-intro.mp4) | 60 秒介绍，1280 × 720、30 fps；H.264 / AAC，F5-TTS 沉稳中文播音男声、画面内字幕与可选字幕轨 |
+| [rocky-intro-broadcast-male.mp4](rocky-intro-broadcast-male.mp4) | 60 秒介绍，1280 × 720、30 fps；H.264 / AAC，F5-TTS 沉稳中文播音男声、画面内字幕与可选字幕轨 |
 | [rocky-voice-preview.mp3](rocky-voice-preview.mp3) | 新男声前两段的短试听 |
 | [rocky-intro.gif](rocky-intro.gif) | 800 × 450 的无声循环预览；八个分镜按视频时长依次停留，减少 README 加载体积 |
 | [rocky-intro.srt](rocky-intro.srt) | 独立 UTF-8 中文字幕 |

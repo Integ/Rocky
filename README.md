@@ -7,7 +7,7 @@ Rocky 是一个长期运行的自主数字代理。你确认目标、验收标�
 **v0.2 把任务执行、人工交接、议程和交付审阅接成了一条完整流程。**
 
 [下载 v0.2.0](https://github.com/Integ/Rocky/releases/tag/v0.2.0) ·
-[一分钟介绍](docs/media/rocky-intro.mp4) ·
+[一分钟介绍·播音男声版](docs/media/rocky-intro-broadcast-male.mp4) ·
 [macOS 使用指南](docs/macos.md) ·
 [更新日志](CHANGELOG.md)
 
@@ -15,7 +15,7 @@ Rocky 是一个长期运行的自主数字代理。你确认目标、验收标�
 
 ## 一分钟了解 v0.2
 
-▶ [观看介绍视频](docs/media/rocky-intro.mp4)（60 秒，F5-TTS 中文播音男声与字幕） ·
+▶ [观看新版介绍视频·播音男声](docs/media/rocky-intro-broadcast-male.mp4)（60 秒，F5-TTS 中文播音男声与字幕） ·
 [男声试听](docs/media/rocky-voice-preview.mp3) ·
 [下载字幕](docs/media/rocky-intro.srt)
 
@@ -25,7 +25,7 @@ Rocky 是一个长期运行的自主数字代理。你确认目标、验收标�
 <details>
 <summary>查看动画预览</summary>
 
-[![Rocky v0.2 一分钟功能介绍动画](docs/media/rocky-intro.gif)](docs/media/rocky-intro.mp4)
+[![Rocky v0.2 一分钟功能介绍动画](docs/media/rocky-intro.gif)](docs/media/rocky-intro-broadcast-male.mp4)
 
 </details>
 

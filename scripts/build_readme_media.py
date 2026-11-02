@@ -196,11 +196,11 @@ def replace_audio(work, tts_python, narration_dir=None):
         "error",
         "-y",
         "-i",
-        str(MEDIA / "rocky-intro.mp4"),
+        str(MEDIA / "rocky-intro-broadcast-male.mp4"),
     ]
     for i in range(8):
         command += ["-i", str(work / f"voice-{i}.wav")]
-    video = work / "rocky-intro.mp4"
+    video = work / "rocky-intro-broadcast-male.mp4"
     command += [
         "-filter_complex",
         ";".join(audio_filters(work, 1)),
@@ -229,7 +229,7 @@ def replace_audio(work, tts_python, narration_dir=None):
     run(command)
     verify_video(video)
     build_voice_preview(work)
-    shutil.copyfile(video, MEDIA / "rocky-intro.mp4")
+    shutil.copyfile(video, MEDIA / "rocky-intro-broadcast-male.mp4")
     shutil.copyfile(work / "rocky-voice-preview.mp3", MEDIA / "rocky-voice-preview.mp3")
     shutil.copyfile(work / "voice-generation.json", MEDIA / "voice-generation.json")
     print("Replaced the narration with F5-TTS; copied existing video/subtitle streams.")
@@ -291,7 +291,7 @@ def build(work, frames_only=False, audio_only=False, tts_python=sys.executable, 
         )
         previous = name
     filters.extend(audio_filters(work, 8))
-    video = work / "rocky-intro.mp4"
+    video = work / "rocky-intro-broadcast-male.mp4"
     command += [
         "-filter_complex",
         ";".join(filters),
@@ -334,7 +334,7 @@ def build(work, frames_only=False, audio_only=False, tts_python=sys.executable, 
     # Copy only finished products; intermediate images/audio stay outside the repository.
     MEDIA.mkdir(exist_ok=True)
     for name in (
-        "rocky-intro.mp4",
+        "rocky-intro-broadcast-male.mp4",
         "rocky-intro.gif",
         "rocky-intro.srt",
         "rocky-voice-preview.mp3",
