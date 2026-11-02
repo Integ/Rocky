@@ -140,6 +140,41 @@ async def test_cancelling_a_waiter_releases_it_without_a_provider_call(queue):
     queue.finish(holder)
 
 
+async def test_cancellation_while_enqueue_is_in_flight_cleans_up_the_late_row(queue, monkeypatch):
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    enqueue = queue.enqueue
+
+    def slow_enqueue(*args):
+        entered.set()
+        assert release.wait(5)
+        result = enqueue(*args)
+        finished.set()
+        return result
+
+    monkeypatch.setattr(queue, "enqueue", slow_enqueue)
+
+    async def use_slot():
+        async with queue.slot("planner"):
+            pytest.fail("A cancelled request must not reach its provider")
+
+    request = asyncio.create_task(use_slot())
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(request, 1)
+    finally:
+        release.set()
+    assert await asyncio.to_thread(finished.wait, 5)
+    for _ in range(100):
+        if queue.summary()["waiting"] == 0:
+            break
+        await asyncio.sleep(0.01)
+    assert queue.summary()["waiting"] == 0
+    # A cancelled FIFO head must not stall an unrelated later request for 60s.
+    assert queue.claim(enqueue("planner"))
+
+
 def test_cancelled_goal_cannot_obtain_a_model_slot(queue):
     task_goal = goal(queue)
     request_id = queue.enqueue("planner", task_goal.goal_id)

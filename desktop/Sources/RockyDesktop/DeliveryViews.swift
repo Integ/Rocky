@@ -161,6 +161,7 @@ struct DeliveryHistoryView: View {
         catch { self.error = error.localizedDescription }
     }
 
+    @MainActor
     private func export(_ delivery: Delivery, _ artifact: Artifact) async {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = (artifact.path as NSString).lastPathComponent

@@ -16,6 +16,7 @@ from pathlib import Path
 
 import httpx
 
+from rocky.file_locks import open_lock_file
 from rocky.models import SAFE_HTTP_METHODS
 
 MAX_TEXT = 16_000
@@ -131,12 +132,7 @@ def _session(directory: Path, session: str):
         if os.fstat(descriptor).st_mode & 0o077:
             raise HTTPToolError("HTTP session directory must have private permissions")
         name = hashlib.sha256(session.encode()).hexdigest()
-        lock = os.open(
-            name + ".lock",
-            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
-            0o600,
-            dir_fd=descriptor,
-        )
+        lock = open_lock_file(name + ".lock", dir_fd=descriptor)
         try:
             _regular_private(lock)
             fcntl.flock(lock, fcntl.LOCK_EX)

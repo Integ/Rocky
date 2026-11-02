@@ -25,6 +25,7 @@ from pathlib import Path
 import httpx
 
 from rocky.config import Settings
+from rocky.file_locks import open_lock_file
 
 # A waiting task's durable timer only fires while the Mac is awake. Blocked
 # tasks wait for the owner, who wakes the Mac anyway.
@@ -141,11 +142,7 @@ class Supervisor:
     def run(self) -> int:
         self.run_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         with ExitStack() as stack:
-            lock = os.open(
-                self.run_dir / "service.lock",
-                os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
-                0o600,
-            )
+            lock = open_lock_file(self.run_dir / "service.lock")
             stack.callback(os.close, lock)
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

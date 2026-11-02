@@ -93,6 +93,21 @@ def test_success_records_one_immutable_delivery_and_acceptance_updates_list_tag(
         deliveries.review("task", 10, "request_changes", "rewrite")
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_pending_delivery_stays_listed_after_it_falls_out_of_recent_history(context, legacy):
+    store, _, _, deliveries = context
+    complete(context)
+    if legacy:
+        with store.sessions.begin() as session:
+            session.delete(session.get(DeliveryRow, ("task", 10)))
+    store.create_goal("recent", store.get_goal("task").contract)
+    assert {goal.goal_id for goal in store.list_goals(limit=1)} == {"task", "recent"}
+    tag = store.list_goals_tag(limit=1)
+    deliveries.review("task", 10, "accept")
+    assert {goal.goal_id for goal in store.list_goals(limit=1)} == {"recent"}
+    assert store.list_goals_tag(limit=1) != tag
+
+
 def test_request_changes_is_atomic_idempotent_and_keeps_each_artifact_version(context):
     store, _, tools, deliveries = context
     first = complete(context)

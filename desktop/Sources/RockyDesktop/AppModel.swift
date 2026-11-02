@@ -105,21 +105,25 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func reviewDelivery(_ goal: Goal, action: String, feedback: String = "") async -> Bool {
-        guard isConnected, !reviewingDelivery, goal.state.status == "succeeded" else { return false }
+        guard isConnected, !reviewingDelivery, !historyUpdates.contains(goal.id), goal.state.status == "succeeded" else { return false }
         reviewingDelivery = true
         defer { reviewingDelivery = false }
+        historyUpdates.insert(goal.id)
+        historyGeneration += 1
+        var failure: Error?
         do {
             let result = try await api.reviewDelivery(goal.id, revision: goal.state.revision, action: action, feedback: feedback.trimmingCharacters(in: .whitespacesAndNewlines))
             if let index = goals.firstIndex(where: { $0.id == goal.id }) { goals[index] = result.goal }
             if let index = searchResults.firstIndex(where: { $0.id == goal.id }) { searchResults[index] = result.goal }
             error = nil
-            await refresh()
-            return true
         } catch {
-            await refresh()
-            self.error = error.localizedDescription
-            return false
+            failure = error
         }
+        historyUpdates.remove(goal.id)
+        historyGeneration += 1
+        await refresh()
+        if let failure { self.error = failure.localizedDescription }
+        return failure == nil
     }
 
     func answerQuestion(_ goal: Goal, question: PendingQuestion, answer: String) async throws {
@@ -260,7 +264,7 @@ final class AppModel: ObservableObject {
     }
 
     func canManageHistory(_ goal: Goal) -> Bool {
-        goals.first { $0.id == goal.id }?.state.isTerminal == true && isConnected && !historyUpdates.contains(goal.id)
+        goals.first { $0.id == goal.id }?.state.isTerminal == true && isConnected && !reviewingDelivery && !historyUpdates.contains(goal.id)
     }
 
     func archive(_ goal: Goal, archived: Bool) async {

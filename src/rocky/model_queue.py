@@ -53,6 +53,7 @@ class ModelQueue:
         self.store = store
         self.capacity = settings.max_concurrent_model_calls
         self.reserved = min(settings.model_interactive_reserve, self.capacity - 1)
+        self._cleanup_tasks: set[asyncio.Task] = set()
 
     def _lock(self, session):
         changed = session.execute(
@@ -198,7 +199,23 @@ class ModelQueue:
 
     @asynccontextmanager
     async def slot(self, purpose, goal_id=None, interactive=False, attempt=1):
-        request_id = await asyncio.to_thread(self.enqueue, purpose, goal_id, interactive, attempt)
+        enqueue = asyncio.create_task(
+            asyncio.to_thread(self.enqueue, purpose, goal_id, interactive, attempt)
+        )
+        try:
+            request_id = await asyncio.shield(enqueue)
+        except asyncio.CancelledError:
+            # Cancelling to_thread cannot stop its transaction. Keep the result
+            # alive and remove the row once committed, without delaying cancellation.
+            async def clean_late_enqueue():
+                with suppress(Exception):
+                    late_id = await enqueue
+                    await asyncio.to_thread(self.finish, late_id, "cancelled")
+
+            cleanup = asyncio.create_task(clean_late_enqueue())
+            self._cleanup_tasks.add(cleanup)
+            cleanup.add_done_callback(self._cleanup_tasks.discard)
+            raise
         state, retry_after = "completed", None
         try:
             while not await asyncio.to_thread(self.claim, request_id):

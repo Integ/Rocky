@@ -6,6 +6,7 @@ from sqlalchemy import event, text
 
 from rocky.api import create_app
 from rocky.config import Settings
+from rocky.deliveries import DeliveryStore
 from rocky.inference import ModelSettings
 from rocky.models import Deliverable, GoalContract, RunState
 from rocky.store import Store
@@ -141,6 +142,9 @@ def test_unfinished_goals_stay_listed_beyond_the_newest(store, client):
     for index in range(3):
         store.create_goal(f"new-{index}", CONTRACT)
         finish(store, f"new-{index}")
+        # Accepted completions fall out of the recent window; pending deliveries
+        # now remain visible alongside unfinished execution.
+        DeliveryStore(store).review(f"new-{index}", 1, "accept")
     listed = [goal.goal_id for goal in store.list_goals(limit=2)]
     assert listed[:2] == ["new-2", "new-1"] and "old-running" in listed
     assert "new-0" not in listed

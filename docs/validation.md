@@ -266,3 +266,52 @@ Validated on 2026-11-01 (America/Vancouver):
   success message, CRC, fixed member names, complete statistics and absence of
   home-directory paths or endpoint URLs. No live model calls, task decisions,
   cleanup operations or external uploads were performed.
+
+## Concurrency and owner-review fixes
+
+Validated on 2026-11-02 (America/Vancouver):
+
+- Reviewed the task handoff/delivery and storage/diagnostic changes. Reproduced
+  cancellation during threaded model enqueue, a stale native refresh overwriting
+  acceptance, an old pending delivery disappearing outside the recent page, and
+  backup files disappearing during listing or before the second status read.
+  Added regression coverage and fixed each path; archive/delete and review are
+  mutually exclusive in the native client.
+- Full regression also exposed an intermittent missing-info evaluation failure.
+  Its execution record contained `operation_storage_unavailable` for one of two
+  parallel first reads. A local minimal reproduction traced this to a concurrent
+  `O_CREAT` open of the same new lock file returning `FileNotFoundError`, although
+  the other caller's lock already existed and an immediate open succeeded.
+  Tool receipts, HTTP sessions, backups and service initialization now open an
+  existing lock or create it exclusively and reopen the winning inode. They
+  reject symlinks, hard links and special files without blocking.
+- After the lock fix, 400 fresh two-read batches (800 reads) retained every
+  result. The affected tool/HTTP/backup suites passed **99 tests**. New lock
+  tests also cover private, non-inheritable shared inodes and receipt replay.
+- Final full Python suite: **1309 passed, 3 skipped**, with two existing Temporal
+  import warnings. Full Swift suite: **107 passed**. Ruff lint/format and diff
+  whitespace checks passed. The listing test now explicitly accepts completed
+  fixtures before asserting that they can fall outside the recent window;
+  pending deliveries are tested separately, including legacy metadata records.
+- Rebuilt and restarted the native bundle. The running backend matched its build
+  ID and reported healthy database, worker, Temporal and backup status. No live
+  model requests, owner delivery decisions or external uploads were performed.
+
+## 0.2.0 release candidate
+
+Reviewed and validated on 2026-11-02 (America/Vancouver):
+
+- Reviewed the changes since the last passing CI commit `65d119b`, including
+  current uncommitted concurrency fixes. Checked delivery revision/transaction
+  boundaries, immutable artifact reads, event rule quotas and pagination, model
+  admission cancellation, workflow patch gates and diagnostic allowlists.
+- Both failed CI runs (`41395489515` and `41397626240`) stopped while compiling
+  `DeliveryHistoryView.export` on the macOS 14 runner's default Xcode 15.4.
+  The function now explicitly uses `@MainActor` for `NSSavePanel`, preserving
+  compatibility with older SwiftUI isolation rules.
+- Full Python suite: **1309 passed, 3 skipped**, using a cached real Temporal
+  test server outside the execution sandbox. Two existing Temporal import
+  warnings remain. Full native Swift suite: **107 passed** on Swift 6.4.2.
+  Ruff lint, formatting and diff whitespace checks passed.
+- No live model calls were used for this release review. Local checks do not
+  replace the macOS 14 and macOS 26 CI gates required before publication.

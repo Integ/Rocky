@@ -134,6 +134,43 @@ def test_status_reports_worker_heartbeat_and_problems(settings, monkeypatch):
     assert service_status(settings, store)["worker"]["state"] == "stale"
 
 
+def test_listing_backups_tolerates_a_file_removed_during_collection(settings, monkeypatch):
+    from pathlib import Path
+
+    first, second = create_backup(settings), create_backup(settings)
+    original = Path.stat
+
+    def concurrently_pruned(path, *args, **kwargs):
+        if path == first:
+            first.unlink(missing_ok=True)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", concurrently_pruned)
+    assert [item["path"] for item in list_backups(settings.backup_dir)] == [str(second)]
+
+
+def test_status_uses_collected_backup_timestamp_if_the_file_is_later_pruned(settings, monkeypatch):
+    from datetime import UTC, datetime
+
+    from rocky import monitoring
+
+    monkeypatch.setattr(
+        monitoring,
+        "last_backup",
+        lambda _: {
+            "path": str(settings.backup_dir / "already-pruned.tar.gz"),
+            "created_at": datetime.now(UTC).isoformat(),
+            "bytes": 100,
+        },
+    )
+    store = Store(settings.database_url)
+    try:
+        status = service_status(settings, store)
+        assert status["last_backup_age_seconds"] in (0, 1)
+    finally:
+        store.close()
+
+
 def test_status_metrics_and_backups_need_the_token(settings):
     with TestClient(create_app(settings)) as client:
         assert client.get("/status").status_code == 401

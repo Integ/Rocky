@@ -37,6 +37,7 @@ from rocky.approval_policy import (
 from rocky.browser import BrowserUnavailable, browse, browser_executable, parse_browse_options
 from rocky.command_policy import command_class, command_words
 from rocky.config import Settings
+from rocky.file_locks import open_lock_file
 from rocky.http_tools import HTTPToolError, request_http
 from rocky.models import (
     DEFAULT_COMMAND_SECONDS,
@@ -700,9 +701,7 @@ class WorkspaceTools:
             stack.callback(os.close, control_fd)
             receipt_fd = _open_directory(control_fd, goal_id, create=True)
             stack.callback(os.close, receipt_fd)
-            lock_fd = os.open(
-                "lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=receipt_fd
-            )
+            lock_fd = open_lock_file("lock", dir_fd=receipt_fd)
             stack.callback(os.close, lock_fd)
             if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
                 raise ToolError("Invalid operation lock")

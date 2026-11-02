@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
 import tarfile
 import tempfile
 import time
@@ -26,6 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from rocky import __version__
+from rocky.file_locks import open_lock_file
 
 FORMAT = 1
 PREFIX = "rocky-backup-"
@@ -133,7 +135,7 @@ def create_backup(settings, directory: Path | None = None, *, keep: int | None =
     directory = Path(directory or default_backup_dir(settings)).expanduser()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(directory, 0o700)
-    lock = os.open(directory / ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    lock = open_lock_file(directory / ".lock")
     try:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -198,9 +200,18 @@ def list_backups(directory: Path) -> list[dict]:
     if not directory.is_dir():
         return []
     result = []
-    paths = directory.glob(f"{PREFIX}*{SUFFIX}")
-    for path in sorted(paths, key=lambda item: (item.stat().st_mtime_ns, item.name), reverse=True):
-        info = path.stat()
+    collected = []
+    for path in directory.glob(f"{PREFIX}*{SUFFIX}"):
+        try:
+            info = path.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            # Automatic pruning may remove a file while status is listing it.
+            continue
+        if stat.S_ISREG(info.st_mode):
+            collected.append((path, info))
+    for path, info in sorted(
+        collected, key=lambda item: (item[1].st_mtime_ns, item[0].name), reverse=True
+    ):
         result.append(
             {
                 "name": path.name,

@@ -619,6 +619,18 @@ same row lock as cancellation and deletion. Completed/cancelled goals cannot
 dispatch another request. Diagnostic finalization errors cannot replace an
 already obtained model result or lose its usage and cause a paid retry.
 
+Cancellation during the threaded enqueue transaction also schedules cleanup of
+its eventual committed row. The enqueue task is shielded and the cleanup task
+is retained until completion; caller cancellation does not wait on database I/O.
+A late enqueue therefore cannot leave a phantom FIFO head until lease expiry.
+
+Filesystem locks used by tool receipts, HTTP sessions, backups and the service
+open an existing inode or create it exclusively. Concurrent first users reopen
+the winning inode instead of racing a shared `O_CREAT` open. Lock descriptors
+are non-inheritable, do not follow symlinks, and reject hard links and special
+files before advisory locking. Parallel first reads therefore retain both
+results without weakening receipt replay or task-operation locking.
+
 Request rows hold IDs, purpose, priority, timestamps, state, and attempt number,
 without prompts, model output, command arguments, URLs, or raw provider errors.
 Transient failures release capacity and record a suggested retry time; Temporal
@@ -687,6 +699,12 @@ progress still follows execution success; review does not introduce an approval
 gate for automatic steps. Goal-list ETags include the current review status,
 so accepting a result invalidates cached attention lists without changing the
 Workflow revision.
+
+Current unaccepted deliveries also participate in the bounded goal listing
+outside its recent-history window, including metadata-only legacy deliveries.
+Acceptance removes that exception, and archiving still controls visibility.
+The native client fences review responses against older list refreshes and
+prevents history mutations during review, as it already does for archive/delete.
 
 The additive `deliveries` table uses `(goal_id, revision)` as its primary key.
 Successful state persistence records the original contract, summary, artifacts,

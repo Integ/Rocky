@@ -148,6 +148,84 @@ final class TaskHistoryTests: XCTestCase {
     }
 
     @MainActor
+    func testRefreshStartedBeforeReviewCannotRestorePendingAcceptance() async throws {
+        let (model, session) = connectedModel()
+        defer { session.invalidateAndCancel(); HistoryProtocol.handle = nil }
+        var pending = try goal("completed", status: "succeeded")
+        pending.delivery_review = "pending"
+        model.goals = [pending]
+        var accepted = pending
+        accepted.delivery_review = "accepted"
+        let record = Delivery(goal_id: accepted.id, revision: accepted.state.revision,
+                              completed_at: accepted.state.updated_at, summary: accepted.state.reason,
+                              contract: accepted.contract, artifacts: accepted.state.artifacts,
+                              verification_feedback: "Checked", review_status: "accepted", feedback: "")
+        let receipt = try JSONEncoder().encode(DeliveryReviewReceipt(delivery: record, goal: accepted))
+        let stale = try JSONEncoder().encode([pending])
+        let started = expectation(description: "Old refresh waits for settings")
+        var respond: ((Int, Data) -> Void)?
+        HistoryProtocol.handle = { request, reply in
+            switch request.url?.path {
+            case "/provider-settings": respond = reply; started.fulfill()
+            case let path? where path.hasSuffix("/review"): reply(200, receipt)
+            case "/goals":
+                let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
+                reply(200, items.first { $0.name == "archived" }?.value == "true" ? Data("[]".utf8) : stale)
+            default: reply(200, Data("[]".utf8))
+            }
+        }
+        let refresh = Task { await model.refresh() }
+        await fulfillment(of: [started], timeout: 2)
+        let success = await model.reviewDelivery(pending, action: "accept")
+        XCTAssertTrue(success)
+        try XCTUnwrap(respond)(200, Self.settingsJSON)
+        await refresh.value
+        XCTAssertEqual(model.goals.first?.delivery_review, "accepted")
+        XCTAssertTrue(model.attentionItems.isEmpty)
+        XCTAssertTrue(model.historyUpdates.isEmpty)
+    }
+
+    @MainActor
+    func testReviewAndHistoryMutationsCannotRaceOnTheSameGoal() async throws {
+        let (model, session) = connectedModel()
+        defer { session.invalidateAndCancel(); HistoryProtocol.handle = nil }
+        var pending = try goal("completed", status: "succeeded")
+        pending.delivery_review = "pending"
+        model.goals = [pending]
+        let started = expectation(description: "Review waiting for response")
+        var respond: ((Int, Data) -> Void)?
+        var accepted = pending
+        accepted.delivery_review = "accepted"
+        let goals = try JSONEncoder().encode([accepted])
+        HistoryProtocol.handle = { request, reply in
+            let path = request.url!.path
+            if path.hasSuffix("/review") { respond = reply; started.fulfill() }
+            else if path == "/provider-settings" { reply(200, Self.settingsJSON) }
+            else if path == "/goals" {
+                let archived = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems?.first { $0.name == "archived" }?.value == "true"
+                reply(200, archived ? Data("[]".utf8) : goals)
+            } else {
+                XCTAssertEqual(request.httpMethod, "GET")
+                reply(200, Data("[]".utf8))
+            }
+        }
+        let review = Task { await model.reviewDelivery(pending, action: "accept") }
+        await fulfillment(of: [started], timeout: 2)
+        XCTAssertFalse(model.canManageHistory(pending))
+        await model.archive(pending, archived: true)
+        await model.delete(pending)
+        let record = Delivery(goal_id: accepted.id, revision: accepted.state.revision,
+                              completed_at: accepted.state.updated_at, summary: accepted.state.reason,
+                              contract: accepted.contract, artifacts: accepted.state.artifacts,
+                              verification_feedback: "Checked", review_status: "accepted", feedback: "")
+        try XCTUnwrap(respond)(200, JSONEncoder().encode(DeliveryReviewReceipt(delivery: record, goal: accepted)))
+        let success = await review.value
+        XCTAssertTrue(success)
+        XCTAssertTrue(model.canManageHistory(accepted))
+        XCTAssertEqual(model.goals.first?.delivery_review, "accepted")
+    }
+
+    @MainActor
     func testRefreshWhileArchiveIsPendingCannotReplaceHistory() async throws {
         let (model, session) = connectedModel()
         defer { session.invalidateAndCancel(); HistoryProtocol.handle = nil }

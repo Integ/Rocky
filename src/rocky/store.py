@@ -639,7 +639,7 @@ class Store:
         )
 
     def _list_filter(self, limit: int, archived: bool, query: str) -> list:
-        """The newest goals, plus every unfinished one however old.
+        """The newest goals, plus unfinished work and unaccepted deliveries.
 
         A long task created before the newest `limit` goals must stay visible,
         and the supervisor must see it to keep the Mac awake. A query searches
@@ -660,7 +660,19 @@ class Store:
         recent = recent.where(*where).order_by(GoalRow.created_at.desc()).limit(limit)
         if archived:
             return [*where, GoalRow.goal_id.in_(recent)]
-        unfinished = GoalRow.state["status"].as_string().not_in(TERMINAL_STATUSES)
+        from rocky.deliveries import DeliveryRow
+
+        accepted = exists(
+            select(DeliveryRow.goal_id)
+            .where(
+                DeliveryRow.goal_id == GoalRow.goal_id,
+                DeliveryRow.revision == GoalRow.revision,
+                DeliveryRow.review_status == "accepted",
+            )
+            .correlate(GoalRow)
+        )
+        status = GoalRow.state["status"].as_string()
+        unfinished = or_(status.not_in(TERMINAL_STATUSES), (status == "succeeded") & ~accepted)
         return [*where, or_(GoalRow.goal_id.in_(recent), unfinished)]
 
     def list_goals(

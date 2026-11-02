@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import time
+from datetime import datetime
 from pathlib import Path
 
 from rocky import __version__
@@ -76,7 +77,9 @@ def service_status(settings, store) -> dict:
     backup = last_backup(default_backup_dir(settings))
     backup_age = None
     if backup is not None:
-        backup_age = now - Path(backup["path"]).stat().st_mtime
+        # Use the timestamp captured during listing: retention may have already
+        # removed the file by the time status computes its age.
+        backup_age = max(0, now - datetime.fromisoformat(backup["created_at"]).timestamp())
     if settings.backup_interval_hours:
         overdue = settings.backup_interval_hours * 3600 * 2
         if backup is None or backup_age > overdue:
