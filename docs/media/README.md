@@ -60,6 +60,13 @@ uv pip install --python /tmp/rocky-readme-tts/bin/python -r scripts/requirements
 /tmp/rocky-readme-tts/bin/python scripts/build_readme_media.py --audio-only
 ```
 
+已有生成好的八段 F5-TTS 配音时，可直接用它们重做完整视频，不必重新推理。
+目录中需有 `voice-0.wav` 至 `voice-7.wav` 及 `voice-generation.json`；脚本会核对文本与音频校验值：
+
+```bash
+python3 scripts/build_readme_media.py --narration-dir /tmp/rocky-readme-tts-clips
+```
+
 保留中间文件用于视觉与声音检查：
 
 ```bash

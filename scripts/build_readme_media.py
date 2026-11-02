@@ -5,6 +5,7 @@ Outputs are staged and replace published files only after encoding succeeds.
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -78,7 +79,31 @@ def build_preview(work):
     )
 
 
-def synthesize_narration(work, tts_python):
+def synthesize_narration(work, tts_python, narration_dir=None):
+    if narration_dir is not None:
+        manifest_path = narration_dir / "voice-generation.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        records = manifest.get("scenes", [])
+        if manifest.get("engine") != "F5-TTS" or len(records) != len(STORYBOARD):
+            raise ValueError("Narration must have an F5-TTS manifest for all eight scenes")
+        sources = []
+        for i, (record, scene) in enumerate(zip(records, STORYBOARD, strict=True)):
+            source = narration_dir / f"voice-{i}.wav"
+            with source.open("rb") as handle:
+                digest = hashlib.file_digest(handle, "sha256").hexdigest()
+            if (
+                record.get("scene") != i + 1
+                or record.get("text") != scene.get("narration", scene["caption"])
+                or record.get("sha256") != digest
+            ):
+                raise ValueError(f"Narration text or audio integrity mismatch for scene {i + 1}")
+            sources.append(source)
+        for source in [*sources, manifest_path]:
+            target = work / source.name
+            if source.resolve() != target.resolve():
+                shutil.copyfile(source, target)
+        print("Using eight verified, previously generated F5-TTS narration clips.", flush=True)
+        return
     run(
         [
             str(tts_python),
@@ -126,8 +151,8 @@ def verify_video(video):
     }
 
 
-def replace_audio(work, tts_python):
-    synthesize_narration(work, tts_python)
+def replace_audio(work, tts_python, narration_dir=None):
+    synthesize_narration(work, tts_python, narration_dir)
     command = [
         "ffmpeg",
         "-hide_banner",
@@ -172,11 +197,11 @@ def replace_audio(work, tts_python):
     print("Replaced the narration with F5-TTS; copied existing video/subtitle streams.")
 
 
-def build(work, frames_only=False, audio_only=False, tts_python=sys.executable):
+def build(work, frames_only=False, audio_only=False, tts_python=sys.executable, narration_dir=None):
     if len(STORYBOARD) != 8 or STARTS != [0, *ENDS[:-1]] or ENDS[-1] != 60:
         raise ValueError("The tour needs eight contiguous scenes totaling 60 seconds")
     if audio_only:
-        replace_audio(work, tts_python)
+        replace_audio(work, tts_python, narration_dir)
         return
     modules = work / "modules"
     modules.mkdir(exist_ok=True)
@@ -204,7 +229,7 @@ def build(work, frames_only=False, audio_only=False, tts_python=sys.executable):
         + "\n",
         encoding="utf-8",
     )
-    synthesize_narration(work, tts_python)
+    synthesize_narration(work, tts_python, narration_dir)
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-filter_complex_threads", "2"]
     for i in range(8):
         command += ["-i", str(work / f"scene-{i:02}.png")]
@@ -293,12 +318,28 @@ if __name__ == "__main__":
         default=Path(sys.executable),
         help="Python from the optional F5-TTS environment",
     )
+    parser.add_argument(
+        "--narration-dir",
+        type=Path,
+        help="Reuse F5-TTS WAV clips and a matching voice-generation.json instead of synthesizing",
+    )
     args = parser.parse_args()
     if args.frames_only and not args.work_dir:
         parser.error("--frames-only requires --work-dir")
     if args.work_dir:
         args.work_dir.mkdir(parents=True, exist_ok=True)
-        build(args.work_dir.resolve(), args.frames_only, args.audio_only, args.tts_python)
+        build(
+            args.work_dir.resolve(),
+            args.frames_only,
+            args.audio_only,
+            args.tts_python,
+            args.narration_dir,
+        )
     else:
         with tempfile.TemporaryDirectory(prefix="rocky-readme-") as directory:
-            build(Path(directory), tts_python=args.tts_python, audio_only=args.audio_only)
+            build(
+                Path(directory),
+                tts_python=args.tts_python,
+                audio_only=args.audio_only,
+                narration_dir=args.narration_dir,
+            )
