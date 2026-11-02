@@ -137,6 +137,8 @@ struct APIClient {
     func providerSettings() async throws -> ProviderSettings { try await request("/provider-settings") }
     func modelQueue() async throws -> ModelQueueStatus { try await request("/model-queue") }
     func diagnostics(_ id: String) async throws -> GoalDiagnostic { try await request("/goals/\(id)/diagnostics") }
+    func storageUsage(refresh: Bool = false) async throws -> StorageUsage { try await request("/storage?refresh=\(refresh)", timeout: 30) }
+    func downloadDiagnostics() async throws -> Data { try await rawRequest("/diagnostics/export", timeout: 60) }
     func promptModules() async throws -> [PromptModule] { try await request("/prompt-modules") }
     func promptUses(_ id: String) async throws -> [PromptUse] { try await request("/goals/\(id)/prompts") }
     func promptSnapshot(_ id: String) async throws -> PromptComparison { try await request("/prompt-snapshots/\(id)") }

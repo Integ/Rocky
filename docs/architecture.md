@@ -736,3 +736,42 @@ request for changes. Existing local viewed-result flags are not migrated into
 acceptance. Goal deletion removes delivery rows and the protected archives;
 archiving a goal preserves both. The desktop keys current preview caches by
 artifact hash as well as path, so a new result at the same path reloads its text.
+
+## Bounded storage accounting and support exports
+
+Authenticated `GET /storage?refresh=false` reports allocated and logical bytes,
+file counts and a UTC measurement time for six non-overlapping categories:
+workspaces, delivery archives, private task data, SQLite databases and sidecars,
+backups, and service logs. It includes dependencies and archived tasks, without
+enumerating names in the response. External grants and references, application
+and runtime files, and symlink targets are outside this scope. Allocated bytes
+exclude directory metadata and are an estimate on filesystems with shared
+extents. Regular files are deduplicated by device and inode across all roots.
+Specific configured roots are visited first to avoid counting nested backups
+as ordinary task files; database files are accounted before tree traversal.
+
+The API owns one `StorageInspector`, with a 60-second cache and a lock that
+coalesces overlapping refresh requests. Status and task polling do not scan
+storage. Explicit `refresh=true` bypasses the cache unless another scan already
+completed during that request. Traversal uses directory descriptors and
+`O_NOFOLLOW`, checks metadata without opening regular files, and stops at a
+100,000-entry, 3-second, or 64-level traversal budget. These are cooperative
+bounds between filesystem operations, not kernel I/O timeouts. An incomplete
+scan reports `complete=false`, a limit flag and unreadable-entry count; it never
+claims an omitted tree takes zero space. The client retains the last measurement
+on refresh failure and explains that partial counts are lower bounds. No cleanup
+or retention policy is changed by measurement.
+
+Authenticated `GET /diagnostics/export` returns an in-memory ZIP with fixed
+`report.json` and `README.txt` members and `Cache-Control: no-store`. The report
+uses separate allowlists for health, storage, model admission and configuration;
+future UI fields cannot silently enter exports. Only fixed enums, aggregate
+counts, finite numbers and generated metadata are included. Health problems map
+to fixed codes; raw errors, task IDs/content, user paths and filenames, logs,
+provider configuration, credentials, cookies, environment variables and database
+copies are excluded. Collection does not call a model or consult the credential
+store. A component failure leaves that section null and adds a fixed name to
+`unavailable_components`, so other sections can still be exported. Storage may
+reuse its recent cache. Native export uses a save panel and atomic local write;
+it does not send the archive anywhere. Export requires a reachable API and is
+diagnostic evidence rather than a restorable backup.

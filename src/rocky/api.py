@@ -53,7 +53,9 @@ from rocky.planner import OpenAIPlanner, PlannerError, prompt_preview
 from rocky.prompt_archive import PromptArchive
 from rocky.prompts import PromptPreviewRequest, catalog, compare
 from rocky.providers import PRESETS, ProviderUpdate, credential_id, provider_model_catalog
+from rocky.storage import StorageInspector
 from rocky.store import MemoryConflictError, Store, equivalent_contracts
+from rocky.support_bundle import support_bundle
 from rocky.tools import ToolError, WorkspaceTools
 from rocky.triggers import (
     Mode,
@@ -261,6 +263,7 @@ def create_app(
     prompt_archive = PromptArchive(database)
     model_queue = ModelQueue(database, settings)
     deliveries = DeliveryStore(database)
+    storage = StorageInspector(settings)
     planner = OpenAIPlanner(
         settings,
         defer_client=True,
@@ -465,6 +468,21 @@ def create_app(
             "keep": settings.backup_keep,
             "backups": list_backups(directory),
         }
+
+    @app.get("/storage", dependencies=auth)
+    def storage_usage(refresh: bool = False):
+        return JSONResponse(storage.summary(refresh=refresh), headers={"Cache-Control": "no-store"})
+
+    @app.get("/diagnostics/export", dependencies=auth)
+    def export_diagnostics():
+        return Response(
+            support_bundle(settings, database, model_queue, storage),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": 'attachment; filename="rocky-diagnostics.zip"',
+                "Cache-Control": "no-store",
+            },
+        )
 
     @app.post("/backups", status_code=201, dependencies=auth)
     def post_backup():

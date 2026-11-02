@@ -42,6 +42,7 @@ struct ServiceHealthSection: View {
     @State private var backups: BackupList?
     @State private var working = false
     @State private var message: String?
+    @State private var showStorage = false
 
     var body: some View {
         Section {
@@ -68,10 +69,12 @@ struct ServiceHealthSection: View {
                 Button("刷新") { Task { await load() } }
             }
             if let message { Text(message).font(.system(size: 11)).foregroundStyle(.secondary) }
+            Button("存储与诊断…") { showStorage = true }
         } header: { Text("运行状态与备份") } footer: {
             Text(footer)
         }
         .task { await load() }
+        .sheet(isPresented: $showStorage) { StorageDiagnosticsView(api: model.api, dataURL: model.runtime.applicationSupportURL) }
     }
 
     private var footer: String {

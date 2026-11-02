@@ -240,3 +240,29 @@ Validated on 2026-10-22 (America/Vancouver):
 - Ruff lint/format and diff whitespace checks passed. Unfinished histories from
   earlier execution versions are no longer supported; stored task records and
   workspace files are retained, without automatic history migration.
+
+## Storage accounting and sanitized support exports
+
+Validated on 2026-11-01 (America/Vancouver):
+
+- Full Python suite: **1299 passed, 3 skipped**; the two existing Temporal sandbox
+  import warnings remain. Native Swift suite: **105 passed**. Ruff lint/format
+  and diff whitespace checks passed.
+- Eleven new Python checks cover category separation, SQLite sidecars, caches,
+  overlapping roots and hard links, symlink traversal and directory replacement,
+  scan limits, unreadable roots, refresh coalescing, authentication, component
+  failures and export allowlists. Fixtures plant private text in task data,
+  filenames, logs, credentials and environment variables and verify it never
+  appears in the decompressed diagnostic files.
+- Three native checks cover partial-use labels, authenticated read-only requests,
+  exact binary export bytes, retention of prior statistics after a failed refresh
+  and an independent successful export.
+- Built and restarted the bundled native application. The live database, worker
+  and Temporal reported healthy; the running backend matched the new bundle.
+  A complete metadata scan took 0.008 seconds on the local data set. This is one
+  small-tree observation, not a large-tree performance benchmark.
+- Verified all six categories and explicit manual refresh in the native sheet.
+  Saved a ZIP through the native save panel to a temporary directory, checked its
+  success message, CRC, fixed member names, complete statistics and absence of
+  home-directory paths or endpoint URLs. No live model calls, task decisions,
+  cleanup operations or external uploads were performed.
