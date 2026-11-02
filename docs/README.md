@@ -4,7 +4,8 @@
 
 | 文档 | 内容 |
 | --- | --- |
-| [../README.md](../README.md) | 项目概览、后端开发、工具与审批、状态与 API、运维 |
+| [../README.md](../README.md) | v0.2 功能、下载与上手、后端开发、工具与审批、状态与 API、运维 |
+| [media/README.md](media/README.md) | v0.2 概览图、一分钟介绍、字幕、分镜与素材生成方式 |
 | [macos.md](macos.md) | macOS 应用：安装、模型配置、提交与继续任务、审批与通知、数据目录 |
 | [architecture.md](architecture.md) | 执行架构（英文）：持久边界、执行循环、生命周期、验收与信任、权限边界 |
 | [validation.md](validation.md) | 各阶段的验证记录（英文，按时间追加） |
