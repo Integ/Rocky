@@ -6,6 +6,13 @@ let keepInMenuBarKey = "keepRunningInMenuBar"
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var runtime: RuntimeManager?
+    var reopenMainWindow: (@MainActor () -> Void)?
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        // Finder/Dock reopen must create a SwiftUI window when the last one
+        // was closed. Returning false prevents a second default reopen.
+        MainActor.assumeIsolated { reopenMainWindow?() }
+        return false
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         !(UserDefaults.standard.object(forKey: keepInMenuBarKey) as? Bool ?? true)
     }
@@ -23,7 +30,10 @@ struct RockyDesktopApp: App {
 
     var body: some Scene {
         WindowGroup(id: "main") {
-            MainWindow(model: model) { delegate.runtime = model.runtime }
+            MainWindow(model: model) {
+                delegate.runtime = model.runtime
+                delegate.reopenMainWindow = { model.showMainWindow() }
+            }
         }
         .defaultSize(width: 1180, height: 800)
         .windowToolbarStyle(.unified)
@@ -87,13 +97,6 @@ private struct MenuBarContent: View {
 
     private func open(_ id: String?) {
         model.openMainWindow = model.openMainWindow ?? { openWindow(id: "main") }
-        if let id { model.reveal(id) } else {
-            if let window = NSApp.mainWorkspaceWindow {
-                window.makeKeyAndOrderFront(nil)
-            } else {
-                openWindow(id: "main")
-            }
-            NSApp.activate(ignoringOtherApps: true)
-        }
+        if let id { model.reveal(id) } else { model.showMainWindow() }
     }
 }

@@ -5,6 +5,28 @@ struct APIClient {
     let token: String
     var session: URLSession = .shared
 
+    private struct ModelFailure: Decodable {
+        struct Detail: Decodable { let code: String }
+        let detail: Detail
+    }
+
+    private static func modelFailureMessage(_ data: Data) -> String {
+        // Only allowlisted categories are shown. Provider response text can
+        // contain credentials and must never become a user-facing message.
+        let code = (try? JSONDecoder().decode(ModelFailure.self, from: data))?.detail.code
+        switch code {
+        case "authentication_failed": return "模型服务拒绝了 API 密钥，请在“设置与模型”中更新密钥。"
+        case "missing_api_key": return "尚未配置模型 API 密钥，请打开“设置与模型”。"
+        case "model_access_denied": return "当前密钥无法访问该模型或 API 地址，请检查模型权限和连接设置。"
+        case "quota_exceeded": return "模型服务的余额或用量额度已耗尽，请检查服务商账户的计费和用量上限。"
+        case "rate_limited": return "模型服务请求过于频繁，请稍后重试。"
+        case "network_error": return "无法连接模型服务，请检查网络和 API 地址。"
+        case "model_timeout": return "模型响应超时，请稍后重试。"
+        case "provider_unavailable": return "模型服务暂时不可用，请稍后重试。"
+        default: return "AI 未能完成任务评估，请检查模型配置后重新提交。"
+        }
+    }
+
     /// A server page and its validator. `nil` from a revalidated request means unchanged.
     struct GoalList: Equatable {
         var goals: [Goal]
@@ -38,7 +60,7 @@ struct APIClient {
             case 409: message = "任务状态已变化，请刷新后重试。"
             case 410: message = "此版本文件未存档、已变化或无法通过完整性校验。"
             case 422: message = "设置不符合要求，请检查目标、授权文件夹、模型名称和 API 地址。"
-            case 502: message = "AI 未能完成任务评估，请检查模型配置后重新提交。"
+            case 502: message = Self.modelFailureMessage(data)
             case 503: message = "服务暂时不可用，请检查本地服务与钥匙串权限。"
             default: message = "请求失败（\(response.statusCode)），请稍后重试。"
             }

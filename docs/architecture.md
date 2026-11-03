@@ -312,7 +312,7 @@ Review still cannot prove factual truth or browse sources independently;
 research deliverables require appropriate evidence and human review.
 
 External text never grants permissions. The owner configures `ROCKY_TOOL_ACCESS`,
-which defaults to `full`. In full mode all nine tools are available even when an
+which defaults to `full`. In full mode all eleven tools are available even when an
 existing goal records narrower legacy allowlists. File tools accept absolute,
 relative, hidden and symlink paths. Shell commands run as the current OS user.
 HTTP requests accept all methods and arbitrary HTTP(S) destinations, including
@@ -409,8 +409,22 @@ A decision may carry `actions`: up to 8 independent read-only actions
 (`read_file`, `list_files`, `fetch_url`, GET/HEAD/OPTIONS `http_request` without
 a download path). They run as concurrent Activities with operation IDs
 `step-NNNN-k`, share the goal lock in shared mode, and each produces its own
-observation and tool message. Writes, commands and mutations stay single
-actions. `append_file` adds text to a file and `edit_file` applies exact
+observation and tool message. New workflow executions also advertise
+`execution.file_batch_tools`: up to 8 independent `write_file`, `edit_file` or
+`append_file` actions may share a planning step. File batches execute in order,
+with the existing access checks and receipts, and persist each result and
+artifact before continuing. Paths must be relative and distinct; mixed
+read/write batches, parent/child paths, case/Unicode aliases and command
+options are rejected. The tools still check resolved paths, including symlinks.
+Commands and external mutations stay single actions.
+
+File batches are not transactions. An ordinary independent failure retains
+successful files and reports partial results. New owner input, required
+approval or an unknown result stops remaining writes; cancellation retains
+already recorded progress. A worker replacement resumes the pending activity
+without redoing completed mutations. The `workspace-file-batches-v1` Temporal
+patch preserves the original read-only validator for pre-upgrade histories.
+`append_file` adds text to a file and `edit_file` applies exact
 `old_text` → `new_text` replacements atomically, so long reports and small fixes
 no longer require rewriting a whole file in one response.
 
@@ -423,6 +437,37 @@ Optional `scoped` mode retains the original tool/hostname allowlists, pinned pub
 GET retrieval and descriptor-relative workspace file operations. Receipt storage
 and exported deliverables retain structural validation in either mode. Credentials
 are never copied into error messages or HTTP response-header summaries.
+
+`find_files` and `search_files` are bounded, read-only directory tools that share
+the existing goal lock, operation receipts and personal-file approval gate.
+Both are eligible for concurrent read batches. The former returns glob-matched
+regular file paths and sizes; the latter returns literal UTF-8 line matches,
+one-based line numbers and optional context. A glob without a slash matches
+basenames at any depth; slashed globs are root-relative, with `**` spanning
+directories. Content results enter the independent review evidence as action
+outputs, and do not mark a file fully read.
+
+Search locations count LF-delimited physical lines, matching targeted
+`read_file` reads. CRLF terminators are normalized; bare CR and Unicode line
+separators remain within a physical line. Directory exclusions do not exclude
+ordinary files with the same name. Review evidence decodes search JSON into
+separate metadata and actual source lines before taking bounded excerpts.
+The quote audit prefers literal text, with escaped-quote compatibility as a
+fallback, so code strings and backslash paths retain their meaning.
+
+Traversal uses directory descriptors and no-follow opens, skips symlinks, hard
+links, special files and dependency/cache trees, and checks protected paths
+before descending. Parent-root searches skip credential-store subtrees; an
+explicit credential-root search still needs its own exact read approval.
+Hidden files are opt-in in full mode and unavailable in scoped mode. Content
+search reads at most 1 MB per file and 20 MB per call; traversal is bounded to
+10,000 entries and 32 directory levels, with a cooperative five-second deadline
+checked between filesystem operations. A blocking filesystem call cannot be
+preempted by that deadline. Responses remain valid JSON
+under 16,000 characters and report skipped counts, completeness, truncation,
+stop reason and an optional next offset. Pages contain at most 200 results;
+offsets are limited to 10,000 and refer to an unchanged tree. Scan limits or
+skipped content must not be interpreted as proof of absence.
 
 ## Long-running agenda
 

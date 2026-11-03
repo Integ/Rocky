@@ -120,6 +120,32 @@ def test_prepare_contract_failure_is_sanitized_and_does_not_submit(api, monkeypa
     assert store.pending_goals() == []
 
 
+@pytest.mark.parametrize(
+    "code",
+    [
+        "authentication_failed",
+        "quota_exceeded",
+        "rate_limited",
+        "network_error",
+        "secret-invalid-code",
+    ],
+)
+def test_prepare_contract_returns_only_allowlisted_error_category(api, monkeypatch, code):
+    client, store = api
+    monkeypatch.setattr(
+        OpenAIPlanner,
+        "prepare_contract",
+        AsyncMock(side_effect=PlannerError("sensitive provider response", code=code)),
+    )
+    response = client.post("/goal-contract", json={"objective": "整理材料"}, headers=AUTH)
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": {"code": code if code != "secret-invalid-code" else "model_request_failed"}
+    }
+    assert "sensitive" not in response.text and "secret" not in response.text
+    assert store.pending_goals() == []
+
+
 def test_automatic_preparation_rejects_manual_budget_override_before_model_call(api, monkeypatch):
     client, _ = api
     prepare = AsyncMock()

@@ -509,10 +509,8 @@ def create_app(
         check_folders(draft)
         try:
             prepared = await planner.prepare_contract(draft, get_default_model_settings())
-        except PlannerError:
-            raise HTTPException(
-                502, "Could not assess task requirements and budget; retry submission"
-            ) from None
+        except PlannerError as error:
+            raise HTTPException(502, {"code": error.code or "model_request_failed"}) from None
         concerns = prepared.concerns if isinstance(prepared, DraftedContract) else []
         contract = prepared.contract() if isinstance(prepared, DraftedContract) else prepared
         return ContractReview(
@@ -1000,8 +998,8 @@ def create_app(
         check_folders(draft)
         try:
             result, tokens = await planner.decompose_goal(draft, get_default_model_settings())
-        except PlannerError:
-            raise HTTPException(502, "Could not break the goal into steps; retry") from None
+        except PlannerError as error:
+            raise HTTPException(502, {"code": error.code or "model_request_failed"}) from None
         return PlanDraftReview(steps=result.steps, concerns=result.concerns, drafting_tokens=tokens)
 
     @app.post("/plans", response_model=PlanView, status_code=201, dependencies=auth)

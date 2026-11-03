@@ -130,7 +130,9 @@ async def test_completion_rechecks_actual_artifact_bytes_after_model_review(chan
 
     activities = Activities(
         SimpleNamespace(
-            is_cancel_requested=lambda goal_id: False, all_execution_steps=lambda goal_id: []
+            is_cancel_requested=lambda goal_id: False,
+            all_execution_steps=lambda goal_id: [],
+            goal_messages=lambda goal_id: [],
         ),
         SimpleNamespace(
             verify_files=lambda run: VerificationResult(

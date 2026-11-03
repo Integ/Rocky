@@ -1,6 +1,7 @@
 """Independent review sees what actually happened, not only the deliverables."""
 
 import json
+import shlex
 import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -257,6 +258,83 @@ def test_extreme_pressure_drops_sources_before_changed_files():
     assert fitted["changed_files"] and fitted["changed_files"][0]["path"] == "src/app.py"
     assert fitted["earlier_actions_omitted"] > 0
     assert _fit_evidence(evidence, 50) == {"omitted": "Evidence did not fit the review request."}
+
+
+def test_review_retains_whole_recent_owner_replies_when_evidence_is_large():
+    evidence = large_evidence()
+    evidence["owner_messages"] = [
+        {"id": "old", "message": "old answer " * 1000},
+        {
+            "id": "new",
+            "message": "小林",
+            "question_id": "question-1",
+            "question": {"text": "姓名是什么？"},
+        },
+    ]
+    fitted = _fit_evidence(evidence, 3000)
+    assert fitted["owner_messages"] == evidence["owner_messages"][-1:]
+    assert fitted["owner_messages_omitted"] == 1
+    assert len(serialize_memory(fitted).encode()) <= 3000
+    assert len(evidence["owner_messages"]) == 2
+
+
+@pytest.mark.parametrize(
+    "source,accepted",
+    [
+        ("total=sum([25,12.5]); assert total==37.50; print(total)", True),
+        ('total=sum([25,12.5]); assert total==37.50, "expected 37.50"; print(total)', True),
+        ('data={"A":sum([25,12.5])}; assert data=={"A":37.50}; print(data)', True),
+        ("total=37.50; assert total==37.50; print(total)", False),
+        ("print(37.50)", False),
+        ("assert print(37.50)==None", False),
+        ("assert (total:=37.50)==37.50; print(total)", False),
+        ("assert unknown==37.50, print(37.50)", False),
+    ],
+)
+def test_computed_claim_accepts_assertion_constants_but_rejects_literal_results(source, accepted):
+    value = 37.50
+    command = shlex.join([sys.executable, "-B", "-c", source])
+    evidence = {
+        "actions": [
+            {
+                "step": 1,
+                "tool": "run_command",
+                "success": True,
+                "target": command,
+                "output": "37.50",
+            }
+        ],
+        "deliverables": {"summary.json": ["step 1 run_command"]},
+    }
+    deliverables = {"summary.json": '{"amount":37.50}'}
+    checklist = review_checklist(deliverables)
+    item = claim("/amount", "computed", "step:1", "37.50", value=value)
+    audited, _ = audit_review([item], evidence, deliverables, checklist)
+    assert (audited[0]["problem"] == "") is accepted
+    verified = verify_checklist(checklist, evidence, {})
+    assert (("summary.json", "/amount") in verified) is accepted
+
+
+def test_failed_or_compound_commands_cannot_use_assertions_to_bypass_audit():
+    for command, success in [
+        ("python -c 'total=sum([25,12.5]); assert total==37.50; print(total)'", False),
+        ("python -c 'assert total==37.50' && echo 37.50", True),
+        ("bash -c 'echo 37.50'", True),
+    ]:
+        evidence = {
+            "actions": [
+                {
+                    "step": 1,
+                    "tool": "run_command",
+                    "success": success,
+                    "target": command,
+                    "output": "37.50",
+                }
+            ]
+        }
+        item = claim("/amount", "computed", "step:1", "37.50", value=37.50)
+        audited, _ = audit_review([item], evidence, {}, [])
+        assert audited[0]["problem"]
 
 
 AUDIT_EVIDENCE = {
@@ -586,3 +664,41 @@ def test_citations_hold_by_quoting_the_cited_file_or_its_paired_answer():
     audited, _ = audit_review([citation], evidence, deliverables, checklist, verified=verified)
     # Quoting the cited file itself is the reviewer's support for a citation.
     assert audited[0]["problem"] == ""
+
+
+@pytest.mark.parametrize(
+    "source", ['message = "ready"', r'path = "C:\temp\file.txt"', r'pattern = "\n"']
+)
+def test_search_quotes_survive_json_transport_and_claim_audit(tools, tmp_path, source):
+    # The source is outside the workspace, so only actual tool evidence can
+    # support the claim; workspace source discovery cannot mask this failure.
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "source.txt").write_text(source + "\n", encoding="utf-8")
+    action = Action(tool="search_files", path=str(external), content=json.dumps({"query": source}))
+    result = tools.execute(ToolInput(run=RUN, action=action, operation_id="quoted-search"))
+    assert result.success
+    steps = [
+        {
+            "cycle": 1,
+            "phase": "act",
+            "input": {"decision": {"action": action.model_dump()}},
+            "output": {"result": result.model_dump()},
+        }
+    ]
+    evidence = collect_review_evidence(RUN, steps, tools)
+    quoted = claim("", "quoted", "step:1", source, deliverable="report.md", value=source)
+    audited, problems = audit_review([quoted], evidence, {"report.md": source}, [])
+    assert not problems and not audited[0]["problem"]
+    assert source in evidence["actions"][0]["output"]
+    wrong = {**quoted, "quote": source.replace("=", "!="), "value": "invented"}
+    _, problems = audit_review([wrong], evidence, {"report.md": source}, [])
+    assert problems
+
+
+def test_decoded_search_output_handles_invalid_shapes_without_raising():
+    from rocky.evidence import _search_output
+
+    invalid = json.dumps({"matches": [{"path": "x", "line": 1, "text": "x", "context": 7}]})
+    assert _search_output(invalid) == invalid
+    assert _search_output("invalid json") == "invalid json"

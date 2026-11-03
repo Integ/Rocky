@@ -1,0 +1,76 @@
+{
+  "date": "2026-11-03",
+  "scope": "recent file tools, workflow integration, review evidence and relevant desktop changes",
+  "issues_fixed": 3,
+  "before": {
+    "search_line": 3,
+    "expected_line": 2,
+    "find_regular_venv": [],
+    "quoted_source_audit_passed": false,
+    "audit_problems": [
+      "report.md = \"message = \\\"ready\\\"\": the quoted text does not appear at the cited location."
+    ]
+  },
+  "after": {
+    "search_line": 2,
+    "expected_line": 2,
+    "find_regular_venv": [
+      "venv"
+    ],
+    "quoted_source_audit_passed": true,
+    "audit_problems": []
+  },
+  "packaged_reproduction": {
+    "search_line": 2,
+    "expected_line": 2,
+    "find_regular_venv": [
+      "venv"
+    ],
+    "quoted_source_audit_passed": true,
+    "audit_problems": []
+  },
+  "python_tests": {
+    "passed": 1450,
+    "skipped": 3
+  },
+  "new_regression_cases": 30,
+  "randomized_check": {
+    "seed": 20261103,
+    "files": 120,
+    "matching_lines": 292,
+    "page_size": 19,
+    "exact_paths_lines_text": true,
+    "duplicate_results": 0
+  },
+  "checks": {
+    "ruff_check": true,
+    "ruff_format": true,
+    "git_diff_check": true,
+    "legacy_history_replay": true,
+    "bundled_sources_match": true,
+    "native_startup": true,
+    "service_health": {
+      "status": "ok",
+      "database": "ok",
+      "worker": {
+        "state": "up",
+        "temporal": true,
+        "age_seconds": 4.9
+      },
+      "undispatched_goals": 0,
+      "unsent_commands": 0,
+      "pending_approvals": 0,
+      "problems": []
+    }
+  },
+  "model_api_calls": 0,
+  "build_id": "6619D54F-18C8-46AA-9BCF-4638C83D067A",
+  "source_sha256": {
+    "file_search.py": "2a74b104786c9de7036768ca87e8730af78b6d5d8fb398e50ff2eddfa24f76b2",
+    "evidence.py": "2fa8433aad06f02cc2a1a3963bba84b4dcb5c048d067ea14197a3f3fd6b051f1"
+  },
+  "limitations": [
+    "Five-second scanning is a cooperative deadline; a blocking filesystem operation cannot be preempted by it.",
+    "This is a focused review and regression run, not a comprehensive security audit or a new real-model completion-rate benchmark."
+  ]
+}

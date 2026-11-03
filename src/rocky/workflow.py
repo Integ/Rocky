@@ -38,6 +38,7 @@ with workflow.unsafe.imports_passed_through():
         VerifyInput,
         WakeCommand,
         read_only_action,
+        workspace_file_batch,
     )
     from rocky.tool_contracts import action_identity
 
@@ -89,6 +90,7 @@ class GoalWorkflow:
         self._consumed_wake_generation = 0
         self._prioritized_wake_generation = 0
         self._interactive_pending = False
+        self._file_batches = False
         self._wake_feedback = ""
         self._no_progress = 0
         self._seen_progress: set[str] = set()
@@ -341,7 +343,10 @@ class GoalWorkflow:
             if step.status == "started":
                 step.status = "failed"
                 step.completed_at = workflow.now().isoformat()
-                step.output = {"error": reason[:4000]}
+                if self._file_batches and "results" in step.output:
+                    step.output = {**step.output, "error": reason[:4000]}
+                else:
+                    step.output = {"error": reason[:4000]}
         self._state.status = status
         self._state.reason = reason[:4000]
         self._state.wake_at = None
@@ -365,6 +370,7 @@ class GoalWorkflow:
         self._state.steps += 1
         await self._persist()
         self._guard_dispatch()
+        self._file_batches = workflow.patched("workspace-file-batches-v1")
         interactive = False
         queue = run.model_task_queue
         if workflow.patched("interactive-model-lane-v1"):
@@ -385,6 +391,7 @@ class GoalWorkflow:
                 state=self._state.model_copy(deep=True),
                 feedback=feedback,
                 interactive=interactive,
+                file_batches=self._file_batches,
             ),
             result_type=PlanResult,
             task_queue=queue,
@@ -504,7 +511,9 @@ class GoalWorkflow:
         await self._persist()
 
     @staticmethod
-    def _decision_error(run: RunInput, decision: Decision | None) -> str:
+    def _decision_error(
+        run: RunInput, decision: Decision | None, *, file_batches: bool = False
+    ) -> str:
         if decision is None:
             return "Planning produced no usable decision."
         if decision.question is not None and decision.kind != "blocked":
@@ -518,6 +527,15 @@ class GoalWorkflow:
                 if not 1 <= len(decision.actions) <= MAX_PARALLEL_ACTIONS:
                     return f"actions must contain 1 to {MAX_PARALLEL_ACTIONS} read-only actions."
                 if not all(read_only_action(item) for item in decision.actions):
+                    if file_batches:
+                        if workspace_file_batch(decision.actions):
+                            return ""
+                        return (
+                            "actions must be independent read-only actions, or only workspace "
+                            "write_file/edit_file/append_file actions with distinct relative "
+                            "paths, content and no command options. Do not mix reads and writes "
+                            "or use overlapping paths. Commands and external writes use action."
+                        )
                     return (
                         "actions may contain only read_file, list_files, fetch_url and "
                         "GET/HEAD/OPTIONS http_request actions with a null path. Propose "
@@ -723,6 +741,8 @@ class GoalWorkflow:
                 )
             return {"verification": verification.model_dump(mode="json")}
         if decision.actions is not None:
+            if self._file_batches and workspace_file_batch(decision.actions):
+                return await self._harness_file_batch(run, cycle, decision.actions)
             return await self._harness_batch(run, cycle, decision.actions)
         cycle.result = await self._execute(run, decision.action)
         if cycle.result.approval_required:
@@ -769,6 +789,80 @@ class GoalWorkflow:
         self._state.artifacts = list(artifacts.values())[-20:]
         cycle.feedback = "" if result.success else content[:4000]
         return {"result": result.model_dump(mode="json")}
+
+    async def _harness_file_batch(
+        self, run: RunInput, cycle: "_Cycle", actions: list[Action]
+    ) -> dict:
+        """One planning round, ordered writes with durable per-file receipts.
+
+        Completed files survive interruption. Approval, unknown outcomes and
+        new owner input stop later writes; ordinary independent failures do
+        not discard useful progress. A batch is deliberately not atomic.
+        """
+        stopped = ""
+        output = {"results": []}
+        for index, action in enumerate(actions, 1):
+            self._guard_dispatch()
+            if self._wake_generation != cycle.owner_generation:
+                stopped = "New owner input arrived. Replan before any remaining file changes."
+            if stopped:
+                result = ToolResult(
+                    success=False,
+                    content="This file action was not dispatched.",
+                    error_code="batch_stopped",
+                    retry_hint=stopped,
+                )
+            else:
+                try:
+                    result = await self._execute(
+                        run, action, f"step-{self._state.steps:04d}-{index}"
+                    )
+                except ActivityError as error:
+                    if self._check_activity_cancellation(error):
+                        raise _StopExecution("cancelled", "Cancelled by the user.") from None
+                    result = ToolResult(
+                        success=False,
+                        content="The file action could not return a known result.",
+                        error_code="outcome_unknown",
+                        retry_hint="Inspect the file before repeating this mutation.",
+                    )
+                if result.approval_required:
+                    result = ToolResult(
+                        success=False,
+                        content="This file action needs owner approval and was not dispatched.",
+                        error_code="approval_required",
+                        retry_hint="Propose it as a single action for owner review.",
+                    )
+                if result.error_code in {"approval_required", "outcome_unknown"}:
+                    stopped = result.retry_hint or "Resolve this file action before continuing."
+            cycle.results.append((action, result))
+            content = "\n".join(
+                part for part in (result.error_code, result.retry_hint, result.content) if part
+            )[:16000]
+            self._append_observation(
+                Observation(
+                    step=self._state.steps,
+                    tool=action.tool,
+                    success=result.success,
+                    content=f"{action.path}:\n{content}"[:16000],
+                    progress_key=result.progress_key,
+                )
+            )
+            artifacts = {item.path: item for item in self._state.artifacts}
+            artifacts.update({item.path: item for item in result.artifacts})
+            self._state.artifacts = list(artifacts.values())[-20:]
+            output["results"].append(
+                {"action": action.model_dump(mode="json"), "result": result.model_dump(mode="json")}
+            )
+            assert self._state.execution_step is not None
+            self._state.execution_step.output = output
+            await self._persist()
+        cycle.feedback = "\n".join(
+            f"{action.path}: {result.error_code} {result.retry_hint or ''} {result.content[:500]}"
+            for action, result in cycle.results
+            if not result.success
+        )[:4000]
+        return output
 
     async def _harness_batch(self, run: RunInput, cycle: "_Cycle", actions: list[Action]) -> dict:
         """Run independent read-only actions concurrently as one step.
@@ -959,7 +1053,12 @@ class GoalWorkflow:
                 )
             elif decision and decision.actions:
                 summary.append(
-                    f"Attempted {len(decision.actions)} parallel reads: "
+                    f"Attempted {len(decision.actions)} "
+                    + (
+                        "file actions: "
+                        if self._file_batches and workspace_file_batch(decision.actions)
+                        else "parallel reads: "
+                    )
                     + "; ".join(
                         f"{item.tool} {item.path or item.url or ''}" for item in decision.actions
                     )[:1000]
@@ -1021,7 +1120,10 @@ class GoalWorkflow:
                         }
                     )
                     await self._start_phase(run, "decide", cycle)
-                cycle.error = self._decision_error(run, cycle.decision)
+                cycle.owner_generation = decision_generation
+                cycle.error = self._decision_error(
+                    run, cycle.decision, file_batches=self._file_batches
+                )
                 if (
                     workflow.patched("owner-input-before-action-v1")
                     and self._wake_generation != decision_generation
@@ -1160,7 +1262,9 @@ class GoalWorkflow:
 
 
 # Read-only observations whose repetition may refresh rolled-out evidence.
-_OBSERVATION_TOOLS = frozenset({"read_file", "list_files", "fetch_url"})
+_OBSERVATION_TOOLS = frozenset(
+    {"read_file", "list_files", "fetch_url", "find_files", "search_files"}
+)
 
 
 class _StopExecution(Exception):
@@ -1175,7 +1279,8 @@ class _Cycle:
     feedback: str = ""
     decision: Decision | None = None
     result: ToolResult | None = None
-    # Results of a parallel read-only batch, in action order.
+    owner_generation: int = 0
+    # Results of a read or file batch, in action order.
     results: list[tuple[Action, ToolResult]] = field(default_factory=list)
     verification: VerificationResult | None = None
     error: str = ""

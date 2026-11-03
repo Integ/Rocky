@@ -30,6 +30,7 @@ from rocky.inference import ModelSettings
 from rocky.memory import MemoryManager, bounded_memory, conservative_token_count, serialize_memory
 from rocky.model_queue import ModelQueue, ModelRequestCancelled
 from rocky.models import (
+    FILE_BATCH_TOOLS,
     MAX_PARALLEL_ACTIONS,
     Decision,
     DeliveryRequirements,
@@ -97,11 +98,26 @@ _REVIEW_EVIDENCE_TOKEN_BUDGET = 60_000
 _TRUNCATED = "\n[CONTENT TRUNCATED; omitted content is not evidence]"
 
 
+MODEL_ERROR_CODES = frozenset(
+    {
+        "authentication_failed",
+        "model_access_denied",
+        "quota_exceeded",
+        "rate_limited",
+        "provider_unavailable",
+        "network_error",
+        "model_timeout",
+        "missing_api_key",
+    }
+)
+
+
 class PlannerError(RuntimeError):
     """A safe error suitable for persisted workflow status and user display."""
 
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str, *, code: str | None = None) -> None:
         super().__init__(message)
+        self.code = code if isinstance(code, str) and code in MODEL_ERROR_CODES else None
         self.usage: dict[str, int] = {}
 
     def with_usage(self, usage: dict[str, int]) -> "PlannerError":
@@ -153,8 +169,10 @@ class TransientModelError(PlannerError):
     so the Activity may safely be retried, after retry_after when supplied.
     """
 
-    def __init__(self, message: str, retry_after: float | None = None) -> None:
-        super().__init__(message)
+    def __init__(
+        self, message: str, retry_after: float | None = None, *, code: str | None = None
+    ) -> None:
+        super().__init__(message, code=code)
         self.retry_after = retry_after
 
 
@@ -185,6 +203,40 @@ def _retry_after(headers: Any) -> float | None:
     return min(max(0.0, seconds), _MAX_RETRY_AFTER_SECONDS)
 
 
+def _provider_failure(error: Exception) -> PlannerError | None:
+    """Expose fixed categories, never upstream messages, URLs or credentials."""
+    if isinstance(error, openai.APIStatusError | httpx.HTTPStatusError):
+        response = error.response
+        status = response.status_code
+    else:
+        return None
+    if status == 401:
+        return PlannerError(
+            "The model provider rejected the API key; update it in Model Settings.",
+            code="authentication_failed",
+        )
+    if status in {403, 404}:
+        return PlannerError(
+            "The model or endpoint is unavailable to this credential; check Model Settings.",
+            code="model_access_denied",
+        )
+    if status == 429:
+        code = response.extensions.get("rocky_error_code")
+        try:
+            body = response.json()
+            detail = body.get("error", {}) if isinstance(body, dict) else {}
+            if isinstance(detail, dict):
+                code = detail.get("code") or detail.get("type") or code
+        except (ValueError, httpx.ResponseNotRead):
+            pass
+        if isinstance(code, str) and code in {"insufficient_quota", "billing_hard_limit_reached"}:
+            return PlannerError(
+                "The model provider's quota or billing limit is exhausted; check the account limits.",
+                code="quota_exceeded",
+            )
+    return None
+
+
 def _transient_failure(error: Exception) -> TransientModelError | None:
     """Classify provider failures that are safe to retry; never echo their text."""
     if isinstance(error, openai.APITimeoutError | httpx.TimeoutException) and not isinstance(
@@ -202,7 +254,8 @@ def _transient_failure(error: Exception) -> TransientModelError | None:
     ):
         return TransientModelError(
             "The model provider could not be reached. Automatic retries did not succeed; "
-            "check the network connection and provider endpoint."
+            "check the network connection and provider endpoint.",
+            code="network_error",
         )
     if isinstance(error, openai.APIStatusError):
         status, headers = error.status_code, error.response.headers
@@ -215,12 +268,14 @@ def _transient_failure(error: Exception) -> TransientModelError | None:
             "The model provider rate-limited the request (HTTP 429). Automatic retries did "
             "not succeed; check the account's rate limits or try again later.",
             _retry_after(headers),
+            code="rate_limited",
         )
     if status in {408, 409} or status >= 500:
         return TransientModelError(
             f"The model provider was temporarily unavailable (HTTP {status}). Automatic "
             "retries did not succeed; try again later.",
             _retry_after(headers),
+            code="provider_unavailable",
         )
     return None
 
@@ -284,6 +339,16 @@ def _fit_evidence(evidence: dict[str, Any], budget: int) -> dict[str, Any]:
     def size(value: Any) -> int:
         return conservative_token_count(serialize_memory(value))
 
+    # Keep whole, recent owner replies with their question binding. Never
+    # turn a partial reply into apparent evidence of what the owner said.
+    messages = evidence.get("owner_messages", [])
+    while messages and size(messages) > budget // 4:
+        messages.pop(0)
+        evidence["owner_messages_omitted"] = evidence.get("owner_messages_omitted", 0) + 1
+    questions = evidence.get("questions", [])
+    while questions and size(questions) > budget // 8:
+        questions.pop(0)
+        evidence["questions_omitted"] = evidence.get("questions_omitted", 0) + 1
     actions = evidence.get("actions", [])
     for limit in (600, 200):
         if size(actions) <= budget // 4:
@@ -813,7 +878,10 @@ class OpenAIPlanner:
         if not key and provider == "openai" and base_url == _OPENAI_BASE_URL:
             key = os.environ.get("OPENAI_API_KEY")
         if not key and provider != "ollama":
-            raise PlannerError("No API key is configured for this provider; open Model Settings.")
+            raise PlannerError(
+                "No API key is configured for this provider; open Model Settings.",
+                code="missing_api_key",
+            )
         if provider == "openai":
             response = await _streamed_response(
                 self._openai_client(base_url, key),
@@ -940,6 +1008,22 @@ class OpenAIPlanner:
                 json=body,
             )
         async with request as response:
+            if response.status_code == 429:
+                # Streaming errors have no cached body. Read only a bounded
+                # error envelope to distinguish exhausted quota from pacing.
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk[: 16_385 - len(body)])
+                    if len(body) > 16_384:
+                        break
+                try:
+                    error = json.loads(body).get("error", {}) if len(body) <= 16_384 else {}
+                    if isinstance(error, dict):
+                        response.extensions["rocky_error_code"] = error.get("code") or error.get(
+                            "type"
+                        )
+                except (ValueError, AttributeError):
+                    pass
             response.raise_for_status()
             result = await _completion_body(response, provider)
         usage = result.get("usage") or {}
@@ -1074,18 +1158,22 @@ class OpenAIPlanner:
         except Exception as error:
             # Provider/validation errors can echo request data or headers. Keep
             # only fixed messages, including in Temporal's serialized error.
+            if failure := _provider_failure(error):
+                raise failure from None
             if transient := _transient_failure(error):
                 raise transient from None
             if isinstance(error, TimeoutError):
                 raise PlannerError(
                     f"Model response did not finish within {MODEL_RESPONSE_SECONDS:.0f} "
                     "seconds; no decision was accepted. Keep reasoning and action content "
-                    "shorter."
+                    "shorter.",
+                    code="model_timeout",
                 ) from None
             if isinstance(error, openai.APITimeoutError | httpx.TimeoutException):
                 raise PlannerError(
                     f"Model sent nothing for {MODEL_TIMEOUT_SECONDS:.0f} seconds; no "
-                    "decision was accepted. Keep reasoning and action content shorter."
+                    "decision was accepted. Keep reasoning and action content shorter.",
+                    code="model_timeout",
                 ) from None
             raise PlannerError(
                 "Model request failed; check service availability and configuration."
@@ -1218,6 +1306,7 @@ class OpenAIPlanner:
                 )[:50],
                 "approval_rules": request.approvals,
                 "max_parallel_actions": MAX_PARALLEL_ACTIONS,
+                "file_batch_tools": list(FILE_BATCH_TOOLS) if request.file_batches else [],
                 "response_token_limit": response_tokens,
                 "python_executable": sys.executable,
             },

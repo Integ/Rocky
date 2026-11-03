@@ -59,7 +59,7 @@ struct OwnerQuestionCard: View {
                     .background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
                     .accessibilityLabel("回答 Rocky 的问题")
                 HStack {
-                    Button("回答并继续") { Task { await submit() } }.buttonStyle(.borderedProminent)
+                    Button("回答并继续") { Task { await submit() } }.buttonStyle(PrimaryButtonStyle())
                         .disabled(sending || !model.isConnected || answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || answer.count > 4000)
                     if sending { ProgressView().controlSize(.small) }
                     if answer.count > 4000 { Text("回答最多 4,000 字").font(.caption).foregroundStyle(.red) }
@@ -186,7 +186,7 @@ struct AttentionInboxView: View {
             Button("从保存的进度恢复") { Task { await model.recover(item.goal) } }.disabled(!model.isConnected)
         case .limits:
             Button("加倍预算继续") { Task { await model.extend(item.goal) } }.disabled(!model.isConnected)
-        case .result: Button("查看结果") { open(item.goal) }.buttonStyle(.borderedProminent)
+        case .result: Button("查看结果") { open(item.goal) }.buttonStyle(PrimaryButtonStyle())
         }
     }
 

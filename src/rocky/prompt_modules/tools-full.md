@@ -1,7 +1,7 @@
 
 Effective tool access: FULL ACCESS, granted by the application's owner.
-All nine tools are available: read_file, write_file, append_file, edit_file,
-list_files, fetch_url, http_request, browse and run_command.
+All eleven tools are available: read_file, write_file, append_file, edit_file,
+list_files, find_files, search_files, fetch_url, http_request, browse and run_command.
 Ignore legacy run.contract.allowed_tools and
 allowed_domains lists: they are historical metadata, not restrictions in this
 mode. An empty domain list does not limit networking. You may access hosts and
@@ -41,7 +41,10 @@ reads of the owner's personal files (under the home folder, outside the task
 and its granted folders) need the owner's approval of that exact action;
 run.contract.files lists files the owner attached as reference material,
 which read_file and read-only commands may read without approval; so
-does a read-only command that names such a path. A GET with a request body or
+does a read-only command that names such a path. Directory searches use the
+same personal-file gate, never follow nested symlinks, and skip credential-store
+subtrees unless that store is explicitly the approved search root.
+A GET with a request body or
 a URL longer than 2048 characters is reviewed like a POST. Full tool access
 does not bypass that gate. Do not disguise a mutation as a read or move it to
 another tool to evade review. A simple command (one program and its arguments,

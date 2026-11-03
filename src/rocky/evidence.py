@@ -16,9 +16,12 @@ quote; audit_review then checks every claim against this evidence, so a pass
 does not rest on the reviewer's judgment of figures alone.
 """
 
+import ast
 import difflib
 import json
 import re
+import shlex
+from pathlib import PurePath
 
 from rocky.models import RunInput
 from rocky.tools import WorkspaceTools
@@ -31,12 +34,67 @@ _COMMAND_LIMIT = 2_000
 _MAX_FILES = 30
 _MAX_ACTIONS = 80
 _CLIPPED = "\n[truncated]"
-_OUTPUT_TOOLS = {"run_command", "fetch_url", "http_request", "list_files", "browse"}
+_OUTPUT_TOOLS = {
+    "run_command",
+    "fetch_url",
+    "http_request",
+    "list_files",
+    "browse",
+    "find_files",
+    "search_files",
+}
 
 
 def _excerpt(value, limit: int) -> str:
     text = value if isinstance(value, str) else str(value or "")
     return text if len(text) <= limit else text[:limit] + "\n[excerpt]"
+
+
+def _search_output(content: str) -> str:
+    """Expose the actual decoded lines to the quote audit, not JSON escapes.
+
+    Keep metadata and source text distinct. This is still an excerpt of tool
+    evidence, never a claim that a source file was completely read.
+    """
+    try:
+        payload = json.loads(content)
+    except (ValueError, TypeError, RecursionError):
+        return content
+    if not isinstance(payload, dict) or not isinstance(payload.get("matches"), list):
+        return content
+    lines = [
+        json.dumps(
+            {key: value for key, value in payload.items() if key != "matches"}, ensure_ascii=False
+        )
+    ]
+    for match in payload["matches"]:
+        if not isinstance(match, dict) or not isinstance(match.get("path"), str):
+            return content
+        context = match.get("context") or []
+        if not isinstance(context, list):
+            return content
+        selected = [match, *context]
+        for item in selected:
+            if (
+                not isinstance(item, dict)
+                or type(item.get("line")) is not int
+                or item["line"] < 1
+                or not isinstance(item.get("text"), str)
+            ):
+                return content
+            lines.append(
+                json.dumps(
+                    {
+                        "path": match["path"],
+                        "line": item["line"],
+                        "line_truncated": bool(item.get("line_truncated")),
+                        "context": item is not match,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            lines.append(item["text"])
+    return "\n".join(lines)
 
 
 def _diff(path: str, before: str, after: str) -> str:
@@ -71,7 +129,11 @@ def _record_action(
         "success": bool(result.get("success")),
     }
     if tool in _OUTPUT_TOOLS or not entry["success"]:
-        entry["output"] = _excerpt(result.get("content"), _OUTPUT_LIMIT)
+        content = result.get("content")
+        if tool == "search_files" and entry["success"] and isinstance(content, str):
+            content = _search_output(content)
+            entry["output_format"] = "decoded search lines; metadata precedes each source line"
+        entry["output"] = _excerpt(content, _OUTPUT_LIMIT)
     if tool == "read_file" and entry["success"] and action.get("path"):
         path = tools.display_path(run.goal_id, action["path"])
         content = str(result.get("content") or "")
@@ -92,7 +154,13 @@ def _record_action(
     actions.append(entry)
 
 
-def collect_review_evidence(run: RunInput, steps: list[dict], tools: WorkspaceTools) -> dict:
+def collect_review_evidence(
+    run: RunInput,
+    steps: list[dict],
+    tools: WorkspaceTools,
+    *,
+    owner_messages: list[dict] | None = None,
+) -> dict:
     deliverables = {
         tools.display_path(run.goal_id, item.path) for item in run.contract.deliverables
     }
@@ -100,11 +168,19 @@ def collect_review_evidence(run: RunInput, steps: list[dict], tools: WorkspaceTo
     reads: dict[str, str] = {}
     originals: dict[str, str] = {}
     writers: dict[str, list[str]] = {}
+    questions = {}
     for step in steps:
         if step.get("phase") != "act":
             continue
         decision = (step.get("input") or {}).get("decision") or {}
         output = step.get("output") or {}
+        if decision.get("kind") == "blocked" and step.get("status") == "completed":
+            question = decision.get("question") or {}
+            questions[f"question-{step.get('cycle')}"] = {
+                "id": f"question-{step.get('cycle')}",
+                "text": question.get("text") or decision.get("reason", ""),
+                "requested_at": step.get("completed_at"),
+            }
         # A parallel read batch records each action next to its own result.
         pairs = (
             [
@@ -139,7 +215,28 @@ def collect_review_evidence(run: RunInput, steps: list[dict], tools: WorkspaceTo
             item["diff"] = _diff(path, originals[path], item.pop("content")) or "(unchanged)"
         changed_files.append(item)
 
+    # Only application-confirmed input is evidence of what execution used.
+    # A planner summary or a file claiming that the owner replied is not enough.
+    replies = []
+    for message in owner_messages or []:
+        if message.get("delivery_status") != "consumed":
+            continue
+        question_id = message.get("question_id")
+        replies.append(
+            {
+                "id": message["command_id"],
+                "message": message["message"],
+                "created_at": message.get("created_at"),
+                "consumed_at": message.get("consumed_at"),
+                "question_id": question_id,
+                "question": questions.get(question_id),
+            }
+        )
     return {
+        "questions": list(questions.values())[-30:],
+        "questions_omitted": max(0, len(questions) - 30),
+        "owner_messages": replies[-30:],
+        "owner_messages_omitted": max(0, len(replies) - 30),
         "sources": sources,
         "changed_files": changed_files,
         "deliverables": {
@@ -156,7 +253,7 @@ def collect_review_evidence(run: RunInput, steps: list[dict], tools: WorkspaceTo
 _NUMBER = re.compile(r"\d+(?:,\d{3})*(?:\.\d+)?")
 _SOLE_NUMBER = re.compile(r"^\s*[$€£]?\s*-?(\d+(?:,\d{3})*(?:\.\d+)?)\s*%?\s*$")
 _PREFIX = re.compile(
-    r"^\s*(source|file|step|deliverable|artifact|output|action)s?\s*[:#]?\s*(.+?)\s*$",
+    r"^\s*(source|file|step|deliverable|artifact|output|action|owner|question)s?\s*[:#]?\s*(.+?)\s*$",
     re.IGNORECASE,
 )
 _FOLD = str.maketrans(
@@ -211,12 +308,18 @@ def _unescape(quote: str) -> str:
 
 
 def _quote_in(quote: str, text: str) -> bool:
+    # Source text may itself contain literal backslashes (code and paths).
+    # Prefer that exact text before accepting legacy JSON-escaped quotations.
+    return _literal_quote_in(quote, text) or _literal_quote_in(_unescape(quote), text)
+
+
+def _literal_quote_in(quote: str, text: str) -> bool:
     """Every line of the quote, split further at ellipses, appears in order.
 
     Quoting code or prose, reviewers skip lines; each line they keep must exist.
     """
     haystack, position = _normal(text), 0
-    fragments = [_normal(part) for part in re.split(r"\.\.\.|…|\n", _unescape(quote))]
+    fragments = [_normal(part) for part in re.split(r"\.\.\.|…|\n", quote)]
     if not any(fragments):
         return False
     for fragment in filter(None, fragments):
@@ -294,6 +397,10 @@ def _resolve(location: str, index: dict[str, str]) -> list[str]:
     for part in re.split(r"\s*(?:,|;|\band\b)\s*", location or ""):
         match = _PREFIX.match(part)
         kind, rest = (match.group(1).lower(), match.group(2)) if match else ("", part.strip())
+        if kind in {"owner", "question"}:
+            if (key := f"{kind}:{rest}") in index:
+                keys.append(key)
+            continue
         if kind in {"step", "output", "action"} or (not kind and rest.isdigit()):
             number = re.search(r"\d+", rest)
             key = f"step:{number.group()}" if number else ""
@@ -317,6 +424,10 @@ def _evidence_index(
     evidence: dict, deliverables: dict[str, str], files: dict[str, str]
 ) -> dict[str, str]:
     index: dict[str, str] = {}
+    for question in evidence.get("questions", []):
+        index[f"question:{question['id']}"] = json.dumps(question, ensure_ascii=False, indent=2)
+    for message in evidence.get("owner_messages", []):
+        index[f"owner:{message['id']}"] = json.dumps(message, ensure_ascii=False, indent=2)
     for item in evidence.get("sources", []):
         index[f"source:{item['path']}"] = item.get("content", "")
     for item in evidence.get("changed_files", []):
@@ -337,6 +448,10 @@ def _evidence_index(
 def _statements(evidence: dict, files: dict[str, str]) -> list[tuple[str, str]]:
     """Lines of evidence that state facts: file content and action outputs, not commands."""
     lines = []
+    for message in evidence.get("owner_messages", []):
+        lines += [
+            (f"owner:{message['id']}", line) for line in message.get("message", "").splitlines()
+        ]
     for item in evidence.get("sources", []):
         lines += [(f"source:{item['path']}", line) for line in item.get("content", "").splitlines()]
     for item in evidence.get("changed_files", []):
@@ -358,6 +473,60 @@ def _distinctive(value) -> bool:
     return len(str(value).strip()) >= 3
 
 
+def _computation_text(command: str) -> str:
+    """Ignore pure Python comparison assertions, not assignments or output.
+
+    An expected value in `assert actual == expected` cannot produce the
+    observed result. Keep all executable expressions, including calls inside
+    assertions, so `assert print(answer)` is not treated as a computation.
+    Unrecognised shell/program syntax keeps the conservative literal check.
+    """
+    try:
+        words = shlex.split(command)
+        if not words or not re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", PurePath(words[0]).name):
+            return command
+        index = 1
+        while index < len(words) and words[index] in {"-B", "-I", "-S", "-s", "-E", "-u"}:
+            index += 1
+        if len(words) != index + 2 or words[index] != "-c":
+            return command
+        tree = ast.parse(words[index + 1])
+        pure = (
+            ast.Compare,
+            ast.Name,
+            ast.Load,
+            ast.Constant,
+            ast.Dict,
+            ast.List,
+            ast.Tuple,
+            ast.Set,
+            ast.Subscript,
+            ast.Slice,
+            ast.UnaryOp,
+            ast.UAdd,
+            ast.USub,
+            ast.cmpop,
+        )
+
+        class Comparisons(ast.NodeTransformer):
+            def visit_Assert(self, node):
+                if (
+                    isinstance(node.test, ast.Compare)
+                    and all(isinstance(part, pure) for part in ast.walk(node.test))
+                    and (node.msg is None or isinstance(node.msg, ast.Constant))
+                ):
+                    return ast.copy_location(ast.Pass(), node)
+                return node
+
+        return shlex.join(words[: index + 1]) + "\n" + ast.unparse(Comparisons().visit(tree))
+    except (ValueError, SyntaxError, RecursionError):
+        return command
+
+
+def _states_value(value, command: str) -> bool:
+    return _value_in(value, command) and _value_in(value, _computation_text(command))
+
+
 def verify_checklist(checklist: list[dict], evidence: dict, files: dict[str, str]) -> dict:
     """Values the application can verify itself, keyed by (deliverable, pointer).
 
@@ -374,13 +543,24 @@ def verify_checklist(checklist: list[dict], evidence: dict, files: dict[str, str
         context = item.get("context", [])
         last = (evidence.get("deliverables", {}).get(item["deliverable"]) or [""])[-1].split()
         if len(last) == 3 and last[2] == "run_command" and last[1].isdigit():
-            command = actions.get(int(last[1]), {}).get("target", "")
-            if not (_distinctive(value) and _value_in(value, command)):
+            action = actions.get(int(last[1]), {})
+            command = action.get("target", "")
+            if action.get("success") is not False and not (
+                _distinctive(value) and _states_value(value, command)
+            ):
                 support[key] = f"computed by step {last[1]} run_command"
                 continue
         if not _distinctive(value):
             continue
         for location, line in statements:
+            # A failed command or literal echo cannot launder its value into
+            # automatic verification through the "stated output" fallback.
+            action = actions.get(int(location[5:]), {}) if location.startswith("step:") else {}
+            if action.get("success") is False or (
+                action.get("tool") == "run_command"
+                and _states_value(value, action.get("target", ""))
+            ):
+                continue
             if _value_in(value, line) and (
                 not context or any(_normal(term) in _normal(line) for term in context)
             ):
@@ -434,6 +614,8 @@ def _audit_claim(claim: dict, item: dict | None, index, corpus, actions, writers
     keys = [key for key in keys if _quote_in(quote, index[key])]
     if not keys:
         return "the quoted text does not appear at the cited location"
+    if not any(_literal_quote_in(quote, index[key]) for key in keys):
+        quote = _unescape(quote)
     value = item["value"] if item is not None else claim.get("value", "")
     if item is not None and isinstance(value, str) and ("/" in value or "." in value):
         # A citation is supported by quoting the very file it cites.
@@ -447,7 +629,9 @@ def _audit_claim(claim: dict, item: dict | None, index, corpus, actions, writers
         if not commands:
             return "computed values must come from a command the task ran; compute it and keep the output"
         action = commands[0]
-        if _distinctive(value) and _value_in(value, action.get("target", "")):
+        if action.get("success") is False:
+            return "the cited command did not succeed"
+        if _distinctive(value) and _states_value(value, action.get("target", "")):
             return "the command states this value literally instead of computing it"
         wrote = writers.get(claim.get("deliverable"), [])[-1:] == [
             f"step {action.get('step')} run_command"
@@ -470,7 +654,7 @@ def _audit_claim(claim: dict, item: dict | None, index, corpus, actions, writers
     elif not _value_in(value, quote):
         return "the quoted text does not contain this value"
     context = item.get("context", [])
-    lines = _unescape(quote).splitlines() or [quote]
+    lines = quote.splitlines() or [quote]
     # Lines may be quoted from different places: one line must hold both.
     tied = any(
         any(_normal(term) in _normal(line) for term in context)

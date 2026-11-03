@@ -11,7 +11,7 @@ struct GoalContract: Codable, Equatable {
     var objective: String
     var acceptance_criteria: [String]
     var deliverables: [Deliverable]
-    var allowed_tools: [String] = ["read_file", "write_file", "list_files", "fetch_url", "http_request", "run_command", "append_file", "edit_file", "browse"]
+    var allowed_tools: [String] = ["read_file", "write_file", "list_files", "fetch_url", "http_request", "run_command", "append_file", "edit_file", "browse", "find_files", "search_files"]
     var allowed_domains: [String] = []
     /// Granted folders; nil on tasks submitted before folders existed.
     var folders: [String]? = nil
@@ -148,6 +148,8 @@ struct ToolObservation: Codable, Equatable, Hashable {
         case "append_file": "追加文件"
         case "edit_file": "修改文件"
         case "list_files": "浏览文件"
+        case "find_files": "查找文件"
+        case "search_files": "搜索内容"
         case "fetch_url": "读取网页"
         case "http_request": "网络请求"
         case "browse": "浏览器"

@@ -4,9 +4,9 @@
 
 Rocky 是一个长期运行的自主数字代理。你确认目标、验收标准、执行范围和预算，
 它负责规划下一步、调用工具、核验文件，并在等待、重启和人工反馈之后继续工作。
-**v0.2 把任务执行、人工交接、议程和交付审阅接成了一条完整流程。**
+**v0.3 新增文件查找、内容搜索和批量文件修改，并改用黑白灰原生界面。**
 
-[下载 v0.2.0](https://github.com/Integ/Rocky/releases/tag/v0.2.0) ·
+[下载 v0.3.0](https://github.com/Integ/Rocky/releases/tag/v0.3.0) ·
 [一分钟介绍·播音男声版](docs/media/rocky-intro-broadcast-male.mp4) ·
 [macOS 使用指南](docs/macos.md) ·
 [更新日志](CHANGELOG.md)
@@ -29,7 +29,7 @@ Rocky 是一个长期运行的自主数字代理。你确认目标、验收标�
 
 </details>
 
-## v0.2 能做什么
+## v0.3 能做什么
 
 | 能力 | 使用方式 |
 | --- | --- |
@@ -47,8 +47,8 @@ Temporal 和 SQLite / PostgreSQL。实现细节见[架构说明](docs/architectu
 
 ## 开始使用
 
-1. **安装应用**：从 [v0.2.0 Release](https://github.com/Integ/Rocky/releases/tag/v0.2.0) 下载
-   `Rocky-0.2.0-macos-arm64.zip`，解压后将 `Rocky.app` 拖入“应用程序”。需要 Apple Silicon 和 macOS 14+，
+1. **安装应用**：从 [v0.3.0 Release](https://github.com/Integ/Rocky/releases/tag/v0.3.0) 下载
+   `Rocky-0.3.0-macos-arm64.zip`，解压后将 `Rocky.app` 拖入“应用程序”。需要 Apple Silicon 和 macOS 14+，
    包内包含 Python 与锁定依赖，首次准备运行环境无需联网。此构建为临时签名、尚未经过 Apple 公证，macOS 可能要求手动允许打开。
 2. **配置模型**：打开“设置与模型”（`⌘,`），选择服务商或填写兼容 API 地址、模型和密钥。
    密钥保存到 macOS 钥匙串；使用 Ollama 时，先在本机启动它并下载模型。
@@ -165,7 +165,11 @@ Compose 显式使用 `ROCKY_AUTH_MODE=token`，因为容器内请求来自容器
 }
 ```
 
-默认 `ROCKY_TOOL_ACCESS=full`。完整权限模式提供 `read_file`、`write_file`、`append_file`、`edit_file`、`list_files`、`fetch_url`、`http_request`、`browse` 和 `run_command`；支持 HTTP/HTTPS 地址、私网、本机服务、重定向、POST 表单/JSON、认证请求及登录 Cookie 会话，下述 Rocky 控制端口除外。旧任务中保存的 `allowed_tools` / `allowed_domains` 不再限制执行。
+默认 `ROCKY_TOOL_ACCESS=full`。完整权限模式提供 `read_file`、`write_file`、`append_file`、`edit_file`、`list_files`、`find_files`、`search_files`、`fetch_url`、`http_request`、`browse` 和 `run_command`；支持 HTTP/HTTPS 地址、私网、本机服务、重定向、POST 表单/JSON、认证请求及登录 Cookie 会话，下述 Rocky 控制端口除外。旧任务中保存的 `allowed_tools` / `allowed_domains` 不再限制执行。
+
+`find_files` 按文件名或相对路径 glob 递归定位文件；`search_files` 在 UTF-8 文本中进行字面搜索，返回路径、一基行号及可选上下文，两者均可加入最多 8 项的只读并行批次，无需 shell。`path` 指定目录，`content` 为 JSON：例如 `{"glob":"**/*.py"}` 或 `{"query":"compute_total","glob":"*.py","context_lines":1}`。支持 `limit`（1–200）、`offset` 和显式 `include_hidden`；内容搜索还支持 `case_sensitive`。默认跳过隐藏文件、依赖与缓存目录，始终不跟随嵌套符号链接，不读取硬链接和特殊文件；内容搜索跳过二进制、非 UTF-8 和超过 1 MB 的文件。结果包含完整性、跳过数量及截断原因；分页使用 `next_offset`，扫描限额则应缩小目录或模式。个人目录与凭据的审批规则仍然有效，旧 scoped 任务须在 `allowed_tools` 中列出新工具。
+
+搜索行号按 LF 分行，与定向 `read_file` 一致；CRLF 的行尾会规范化，Unicode 分隔符和分页符保留在同一物理行中。依赖目录的排除规则只作用于目录，不会排除同名普通文件。
 
 Python 文件工具可使用绝对路径和隐藏文件，但包括 `full` 模式在内，一律禁止访问工作区根目录中的其他任务和私有 `.rocky/` 控制目录；路径遍历、符号链接和硬链接也不能绕过限制。读取、写入、追加、编辑、目录列表、HTTP 下载目标及验收文件读取都遵守此边界。提交任务时可以授权文件夹（合同的 `folders`，客户端在输入框点文件夹按钮或拖入文件夹）：任务可以像在自己目录里一样直接读写这些文件夹，Seatbelt 也允许沙箱命令写入。授权文件夹必须已存在，不能是根目录、家目录本身，也不能包含或位于 Rocky 自己的数据、代码或凭据存储中。也可以附加文件作为参考资料（合同的 `files`，客户端拖入文件或在同一个按钮里选择文件）：任务可以直接读取这些文件，但不能修改；附加的文件必须存在，且不能是凭据或 Rocky 自己的文件。在 `required` 审批模式下，写入、追加、编辑或下载到任务目录和授权文件夹之外的路径（包括经任务内符号链接指向外部的路径）、读取或列出凭据存储（`~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.netrc`、`~/.config/gh`、`~/Library/Keychains`、浏览器配置等），以及读取或列出家目录下任务目录和授权文件夹之外的个人文件，都需要所有者逐次批准完整操作，所有者规则和本任务同类授权都不能放行。家目录之外的系统和工具链文件可直接读取。产物相对路径用于结果核验和导出。
 

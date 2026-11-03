@@ -1,0 +1,165 @@
+{
+  "date": "2026-11-03",
+  "tools": [
+    "find_files",
+    "search_files"
+  ],
+  "python_tests": {
+    "passed": 1420,
+    "skipped": 3
+  },
+  "swift_tests": {
+    "passed": 109
+  },
+  "new_search_tests": 53,
+  "checks": {
+    "ruff_check": true,
+    "ruff_format": true,
+    "git_diff_check": true,
+    "legacy_history_replay": true,
+    "bundled_sources_match": true
+  },
+  "build_id": "A18E526F-2E2C-44FF-AEFE-102B8ED75B74",
+  "source_sha256": {
+    "models.py": "39617301c6901bdaac1ac8b6e04b1178c07508785d6a3cbb4b6c1068bb7be9e6",
+    "tools.py": "3d508ff45d069752b1455aee85283de761ca2313cab790c683a7a11380c50b82",
+    "file_search.py": "a6816a6998a50c5dca0cd73cbd903da49010acfbc1a601b9c7f508e6bbcd3379",
+    "tool_contracts.py": "25a17a864e9cd3736fb7816ac22dc8d36aa910546445bec211745f554f687875",
+    "evidence.py": "44d1397e98bb6ab514cf3f20ec5d673fc08e2415b077aa84e9e95ad39e695dc2",
+    "workflow.py": "b196b10f9f69729a661d0cf06ad8d7e3762dad784be194082a9d0be8c72e9a61",
+    "prompt_modules/planner.md": "000771aff88923284f399f243de75a3934cd62e04997802283da87e51f32d3ed",
+    "prompt_modules/tools-full.md": "37f171c320fa2b02a8004de9968852d56893397e3f2199ab1cc7cb09cb4dd0f2",
+    "prompt_modules/tools-scoped.md": "39ce163f6a73de85dadf77835a80378579c65933a546273c9adce50b9b8aea08",
+    "prompt_modules/coding.md": "bca16321bd7b589285ac993a6d682df5c5b3aa6dddbe694c2bb8458eef410a54"
+  },
+  "bounds": {
+    "max_entries": 10000,
+    "max_file_bytes": 1000000,
+    "max_scan_bytes": 20000000,
+    "max_seconds": 5,
+    "max_depth": 32,
+    "max_output_characters": 16000,
+    "max_limit": 200,
+    "max_offset": 10000
+  },
+  "native_validation": {
+    "goal_id": "3174d6ad-f740-4e2e-b437-a1bf23b5a082",
+    "model": "gpt-6.1-sol",
+    "status": "succeeded",
+    "steps": 5,
+    "model_calls": 6,
+    "tokens": 37908,
+    "fixture_files": 28,
+    "new_tool_actions": [
+      {
+        "cycle": 1,
+        "tool": "find_files",
+        "path": "/tmp/rocky-tools-20261103/fixture",
+        "options": {
+          "glob": "**/*release*.txt",
+          "limit": 200,
+          "include_hidden": true
+        },
+        "success": true,
+        "output": {
+          "root": "/tmp/rocky-tools-20261103/fixture",
+          "matches": [
+            {
+              "path": "releases/release-alpha.txt",
+              "size_bytes": 69
+            },
+            {
+              "path": "releases/release-beta.txt",
+              "size_bytes": 68
+            }
+          ],
+          "truncated": false,
+          "complete": true,
+          "next_offset": null,
+          "stop_reason": "",
+          "scanned_files": 2,
+          "visited_entries": 30,
+          "scanned_bytes": 0,
+          "skipped": {
+            "excluded": 0,
+            "links": 0,
+            "special": 0,
+            "protected": 0,
+            "unreadable": 0,
+            "binary": 0,
+            "oversized": 0,
+            "depth": 0
+          }
+        }
+      },
+      {
+        "cycle": 2,
+        "tool": "search_files",
+        "path": "/tmp/rocky-tools-20261103/fixture",
+        "options": {
+          "query": "发布负责人",
+          "glob": "*release*.txt",
+          "case_sensitive": true,
+          "context_lines": 0,
+          "limit": 200
+        },
+        "success": true,
+        "output": {
+          "root": "/tmp/rocky-tools-20261103/fixture",
+          "matches": [
+            {
+              "path": "releases/release-alpha.txt",
+              "line": 2,
+              "text": "发布负责人：林秋",
+              "line_truncated": false
+            },
+            {
+              "path": "releases/release-beta.txt",
+              "line": 3,
+              "text": "发布负责人：周宁",
+              "line_truncated": false
+            }
+          ],
+          "truncated": false,
+          "complete": true,
+          "next_offset": null,
+          "stop_reason": "",
+          "scanned_files": 2,
+          "visited_entries": 30,
+          "scanned_bytes": 137,
+          "skipped": {
+            "excluded": 0,
+            "links": 0,
+            "special": 0,
+            "protected": 0,
+            "unreadable": 0,
+            "binary": 0,
+            "oversized": 0,
+            "depth": 0
+          }
+        }
+      }
+    ],
+    "artifact_checks": {
+      "exact_records_match": true,
+      "records": [
+        {
+          "path": "releases/release-alpha.txt",
+          "line": 2,
+          "text": "发布负责人：林秋"
+        },
+        {
+          "path": "releases/release-beta.txt",
+          "line": 3,
+          "text": "发布负责人：周宁"
+        }
+      ],
+      "excluded_distractor": true,
+      "report_sha256": "224b8fe66c51eed416c861275ecf78b56c5a770b2d2f6fa2b70e30936b2c499b"
+    },
+    "native_labels_verified": true,
+    "accepted_in_native_ui": true,
+    "pending_approval": false,
+    "pending_question": false
+  }
+}

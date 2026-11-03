@@ -28,7 +28,12 @@ struct CardButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View { CardSurface(configuration: configuration, cornerRadius: cornerRadius, fill: fill) }
 }
 
-/// The accent circle used to send a message.
+/// Inverse monochrome buttons keep their label readable in both appearances.
+struct PrimaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { PrimarySurface(configuration: configuration) }
+}
+
+/// The inverse circle used to send a message.
 struct SendButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View { SendSurface(configuration: configuration) }
 }
@@ -54,27 +59,12 @@ extension View {
     /// Tooltip that doubles as the accessibility label of an icon-only control.
     func labelled(_ text: String) -> some View { help(text).accessibilityLabel(text) }
 
-    /// Surface for controls that float over scrolling content, such as the composer. Liquid Glass
-    /// when built with the macOS 26 SDK and running there; a material with a hairline otherwise.
-    /// Both follow the Reduce Transparency and Increase Contrast settings.
-    @ViewBuilder
+    /// A quiet, opaque composer surface separates input from conversation content.
     func floatingSurface(cornerRadius: CGFloat) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        #if compiler(>=6.2)
-        if #available(macOS 26.0, *) {
-            glassEffect(.regular, in: shape)
-        } else {
-            materialSurface(shape)
-        }
-        #else
-        materialSurface(shape)
-        #endif
-    }
-
-    private func materialSurface(_ shape: RoundedRectangle) -> some View {
-        background(.regularMaterial, in: shape)
-            .overlay(shape.strokeBorder(Color.primary.opacity(0.12)))
-            .shadow(color: .black.opacity(0.06), radius: 12, y: 4)
+        return background(Color.rockyElevated, in: shape)
+            .overlay(shape.strokeBorder(Color.rockyBorder))
+            .shadow(color: .black.opacity(0.045), radius: 16, y: 5)
     }
 }
 
@@ -131,12 +121,33 @@ private struct SendSurface: View {
 
     var body: some View {
         configuration.label
-            .frame(width: 32, height: 32)
-            .foregroundStyle(isEnabled ? Color.white : Color.secondary)
-            .background(Circle().fill(isEnabled ? Color.rockyAccent : Color.primary.opacity(0.09)))
-            .brightness(isEnabled && hovering ? -0.07 : 0)
+            .frame(width: 34, height: 34)
+            .foregroundStyle(isEnabled ? Color.rockyOnAccent : Color.secondary)
+            .background(Circle().fill(isEnabled ? Color.rockyAccent.opacity(hovering ? 0.84 : 1) : Color.primary.opacity(0.07)))
             .scaleEffect(configuration.isPressed ? 0.92 : 1)
             .contentShape(Circle())
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+private struct PrimarySurface: View {
+    let configuration: ButtonStyleConfiguration
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.controlSize) private var controlSize
+    @State private var hovering = false
+
+    private var compact: Bool { controlSize == .small || controlSize == .mini }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: compact ? 8 : 10, style: .continuous)
+        configuration.label
+            .font(.system(size: compact ? 12 : 13, weight: .medium))
+            .padding(.horizontal, compact ? 11 : 14).padding(.vertical, compact ? 6 : 8)
+            .foregroundStyle(isEnabled ? Color.rockyOnAccent : Color.secondary)
+            .background(shape.fill(isEnabled ? Color.rockyAccent.opacity(hovering ? 0.84 : 1) : Color.primary.opacity(0.07)))
+            .contentShape(shape)
+            .opacity(configuration.isPressed ? 0.76 : 1)
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: 0.12), value: hovering)
     }
