@@ -95,6 +95,9 @@ if [[ "${ROCKY_SKIP_OFFLINE_BUNDLE:-}" != "1" ]]; then
     "$RESOURCES/runtime/bin/uv" sync --frozen --no-dev --no-editable --python 3.12 --managed-python)
   # Keep downloaded wheels and the build backend; drop only unreferenced entries.
   env UV_CACHE_DIR="$OFFLINE/cache/uv" "$RESOURCES/runtime/bin/uv" cache prune
+  # uv's managed-Python aliases can point at the absolute staging directory.
+  # Convert internal links before shipping; reject references outside the bundle.
+  "$STAGE/sync/.venv/bin/python" "$ROOT/scripts/relativize_bundle.py" "$OFFLINE"
   tar -czf "$RESOURCES/runtime/offline.tar.gz" -C "$OFFLINE" cache runtime
 fi
 plutil -lint "$APP/Contents/Library/LaunchAgents/dev.rocky.agent.plist" >/dev/null
