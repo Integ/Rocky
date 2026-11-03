@@ -2,6 +2,7 @@
 
 当前素材对应 **Rocky v0.3.0**，采用与新版应用一致的黑白灰配色。
 画面是根据已实现功能绘制的流程示意，全部任务内容为合成数据。
+GitHub README 通过封面链接直接下载 MP4，并提供可展开的 GIF 预览。
 旁白沿用中文播音男声音色，由本机 F5-TTS 生成；没有使用用户录音、个人任务或凭据。
 
 | 文件 | 内容 |
@@ -9,10 +10,10 @@
 | [rocky-v0.3-overview.png](rocky-v0.3-overview.png) | 1920 × 1080 项目概览与视频封面 |
 | [rocky-v0.3-tools.png](rocky-v0.3-tools.png) | 文件查找、内容搜索、路径与行号示意 |
 | [rocky-v0.3-execution.png](rocky-v0.3-execution.png) | 独立文件批次、逐文件结果和恢复回执示意 |
-| [rocky-intro-broadcast-male.mp4](rocky-intro-broadcast-male.mp4) | 60 秒介绍，1280 × 720 / 30 fps，H.264、AAC；中文男声、画面字幕和可选字幕轨 |
+| [rocky-intro-broadcast-male.mp4](rocky-intro-broadcast-male.mp4?raw=1) | 60 秒介绍，1280 × 720 / 30 fps，H.264、AAC；中文男声、画面字幕和可选字幕轨 |
 | [rocky-intro.gif](rocky-intro.gif) | 800 × 450 无声预览，按实际分镜时长依次停留 |
 | [rocky-intro.srt](rocky-intro.srt) | 独立 UTF-8 中文字幕 |
-| [rocky-voice-preview.mp3](rocky-voice-preview.mp3) | 前两段旁白试听 |
+| [rocky-voice-preview.mp3](rocky-voice-preview.mp3?raw=1) | 前两段旁白试听 |
 | [voice-generation.json](voice-generation.json) | 模型修订、依赖版本、采样设置和逐段音频摘要 |
 | [voice-profile.json](voice-profile.json) | 音色来源、参考音频摘要及语速设置 |
 | [media-validation.json](media-validation.json) | 视频规格、字幕核对、音量、独立本地转写比对与媒体摘要 |

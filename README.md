@@ -8,17 +8,17 @@ Rocky v0.3 提供黑白灰原生界面、11 项内置工具，以及一轮规划
 从查找资料到保存产物，每一步都有实际结果、执行记录和可恢复的进度。
 
 [下载 v0.3.0](https://github.com/Integ/Rocky/releases/tag/v0.3.0) ·
-[一分钟介绍·播音男声版](docs/media/rocky-intro-broadcast-male.mp4) ·
+[一分钟介绍·MP4 下载](docs/media/rocky-intro-broadcast-male.mp4?raw=1) ·
 [macOS 使用指南](docs/macos.md) ·
 [更新日志](CHANGELOG.md)
 
-[![Rocky v0.3：原生 macOS 任务执行助手，点击观看一分钟介绍](docs/media/rocky-v0.3-overview.png)](docs/media/rocky-intro-broadcast-male.mp4)
+[![Rocky v0.3：原生 macOS 任务执行助手，点击下载一分钟介绍](docs/media/rocky-v0.3-overview.png)](docs/media/rocky-intro-broadcast-male.mp4?raw=1)
 
 ## 一分钟了解 v0.3
 
-▶ [观看一分钟介绍](docs/media/rocky-intro-broadcast-male.mp4)（60 秒，中文播音男声与字幕） ·
-[男声试听](docs/media/rocky-voice-preview.mp3) ·
-[下载字幕](docs/media/rocky-intro.srt)
+▶ [下载一分钟介绍（MP4）](docs/media/rocky-intro-broadcast-male.mp4?raw=1)（60 秒，中文播音男声与字幕） ·
+[男声试听·MP3](docs/media/rocky-voice-preview.mp3?raw=1) ·
+[下载字幕](docs/media/rocky-intro.srt?raw=1)
 
 从确认目标开始，依次展示文件查找、内容搜索、独立文件批次、人工交接、交付审阅与后台执行。
 画面为基于已实现功能绘制的示意，使用合成数据；旁白由本机 F5-TTS 生成。
@@ -27,7 +27,7 @@ Rocky v0.3 提供黑白灰原生界面、11 项内置工具，以及一轮规划
 <details>
 <summary>查看动画预览</summary>
 
-[![Rocky v0.3 一分钟功能介绍动画](docs/media/rocky-intro.gif)](docs/media/rocky-intro-broadcast-male.mp4)
+[![Rocky v0.3 一分钟功能介绍动画](docs/media/rocky-intro.gif)](docs/media/rocky-intro-broadcast-male.mp4?raw=1)
 
 </details>
 
