@@ -32,59 +32,59 @@
   "scenes": [
     {
       "scene": 1,
-      "text": "认识 Rocky，你的本地智能工作伙伴。",
+      "text": "把目标交给 Rocky，让任务持续向前。",
       "seed": 20261102,
       "duration_seconds": 3.409708,
-      "sha256": "235ee4ccb96c9fac61041f3aa6dab51fa041dd20cdbe01d0caee690b65ac5cfa"
+      "sha256": "47166bec4453361e9a8d642767bae1a8f9328ce6a744f19fbdf490a806b6e7b5"
     },
     {
       "scene": 2,
-      "text": "说出目标，核对要求和预算。确认之后，再开始执行。",
+      "text": "说出目标，核对产物、范围和预算。确认之后，开始执行。",
       "seed": 20261103,
-      "duration_seconds": 5.159042,
-      "sha256": "fff9632f8054ded657db755f3619b25c10c7020a9870e8e5a6b36e4ed9fe2ee7"
+      "duration_seconds": 5.681708,
+      "sha256": "08066148d464fd2ed5055e886f1adf6cc17868a6dc4867ec9e972d4df69e9b3b"
     },
     {
       "scene": 3,
-      "text": "关上窗口，任务继续。重启之后，从检查点接着推进。",
+      "text": "查找文件，搜索内容。路径、行号和上下文，让证据更清楚。",
       "seed": 20261104,
-      "duration_seconds": 5.159042,
-      "sha256": "e6f515863bbbfcfa05ba30b3902bd79a3595117c071ffff364db84bda625ddf2"
+      "duration_seconds": 5.852375,
+      "sha256": "1b24355bda6c3bfd4e3d7037a741cf011d911cb25484f648d8fff9226efcc831"
     },
     {
       "scene": 4,
-      "text": "重要决定，由你掌握。批准操作，回答问题，在一处处理。",
+      "text": "一轮规划，修改多个独立文件。逐个保存结果，中断之后继续。",
       "seed": 20261105,
-      "duration_seconds": 5.681708,
-      "sha256": "5e1bdfc4028f71d0fa1ee16a10423b5d8956cd0f3e21b1f7b9bd8a82b9b72a25"
+      "duration_seconds": 5.852375,
+      "sha256": "e801d7a4825b014d721f8bbca087200d43602da792c5d7d1d589cfe4ea0a3849"
     },
     {
       "scene": 5,
-      "text": "大目标，分步推进。定时和事件任务，按你的安排启动。",
+      "text": "需要你时，批准具体操作，回答问题。补充的信息，会纳入执行。",
       "seed": 20261106,
-      "duration_seconds": 5.329708,
-      "sha256": "b14c1735768065eaf74585ab473c71a1723a9f5507a8c041fcdc7d3bee29375f"
+      "duration_seconds": 6.204375,
+      "sha256": "254b81747e11affaca36fe53985336301c6833958ec55b16b5cb5c280b91ff9d"
     },
     {
       "scene": 6,
-      "text": "每轮交付，都有快照。接受结果，或在原任务上继续修改。",
+      "text": "每轮交付，都有核验和快照。接受结果，或者继续提出修改。",
       "seed": 20261107,
-      "duration_seconds": 5.500375,
-      "sha256": "d8a8c5ad855ebcfa1c728f368803fb741a353c34dc35c0210f74104293257cfa"
+      "duration_seconds": 5.681708,
+      "sha256": "556e3f2586afa653b3115c51d856da444d9c8a78380380de7b6b8d05fdeb5578"
     },
     {
       "scene": 7,
-      "text": "进度、预算与执行记录，随时可查。需要时，还能导出诊断包。",
+      "text": "关掉窗口，任务继续。议程、进度和预算，都能随时查看。",
       "seed": 20261108,
-      "duration_seconds": 6.023042,
-      "sha256": "b4287d009b2aa8bf7970ff17197aea0759fe1646d0961d9792c73a957302764b"
+      "duration_seconds": 5.681708,
+      "sha256": "d88ad6f6ffe0f5470681ee4ba5e86c9a2938520df29a4dd3bf98c59b9c203a18"
     },
     {
       "scene": 8,
-      "text": "把目标交给 Rocky，让工作稳步向前。",
+      "text": "下载 Rocky，让工作稳步向前。",
       "seed": 20261109,
-      "duration_seconds": 3.409708,
-      "sha256": "f743c7f0b39138b4cb10c6f70ffb06ece4fb5da53e670a98256e122f71d9c59d"
+      "duration_seconds": 2.897708,
+      "sha256": "002f1f0cb14155a182c29a349a1e3bd08bea5332a09ad526dde8d3583bf94070"
     }
   ]
 }
