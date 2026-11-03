@@ -1,0 +1,80 @@
+{
+  "version": "0.3.0",
+  "date": "2026-11-03",
+  "video": {
+    "duration_seconds": 60.02,
+    "width": 1280,
+    "height": 720,
+    "fps": 30,
+    "codecs": [
+      "h264",
+      "aac",
+      "mov_text"
+    ],
+    "faststart": true
+  },
+  "images": {
+    "rocky-v0.3-overview.png": [
+      1920,
+      1080
+    ],
+    "rocky-v0.3-tools.png": [
+      1920,
+      1080
+    ],
+    "rocky-v0.3-execution.png": [
+      1920,
+      1080
+    ]
+  },
+  "scenes": 8,
+  "text_overflow_checks": true,
+  "narration_text_manifest_matches": true,
+  "caption_text_matches": true,
+  "local_asr": {
+    "model": "mlx-community/whisper-small-mlx",
+    "expected_tokens": 158,
+    "recognized_tokens": 158,
+    "pinyin_without_tones_edit_distance": 0
+  },
+  "audio": {
+    "mean_db": -21.5,
+    "peak_db": -1.9
+  },
+  "assets": {
+    "rocky-intro-broadcast-male.mp4": {
+      "bytes": 4201013,
+      "sha256": "a935caa0d23429dd752ef54ce5c5b3f6b9edbb4a257da446792b5f65e9ae80d9"
+    },
+    "rocky-intro.gif": {
+      "bytes": 283743,
+      "sha256": "c1bb279a0edc7e559f1725d11a76197d4d8b02589fba3d3293e3b9e7b5359ce7"
+    },
+    "rocky-intro.srt": {
+      "bytes": 847,
+      "sha256": "cb7d6de64b8bce128f4c6d531b095790e46328e2c6d30f575828d0aa3ff86e72"
+    },
+    "rocky-voice-preview.mp3": {
+      "bytes": 193004,
+      "sha256": "95ffcf6502648a812786334aebbedba871ef8eb036085197915c758a7623ebf7"
+    },
+    "rocky-v0.3-overview.png": {
+      "bytes": 191699,
+      "sha256": "d798db0cd5a20a8ce488f6ba881f9de302bcb4f1830a439a12465fdb75342eb6"
+    },
+    "rocky-v0.3-tools.png": {
+      "bytes": 190494,
+      "sha256": "0d1ceacda8b2d99968f3d0f2d10c1a1ab5c41c6e2679f809460448cdc8ef18b6"
+    },
+    "rocky-v0.3-execution.png": {
+      "bytes": 195629,
+      "sha256": "2d49e86dee3236753736fed04c0174d1bcf3162aa69a1b378a1f0710160e706c"
+    }
+  },
+  "generation_sources": {
+    "readme_storyboard.json": "6300669ce40d60087a87191ea69e0339d5d328d232172ce375ffb06b9fd54d4f",
+    "render_readme_media.swift": "09b1eed0652bb693c020a1ce00c4fdd0788875dfb4d92bce11f7c05ea9b28822",
+    "build_readme_media.py": "260df5eb65a488b90412375b693cd222214776637d1203e934daf9753d2b5662",
+    "synthesize_readme_narration.py": "71b85308148b46ef29c30a0262fd20285822422813c979b8ce54bb90f2a7c61f"
+  }
+}

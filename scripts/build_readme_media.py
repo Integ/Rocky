@@ -1,4 +1,4 @@
-"""Build the README's v0.2 overview, one-minute narrated tour and GIF on macOS.
+"""Build the README's v0.3 illustrations, one-minute narrated tour and GIF on macOS.
 
 Uses AppKit, local F5-TTS (MLX), and FFmpeg. No remote voice/model API calls.
 Outputs are staged and replace published files only after encoding succeeds.
@@ -322,7 +322,7 @@ def build(work, frames_only=False, audio_only=False, tts_python=sys.executable, 
         "-movflags",
         "+faststart",
         "-metadata",
-        "title=Rocky v0.2 — 从目标到交付",
+        "title=Rocky v0.3 — 从目标到交付",
         "-metadata",
         "comment=功能示意与示例数据；八段中文旁白均由本机 F5-TTS（MLX）生成；非真实任务录屏。",
         str(video),
@@ -341,7 +341,12 @@ def build(work, frames_only=False, audio_only=False, tts_python=sys.executable, 
         "voice-generation.json",
     ):
         shutil.copyfile(work / name, MEDIA / name)
-    shutil.copyfile(work / "scene-00.png", MEDIA / "rocky-v0.2-overview.png")
+    for scene, name in (
+        (0, "rocky-v0.3-overview.png"),
+        (2, "rocky-v0.3-tools.png"),
+        (3, "rocky-v0.3-execution.png"),
+    ):
+        shutil.copyfile(work / f"scene-{scene:02}.png", MEDIA / name)
     print("Published local media files to docs/media.")
 
 

@@ -4,30 +4,49 @@
 
 Rocky 是一个长期运行的自主数字代理。你确认目标、验收标准、执行范围和预算，
 它负责规划下一步、调用工具、核验文件，并在等待、重启和人工反馈之后继续工作。
-**v0.3 新增文件查找、内容搜索和批量文件修改，并改用黑白灰原生界面。**
+Rocky v0.3 提供黑白灰原生界面、11 项内置工具，以及一轮规划中最多 8 个工作区独立文件的修改能力。
+从查找资料到保存产物，每一步都有实际结果、执行记录和可恢复的进度。
 
 [下载 v0.3.0](https://github.com/Integ/Rocky/releases/tag/v0.3.0) ·
-[一分钟介绍·播音男声版](docs/media/rocky-intro-broadcast-male.mp4) ·
+[一分钟介绍·MP4 下载](docs/media/rocky-intro-broadcast-male.mp4?raw=1) ·
 [macOS 使用指南](docs/macos.md) ·
 [更新日志](CHANGELOG.md)
 
-![Rocky v0.2：持续执行、人工交接与版本化交付的功能概览](docs/media/rocky-v0.2-overview.png)
+[![Rocky v0.3：原生 macOS 任务执行助手，点击下载一分钟介绍](docs/media/rocky-v0.3-overview.png)](docs/media/rocky-intro-broadcast-male.mp4?raw=1)
 
-## 一分钟了解 v0.2
+## 一分钟了解 v0.3
 
-▶ [观看新版介绍视频·播音男声](docs/media/rocky-intro-broadcast-male.mp4)（60 秒，F5-TTS 中文播音男声与字幕） ·
-[男声试听](docs/media/rocky-voice-preview.mp3) ·
-[下载字幕](docs/media/rocky-intro.srt)
+▶ [下载一分钟介绍（MP4）](docs/media/rocky-intro-broadcast-male.mp4?raw=1)（60 秒，中文播音男声与字幕） ·
+[男声试听·MP3](docs/media/rocky-voice-preview.mp3?raw=1) ·
+[下载字幕](docs/media/rocky-intro.srt?raw=1)
 
-图片和视频为**功能示意与示例数据，不是真实任务录屏**。从确认任务要求出发，依次展示持续执行、
-“待你处理”、议程、交付历史和执行诊断。[分镜与重新生成方式](docs/media/README.md)。
+从确认目标开始，依次展示文件查找、内容搜索、独立文件批次、人工交接、交付审阅与后台执行。
+画面为基于已实现功能绘制的示意，使用合成数据；旁白由本机 F5-TTS 生成。
+[分镜、音色来源与重新生成方式](docs/media/README.md)。
 
 <details>
 <summary>查看动画预览</summary>
 
-[![Rocky v0.2 一分钟功能介绍动画](docs/media/rocky-intro.gif)](docs/media/rocky-intro-broadcast-male.mp4)
+[![Rocky v0.3 一分钟功能介绍动画](docs/media/rocky-intro.gif)](docs/media/rocky-intro-broadcast-male.mp4?raw=1)
 
 </details>
+
+## v0.3：更快找到证据，更少规划轮次
+
+**先定位，再读取。** `find_files` 按文件名和路径模式定位文件；`search_files` 返回匹配原文、
+行号与上下文。两项工具支持分页和并行只读批次，帮助 Rocky 从代码、日志和资料中找到需要的信息。
+扫描结果会说明完整性、跳过文件和截断原因。
+
+![文件查找与内容搜索示意：匹配文件名，再取得路径、行号和原文](docs/media/rocky-v0.3-tools.png)
+
+**一轮规划，推进多个独立文件。** 任务工作区内最多 8 项文件写入、编辑或追加依次执行，逐文件保存结果和回执。
+已完成的进展可恢复；新消息、审批要求或不确定结果会停止后续修改，交给下一轮重新判断。
+
+![独立文件批次示意：每个文件都有结果、回执和恢复记录](docs/media/rocky-v0.3-execution.png)
+
+本轮真实模型小样本对比中，跨文件重构通过隐藏测试，模型调用从 **9 次降到 6 次**，耗时从
+**82.46 秒降到 53.03 秒**。这组结果反映该次任务，不代表所有任务的提升幅度。
+[查看对比方法与记录](docs/reports/2026-11-03-execution-validation.md)。
 
 ## v0.3 能做什么
 
@@ -210,7 +229,7 @@ macOS 上的 `run_command` 默认通过 `/usr/bin/sandbox-exec -p <按 goal 生�
 
 任务管理 API：`GET /goals` 默认排除存档任务，`GET /goals?archived=true` 查看存档；`POST /goals/{id}/archive` 存档、`POST /goals/{id}/restore` 恢复、`DELETE /goals/{id}` 删除已结束任务及执行记录，并删除其工作区、回执和 Cookie 会话。进行中、休眠和等待输入的任务不能存档或删除。
 
-v0.2 交接与交付 API：`POST /goals/{id}/answer` 使用具体 `question_id` 回答当前问题；
+交接与交付 API：`POST /goals/{id}/answer` 使用具体 `question_id` 回答当前问题；
 `GET /goals/{id}/messages` 返回补充消息的保存、送达与纳入执行状态。
 `GET /goals/{id}/deliveries` 分页读取交付历史；向 `POST /goals/{id}/deliveries/{revision}/review`
 提交 `action: "accept"` 或 `action: "request_changes"`（附 `feedback`），审阅决定绑定具体版本。
@@ -222,7 +241,7 @@ v0.2 交接与交付 API：`POST /goals/{id}/answer` 使用具体 `question_id` 
 
 ## 运行状态、备份与令牌
 
-- v0.2 可通过 `GET /goals/{id}/diagnostics` 和 `GET /model-queue` 查看执行阶段、预算与模型队列；`GET /prompt-modules`、`GET /goals/{id}/prompts` 查看内置指导与任务使用的提示词版本。
+- 可通过 `GET /goals/{id}/diagnostics` 和 `GET /model-queue` 查看执行阶段、预算与模型队列；`GET /prompt-modules`、`GET /goals/{id}/prompts` 查看内置指导与任务使用的提示词版本。
 - `GET /storage` 返回工作区、交付快照、任务数据、数据库、备份与日志的占用估算；`GET /diagnostics/export` 下载脱敏诊断 ZIP。诊断包不包含任务内容、路径、原始日志、模型配置或凭据，也不会自动上传；它不是恢复备份。
 - `GET /health` 只表示 API 活着；`GET /status`（需令牌）给出执行进程心跳、Temporal 连通性、各状态任务数、待派发任务和待送达指令、待审批数、磁盘剩余空间、最近备份和问题列表；`GET /metrics` 以 Prometheus 文本格式输出同样的数字。`rocky status` 打印 `/status`。客户端“设置 → 运行状态与备份”显示这些信息。
 - `rocky serve` 每 `ROCKY_BACKUP_INTERVAL_HOURS`（默认 24，0 关闭）小时在 `ROCKY_BACKUP_DIR`（默认数据库旁的 `backups/`，应用里是 `~/Library/Application Support/Rocky/backups`）写一份备份，保留最近 `ROCKY_BACKUP_KEEP`（默认 7）份。备份是一个私有 `.tar.gz`：Rocky 和 Temporal 的 SQLite 数据库用 SQLite 在线备份接口取一致快照，任务工作区原样打包，跳过 `.venv`、`node_modules`、`__pycache__`、`.cache` 和浏览器配置；不含 API 密钥（在钥匙串里）和 API 令牌。`rocky backup`、`POST /backups` 或客户端“立即备份”随时备份，`rocky backups` 列出。备份目录对文件工具和沙箱命令不可见。
