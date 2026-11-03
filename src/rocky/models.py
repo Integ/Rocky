@@ -1,6 +1,7 @@
 """Shared API and durable workflow contracts; no I/O in this module."""
 
 import json
+import unicodedata
 from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal, get_args
 
@@ -19,9 +20,12 @@ ToolName = Literal[
     "append_file",
     "edit_file",
     "browse",
+    "find_files",
+    "search_files",
 ]
 TOOL_NAMES = get_args(ToolName)
 MAX_PARALLEL_ACTIONS = 8
+FILE_BATCH_TOOLS = ("write_file", "edit_file", "append_file")
 DEFAULT_COMMAND_SECONDS = 30
 MAX_COMMAND_SECONDS = 900
 SAFE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -176,7 +180,7 @@ def read_only_action(action: Action) -> bool:
     Downloads (an HTTP action with a path) write a local file and are excluded.
     Unparseable HTTP options are not read-only; validation reports them later.
     """
-    if action.tool in {"read_file", "list_files"}:
+    if action.tool in {"read_file", "list_files", "find_files", "search_files"}:
         return True
     if action.tool not in {"fetch_url", "http_request"} or action.path is not None:
         return False
@@ -188,6 +192,40 @@ def read_only_action(action: Action) -> bool:
         return False
     method = options.get("method", "GET")
     return isinstance(method, str) and method.upper() in SAFE_HTTP_METHODS
+
+
+def workspace_file_batch(actions: list[Action]) -> bool:
+    """Independent relative file mutations; actual access stays with the tools.
+
+    Conservatively reject case/Unicode aliases and parent/child collisions on
+    macOS. Symlinks are resolved by each tool, so writes run in order, not in
+    parallel. This check neither grants access nor makes a batch atomic.
+    """
+    if not 1 <= len(actions) <= MAX_PARALLEL_ACTIONS:
+        return False
+    paths: list[tuple[str, ...]] = []
+    for action in actions:
+        value = action.path
+        if (
+            action.tool not in FILE_BATCH_TOOLS
+            or not value
+            or action.content is None
+            or action.url is not None
+            or not action.sandbox
+            or action.timeout_seconds is not None
+            or action.background is not None
+            or "\\" in value
+            or any(ord(c) < 32 for c in value)
+        ):
+            return False
+        path = PurePosixPath(value)
+        if path.is_absolute() or not path.parts or ".." in path.parts:
+            return False
+        parts = tuple(unicodedata.normalize("NFC", part).casefold() for part in path.parts)
+        if any(parts[: len(other)] == other or other[: len(parts)] == parts for other in paths):
+            return False
+        paths.append(parts)
+    return True
 
 
 ProgressItem = Annotated[str, StringConstraints(min_length=1, max_length=240)]
@@ -231,7 +269,7 @@ class Decision(Model):
     reason: str = Field(max_length=2000)
     question: OwnerQuestion | None = None
     action: Action | None = None
-    # Independent read-only actions dispatched concurrently in one step.
+    # Independent reads (concurrent), or workspace file mutations (in order).
     actions: list[Action] | None = Field(default=None, max_length=MAX_PARALLEL_ACTIONS)
     wait_seconds: int | None = None
     handoff_summary: str | None = Field(default=None, max_length=4000)
@@ -361,6 +399,8 @@ class PlanInput(Model):
     # Owner approval rules in effect, added by the planning Activity.
     approvals: dict[str, Any] = Field(default_factory=dict)
     interactive: bool = False
+    # Workflow-version gated: old histories retain their original validator.
+    file_batches: bool = False
 
 
 class PlanResult(Model):

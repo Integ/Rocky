@@ -1,0 +1,463 @@
+{
+  "date": "2026-11-03",
+  "model": "gpt-6.1-sol",
+  "provider": "openai",
+  "base_url": "https://api.openai.com/v1",
+  "approval_mode": "auto",
+  "repeat": 1,
+  "limits": {
+    "max_steps": 16,
+    "max_model_calls": 20,
+    "max_tokens": 70000,
+    "timeout_seconds": 240
+  },
+  "baseline_source_manifest": {
+    "src/rocky/activities.py": "f5af7023c05b0697ae111eb491479f9ac89249d3e6102674d52acb8735787c80",
+    "src/rocky/prompt_archive.py": "1927ac05914993928ebbaba06f5f7814c2f60aec4d9879f060a1caf1e7aedacc",
+    "src/rocky/store.py": "f308b231e83635d37c2eb0926b467ce30fb81fb81aad78463bdf0abed8c1ac67",
+    "src/rocky/planner.py": "13868835b53d24dffb7ff4d4e1cd81d960ccf3869e613bc86ed3090c7404995d",
+    "src/rocky/service.py": "347b03bca0ec2fce965bb6cf55c5f7daba32a35a83b4f438a0429bbedad1d1c8",
+    "src/rocky/agenda.py": "f36d88005759b007ec754936a7c2d3f318e98c4538ff13ff2667b89d85a96ead",
+    "src/rocky/backup.py": "962518e192d9d2775e0b517622d713a615cd9f6a93554d03b20f9d94df45c084",
+    "src/rocky/command_policy.py": "36c9102f325b5eb87552ce0b7e412009bdb742ff7d03cc84550c229c57017bbd",
+    "src/rocky/harness.py": "f0105b651ec22d213d4f68648decee7b47da374feaad066e13bf8394720f0519",
+    "src/rocky/config.py": "c1512ff79ab2f62cbbce202c3aef924328160dfd7da2e20423c8eff1b62e7f1d",
+    "src/rocky/triggers.py": "cd60dbaf494903ec83f8c335e67b540b0bf5c43745111ecc45a021f9acb16246",
+    "src/rocky/models.py": "a192cd2c33d381b6c190f9c80c7694ece2ad7271e1ea5e4904cd4a3a096d253c",
+    "src/rocky/memory.py": "6e3452cf05644e356276e611cc4e121a5008fd1440a49d237c01494d2a318804",
+    "src/rocky/tool_contracts.py": "1790ca8510914c2e4375c2d7a647dd14d591775a7e719a2f3f44ba6640158517",
+    "src/rocky/credentials.py": "68d51f795ca3642f5b8407e8d15369b0b8194d80de24af95d230450bec39296e",
+    "src/rocky/supervisor.py": "9e3ba31b2a3fa5e193ebf95511cacc34e163a23dfe120fd87e175a5d761225eb",
+    "src/rocky/file_locks.py": "177276ac1f9e9ce15329ce3da97e9378173a919a9491e8743659a4054e4b5292",
+    "src/rocky/http_tools.py": "22f2a70cd66d221114c6931b7fbddddd7e1660633771062b950c42ccae670d9e",
+    "src/rocky/diagnostics.py": "a2ec44c89b9b51922a026fea9b6cc9ae2122305d63c79b9d71a9df7f18d9c616",
+    "src/rocky/monitoring.py": "7c7ab4385d4611f11ecbc9cd47159acca1ea19078e6e97f654e4165425e4f00f",
+    "src/rocky/evaluation.py": "86f071c8c694ccdbcbd2b662971afeaf4cb3bcf4dd4515eb877f337468b47bd2",
+    "src/rocky/tools.py": "83f101e9402d3c08ea0dde6e42edd8c10f545183619f64b48e05b028c6760625",
+    "src/rocky/support_bundle.py": "5c6e0edc363592260930338625abea814402fb619c5308de93fc9d185f27d847",
+    "src/rocky/__init__.py": "1d726d81a6237ead879c143c6ecd64ca31eaba674a8da3e36b8f401b92af6ec5",
+    "src/rocky/seatbelt.py": "f3666ea9736d21aee1dc21166e573dc78eeb973b6ba4575997304c2057331c91",
+    "src/rocky/contract_check.py": "ade76051f4eb1cc240fa11be74bde1d863b66079fe1d5a062931989083889570",
+    "src/rocky/prompts.py": "4b73c225b040c6a95b440ee8a513ecc158773138ebf8a70bb428b9fa636095ae",
+    "src/rocky/browser.py": "05dd0277743b0236c738fb890407435d9054dd9dd324c53fd15bd15b2b853e0d",
+    "src/rocky/api.py": "608cd3b1f1fe76c6382947054a81180769181a4393b2e27209440fa0b5d40736",
+    "src/rocky/providers.py": "35d317e7f82db73a3c8054932f1f366de5fb4d1ed28190862231160d5394cb1f",
+    "src/rocky/model_queue.py": "4702336cc3ef74026f8b99c8bc20c50863538adad7cb2a533e558f24a92b7e46",
+    "src/rocky/cli.py": "c6ee0978e68f512c71bd138c6843f04ea6401840df54546e0fd7051a478f6e4a",
+    "src/rocky/storage.py": "64752a9ba3729b329ca83ce7eb4e31c28c9254ad1f15624ef1f5919fb637a15b",
+    "src/rocky/network.py": "1bd028092a5fe08c0d5eaa1b8f1deb8e714a3b219155e40917d6036936c9047d",
+    "src/rocky/agenda_runner.py": "c55754f6c8b8debd216d16f37606b6e22f9321ddfaa6d9566f56179c3eb70463",
+    "src/rocky/inference.py": "1730488b8077f8dfecb2db3454cb154c6728e6b9506e18a0b9b17bfb702f803b",
+    "src/rocky/workflow.py": "1a3b4927f7903c18dd5f104c4adf2e9404532c9ac93ea262e05642aee722bfe7",
+    "src/rocky/approval_policy.py": "b8fb87a767d70f2129200888c3586f6d4eb3310891fbe16e1e7abe0433a7c6a2",
+    "src/rocky/deliveries.py": "f759ef7fba3959469864849c7a83708f3ae8aeb0d9e410ed2e945b47bc03e66c",
+    "src/rocky/evidence.py": "b25299f169ad0bdcb12b08936d8d9ca2b848931279c91f8c4c86dc72b04a87c8",
+    "src/rocky/artifact_archive.py": "f80ed3eff7d55d3c1f0a75d07071057746d78c89cb041624c6867a17eed2f147",
+    "src/rocky/prompt_modules/decomposition.md": "a220a0bc4c24d8582bec5f16fc4bed16fd1446216fa995f251853780534fd653",
+    "src/rocky/prompt_modules/reviewer.md": "d91daf669407f99e701e38739c3d24689e19a91fc5a0e197db692eec5dbd0608",
+    "src/rocky/prompt_modules/revision.md": "c94d192e385924f256d786dcc63f0b7f142bb077c855742c2d610d20c3283966",
+    "src/rocky/prompt_modules/tools-scoped.md": "266f51c949bc04c0d1e35fd1963a2aa69a2ec3a5b8bbf953294c305d04361635",
+    "src/rocky/prompt_modules/contract.md": "4286548c8096a2f761016f0eb54ceae4e88a24f9593a97ef861fa633df0d0d29",
+    "src/rocky/prompt_modules/coding.md": "68cf9c0320ca02990976ba43899205f765ead6b5473c752d7d32f8b1afc6c78b",
+    "src/rocky/prompt_modules/research.md": "448710a4bc1dc2a098ca24c56222b6af00265a09a7579ba8ee627beb4c10eb73",
+    "src/rocky/prompt_modules/tools-full.md": "43a9be5e0698a98f8d6a41f6377bfd33350434775a0d534eaf92828a16ef9051",
+    "src/rocky/prompt_modules/planner.md": "473350ecdf39e54178f97473036df944ef9517ff54bcf86788bee61abf252ab6"
+  },
+  "candidate_source_manifest": {
+    "src/rocky/activities.py": "f5af7023c05b0697ae111eb491479f9ac89249d3e6102674d52acb8735787c80",
+    "src/rocky/prompt_archive.py": "1927ac05914993928ebbaba06f5f7814c2f60aec4d9879f060a1caf1e7aedacc",
+    "src/rocky/store.py": "f308b231e83635d37c2eb0926b467ce30fb81fb81aad78463bdf0abed8c1ac67",
+    "src/rocky/planner.py": "3b1f1aeb46e7a0cadfd5e7c54a12ee2e4a6198b8be4bb52748bbaf83cb02a8d3",
+    "src/rocky/service.py": "347b03bca0ec2fce965bb6cf55c5f7daba32a35a83b4f438a0429bbedad1d1c8",
+    "src/rocky/agenda.py": "f36d88005759b007ec754936a7c2d3f318e98c4538ff13ff2667b89d85a96ead",
+    "src/rocky/backup.py": "962518e192d9d2775e0b517622d713a615cd9f6a93554d03b20f9d94df45c084",
+    "src/rocky/command_policy.py": "36c9102f325b5eb87552ce0b7e412009bdb742ff7d03cc84550c229c57017bbd",
+    "src/rocky/harness.py": "f0105b651ec22d213d4f68648decee7b47da374feaad066e13bf8394720f0519",
+    "src/rocky/config.py": "c1512ff79ab2f62cbbce202c3aef924328160dfd7da2e20423c8eff1b62e7f1d",
+    "src/rocky/triggers.py": "cd60dbaf494903ec83f8c335e67b540b0bf5c43745111ecc45a021f9acb16246",
+    "src/rocky/models.py": "68cc2b8c9dda753e79f9d54763df10ee81b96c574a961b1f38f9a9d4ca01d493",
+    "src/rocky/memory.py": "6e3452cf05644e356276e611cc4e121a5008fd1440a49d237c01494d2a318804",
+    "src/rocky/tool_contracts.py": "1790ca8510914c2e4375c2d7a647dd14d591775a7e719a2f3f44ba6640158517",
+    "src/rocky/credentials.py": "68d51f795ca3642f5b8407e8d15369b0b8194d80de24af95d230450bec39296e",
+    "src/rocky/supervisor.py": "9e3ba31b2a3fa5e193ebf95511cacc34e163a23dfe120fd87e175a5d761225eb",
+    "src/rocky/file_locks.py": "177276ac1f9e9ce15329ce3da97e9378173a919a9491e8743659a4054e4b5292",
+    "src/rocky/http_tools.py": "22f2a70cd66d221114c6931b7fbddddd7e1660633771062b950c42ccae670d9e",
+    "src/rocky/diagnostics.py": "a2ec44c89b9b51922a026fea9b6cc9ae2122305d63c79b9d71a9df7f18d9c616",
+    "src/rocky/monitoring.py": "7c7ab4385d4611f11ecbc9cd47159acca1ea19078e6e97f654e4165425e4f00f",
+    "src/rocky/evaluation.py": "86f071c8c694ccdbcbd2b662971afeaf4cb3bcf4dd4515eb877f337468b47bd2",
+    "src/rocky/tools.py": "83f101e9402d3c08ea0dde6e42edd8c10f545183619f64b48e05b028c6760625",
+    "src/rocky/support_bundle.py": "5c6e0edc363592260930338625abea814402fb619c5308de93fc9d185f27d847",
+    "src/rocky/__init__.py": "1d726d81a6237ead879c143c6ecd64ca31eaba674a8da3e36b8f401b92af6ec5",
+    "src/rocky/seatbelt.py": "f3666ea9736d21aee1dc21166e573dc78eeb973b6ba4575997304c2057331c91",
+    "src/rocky/contract_check.py": "ade76051f4eb1cc240fa11be74bde1d863b66079fe1d5a062931989083889570",
+    "src/rocky/prompts.py": "4b73c225b040c6a95b440ee8a513ecc158773138ebf8a70bb428b9fa636095ae",
+    "src/rocky/browser.py": "05dd0277743b0236c738fb890407435d9054dd9dd324c53fd15bd15b2b853e0d",
+    "src/rocky/api.py": "608cd3b1f1fe76c6382947054a81180769181a4393b2e27209440fa0b5d40736",
+    "src/rocky/providers.py": "35d317e7f82db73a3c8054932f1f366de5fb4d1ed28190862231160d5394cb1f",
+    "src/rocky/model_queue.py": "4702336cc3ef74026f8b99c8bc20c50863538adad7cb2a533e558f24a92b7e46",
+    "src/rocky/cli.py": "c6ee0978e68f512c71bd138c6843f04ea6401840df54546e0fd7051a478f6e4a",
+    "src/rocky/storage.py": "64752a9ba3729b329ca83ce7eb4e31c28c9254ad1f15624ef1f5919fb637a15b",
+    "src/rocky/network.py": "1bd028092a5fe08c0d5eaa1b8f1deb8e714a3b219155e40917d6036936c9047d",
+    "src/rocky/agenda_runner.py": "c55754f6c8b8debd216d16f37606b6e22f9321ddfaa6d9566f56179c3eb70463",
+    "src/rocky/inference.py": "1730488b8077f8dfecb2db3454cb154c6728e6b9506e18a0b9b17bfb702f803b",
+    "src/rocky/workflow.py": "1c37262b901dd2a288ac686f5599712e85cb0f04e8f1c270d1568479f2a2d2e6",
+    "src/rocky/approval_policy.py": "b8fb87a767d70f2129200888c3586f6d4eb3310891fbe16e1e7abe0433a7c6a2",
+    "src/rocky/deliveries.py": "f759ef7fba3959469864849c7a83708f3ae8aeb0d9e410ed2e945b47bc03e66c",
+    "src/rocky/evidence.py": "b25299f169ad0bdcb12b08936d8d9ca2b848931279c91f8c4c86dc72b04a87c8",
+    "src/rocky/artifact_archive.py": "f80ed3eff7d55d3c1f0a75d07071057746d78c89cb041624c6867a17eed2f147",
+    "src/rocky/prompt_modules/decomposition.md": "a220a0bc4c24d8582bec5f16fc4bed16fd1446216fa995f251853780534fd653",
+    "src/rocky/prompt_modules/reviewer.md": "d91daf669407f99e701e38739c3d24689e19a91fc5a0e197db692eec5dbd0608",
+    "src/rocky/prompt_modules/revision.md": "c94d192e385924f256d786dcc63f0b7f142bb077c855742c2d610d20c3283966",
+    "src/rocky/prompt_modules/tools-scoped.md": "266f51c949bc04c0d1e35fd1963a2aa69a2ec3a5b8bbf953294c305d04361635",
+    "src/rocky/prompt_modules/contract.md": "4286548c8096a2f761016f0eb54ceae4e88a24f9593a97ef861fa633df0d0d29",
+    "src/rocky/prompt_modules/coding.md": "a2e07b54a48e2a41932ffe4cc734b9558fb33cc85308e1016de1d8912cf4d320",
+    "src/rocky/prompt_modules/research.md": "448710a4bc1dc2a098ca24c56222b6af00265a09a7579ba8ee627beb4c10eb73",
+    "src/rocky/prompt_modules/tools-full.md": "43a9be5e0698a98f8d6a41f6377bfd33350434775a0d534eaf92828a16ef9051",
+    "src/rocky/prompt_modules/planner.md": "bb244d1a27d084c49e03a5e2dae2bd73f1b40491d2f812f62f6cc673d2fe2a89"
+  },
+  "baseline": [
+    {
+      "task": "csv-summary",
+      "passed": true,
+      "outcome": "succeeded",
+      "steps": 4,
+      "model_calls": 5,
+      "tokens": 33650,
+      "wall_seconds": 35.15,
+      "approvals": 1,
+      "tool_calls": 3,
+      "duplicate_actions": 0,
+      "false_success": false,
+      "checks": [
+        {
+          "check": "outcome is succeeded",
+          "passed": true,
+          "detail": "outcome: succeeded"
+        },
+        {
+          "check": "summary.json /row_count == 180",
+          "passed": true,
+          "detail": "actual: 180"
+        },
+        {
+          "check": "summary.json /total_revenue == 68934.4",
+          "passed": true,
+          "detail": "actual: 68934.4"
+        },
+        {
+          "check": "summary.json /revenue_by_region/North == 22773.62",
+          "passed": true,
+          "detail": "actual: 22773.62"
+        },
+        {
+          "check": "summary.json /revenue_by_region/South == 15876.24",
+          "passed": true,
+          "detail": "actual: 15876.24"
+        },
+        {
+          "check": "summary.json /revenue_by_region/East == 21190.14",
+          "passed": true,
+          "detail": "actual: 21190.14"
+        },
+        {
+          "check": "summary.json /revenue_by_region/West == 9094.4",
+          "passed": true,
+          "detail": "actual: 9094.4"
+        },
+        {
+          "check": "summary.json /top_product_by_units == 'Widget'",
+          "passed": true,
+          "detail": "actual: \"Widget\""
+        }
+      ]
+    },
+    {
+      "task": "missing-info",
+      "passed": true,
+      "outcome": "blocked",
+      "steps": 2,
+      "model_calls": 2,
+      "tokens": 10831,
+      "wall_seconds": 12.68,
+      "approvals": 0,
+      "tool_calls": 2,
+      "duplicate_actions": 0,
+      "false_success": false,
+      "checks": [
+        {
+          "check": "outcome is blocked",
+          "passed": true,
+          "detail": "outcome: blocked"
+        },
+        {
+          "check": "stop reason matches /(?i)\\bQ3\\b/",
+          "passed": true,
+          "detail": ""
+        },
+        {
+          "check": "stop reason matches /(?i)target|approv/",
+          "passed": true,
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "task": "rename-across-files",
+      "passed": true,
+      "outcome": "succeeded",
+      "steps": 8,
+      "model_calls": 9,
+      "tokens": 64818,
+      "wall_seconds": 82.46,
+      "approvals": 2,
+      "tool_calls": 13,
+      "duplicate_actions": 4,
+      "false_success": false,
+      "checks": [
+        {
+          "check": "outcome is succeeded",
+          "passed": true,
+          "detail": "outcome: succeeded"
+        },
+        {
+          "check": "command: {python} -m unittest -q test_hidden_shop",
+          "passed": true,
+          "detail": "exit 0"
+        },
+        {
+          "check": "shop/checkout.py does not match /calc_total/",
+          "passed": true,
+          "detail": ""
+        },
+        {
+          "check": "shop/receipts.py does not match /calc_total/",
+          "passed": true,
+          "detail": ""
+        }
+      ]
+    }
+  ],
+  "candidate": [
+    {
+      "task": "csv-summary",
+      "passed": true,
+      "outcome": "succeeded",
+      "steps": 3,
+      "model_calls": 4,
+      "tokens": 27366,
+      "wall_seconds": 29.43,
+      "approvals": 1,
+      "tool_calls": 2,
+      "duplicate_actions": 0,
+      "false_success": false,
+      "checks": [
+        {
+          "check": "outcome is succeeded",
+          "passed": true,
+          "detail": "outcome: succeeded"
+        },
+        {
+          "check": "summary.json /row_count == 180",
+          "passed": true,
+          "detail": "actual: 180"
+        },
+        {
+          "check": "summary.json /total_revenue == 68934.4",
+          "passed": true,
+          "detail": "actual: 68934.4"
+        },
+        {
+          "check": "summary.json /revenue_by_region/North == 22773.62",
+          "passed": true,
+          "detail": "actual: 22773.62"
+        },
+        {
+          "check": "summary.json /revenue_by_region/South == 15876.24",
+          "passed": true,
+          "detail": "actual: 15876.24"
+        },
+        {
+          "check": "summary.json /revenue_by_region/East == 21190.14",
+          "passed": true,
+          "detail": "actual: 21190.14"
+        },
+        {
+          "check": "summary.json /revenue_by_region/West == 9094.4",
+          "passed": true,
+          "detail": "actual: 9094.4"
+        },
+        {
+          "check": "summary.json /top_product_by_units == 'Widget'",
+          "passed": true,
+          "detail": "actual: \"Widget\""
+        }
+      ]
+    },
+    {
+      "task": "missing-info",
+      "passed": true,
+      "outcome": "blocked",
+      "steps": 2,
+      "model_calls": 2,
+      "tokens": 11077,
+      "wall_seconds": 11.17,
+      "approvals": 0,
+      "tool_calls": 2,
+      "duplicate_actions": 0,
+      "false_success": false,
+      "checks": [
+        {
+          "check": "outcome is blocked",
+          "passed": true,
+          "detail": "outcome: blocked"
+        },
+        {
+          "check": "stop reason matches /(?i)\\bQ3\\b/",
+          "passed": true,
+          "detail": ""
+        },
+        {
+          "check": "stop reason matches /(?i)target|approv/",
+          "passed": true,
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "task": "rename-across-files",
+      "passed": true,
+      "outcome": "succeeded",
+      "steps": 5,
+      "model_calls": 6,
+      "tokens": 40696,
+      "wall_seconds": 53.03,
+      "approvals": 1,
+      "tool_calls": 11,
+      "duplicate_actions": 0,
+      "false_success": false,
+      "checks": [
+        {
+          "check": "outcome is succeeded",
+          "passed": true,
+          "detail": "outcome: succeeded"
+        },
+        {
+          "check": "command: {python} -m unittest -q test_hidden_shop",
+          "passed": true,
+          "detail": "exit 0"
+        },
+        {
+          "check": "shop/checkout.py does not match /calc_total/",
+          "passed": true,
+          "detail": ""
+        },
+        {
+          "check": "shop/receipts.py does not match /calc_total/",
+          "passed": true,
+          "detail": ""
+        }
+      ]
+    }
+  ],
+  "checks": {
+    "python_suite": "1365 passed, 3 skipped",
+    "file_batch_suite": "27 passed",
+    "legacy_history_replay": true,
+    "ruff_check": true,
+    "ruff_format": true,
+    "git_diff_check": true,
+    "legacy_history_sha256": "77b74057ac2fbe879d5086aff45a7fd2753ebc72d0a2ed2b9b9f5131cd1e3657",
+    "legacy_history_behavior": "Pre-upgrade mutating batch rejected, zero writes; same history replays after upgrade.",
+    "bundled_sources_match": true
+  },
+  "limitations": [
+    "One sample per task; the comparison does not establish a general completion-rate improvement.",
+    "Wall-clock includes provider and cache variability.",
+    "Approvals auto mode is isolated to the evaluation; installed user policy is unchanged."
+  ],
+  "candidate_file_batches": [
+    {
+      "step_id": "e117a32a2f3d4ffbb01a84b205807742:3:act",
+      "status": "completed",
+      "actions": [
+        {
+          "tool": "write_file",
+          "path": "shop/cart.py"
+        },
+        {
+          "tool": "edit_file",
+          "path": "shop/__init__.py"
+        },
+        {
+          "tool": "edit_file",
+          "path": "shop/checkout.py"
+        },
+        {
+          "tool": "edit_file",
+          "path": "shop/receipts.py"
+        },
+        {
+          "tool": "write_file",
+          "path": "test_shop.py"
+        }
+      ],
+      "results": [
+        {
+          "path": "shop/cart.py",
+          "success": true
+        },
+        {
+          "path": "shop/__init__.py",
+          "success": true
+        },
+        {
+          "path": "shop/checkout.py",
+          "success": true
+        },
+        {
+          "path": "shop/receipts.py",
+          "success": true
+        },
+        {
+          "path": "test_shop.py",
+          "success": true
+        }
+      ]
+    }
+  ],
+  "native_smoke": {
+    "goal_id": "a130a427-3e51-4c25-baec-4aee71c67beb",
+    "status": "succeeded",
+    "steps": 3,
+    "model_calls": 4,
+    "tokens": 22397,
+    "build_id": "153D07EF-CB29-4962-92D5-B43C35A165FA",
+    "artifacts": [
+      {
+        "path": "README.md",
+        "exact_content": true,
+        "bytes": 65,
+        "sha256": "115bdabeb3fc92cd4df59953d24c9c3e54c5f45310eb9ead3efc003b467dc7e1"
+      },
+      {
+        "path": "notes/brief.md",
+        "exact_content": true,
+        "bytes": 46,
+        "sha256": "2ca5d6669ed0904ca1596e2ecc11d81009cdce7bc635164d5c7f6cc6a6c0dc85"
+      },
+      {
+        "path": "notes/checklist.md",
+        "exact_content": true,
+        "bytes": 69,
+        "sha256": "8c8504acd52f89777572011c4e73046483ebd2bb7dd3294f4f9df51210155695"
+      },
+      {
+        "path": "notes/decisions.md",
+        "exact_content": true,
+        "bytes": 49,
+        "sha256": "13141b7cbb484493b67ebbc23dea32f1681583071f5c470eaf64c7e20ad9b4d8"
+      }
+    ],
+    "accepted_in_native_ui": true
+  }
+}

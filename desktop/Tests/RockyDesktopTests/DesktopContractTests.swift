@@ -162,7 +162,14 @@ final class DesktopContractTests: XCTestCase {
         XCTAssertNil(encoded["deadline_seconds"])
     }
 
-    private static let fullTools = ["read_file", "write_file", "list_files", "fetch_url", "http_request", "run_command", "append_file", "edit_file", "browse"]
+    func testSearchToolsHaveReadableLabels() {
+        let find = ToolObservation(step: 1, tool: "find_files", success: true, content: "", progress_key: nil)
+        let search = ToolObservation(step: 1, tool: "search_files", success: true, content: "", progress_key: nil)
+        XCTAssertEqual(find.toolLabel, "查找文件")
+        XCTAssertEqual(search.toolLabel, "搜索内容")
+    }
+
+    private static let fullTools = ["read_file", "write_file", "list_files", "fetch_url", "http_request", "run_command", "append_file", "edit_file", "browse", "find_files", "search_files"]
 
     static let goalJSON = #"""
     {

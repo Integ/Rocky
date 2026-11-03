@@ -231,7 +231,9 @@ class Activities:
 
     def review_evidence(self, run: RunInput) -> dict:
         steps = self.store.all_execution_steps(run.goal_id)
-        return collect_review_evidence(run, steps, self.tools)
+        return collect_review_evidence(
+            run, steps, self.tools, owner_messages=self.store.goal_messages(run.goal_id)
+        )
 
     @activity.defn(name="rocky.persist")
     async def persist(self, state: RunState) -> None:

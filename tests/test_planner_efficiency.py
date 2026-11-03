@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import httpx
+import openai
 import pytest
 from pydantic import ValidationError
 from temporalio.exceptions import ApplicationError
@@ -166,6 +167,42 @@ async def test_client_errors_are_not_retried():
         with pytest.raises(PlannerError) as error:
             await planner.plan(request_with_settings(provider("anthropic")))
     assert not isinstance(error.value, TransientModelError)
+
+
+@pytest.mark.parametrize("adapter", ["http", "sdk"])
+@pytest.mark.parametrize(
+    "status,upstream_code,code,retry",
+    [
+        (401, "invalid_api_key", "authentication_failed", False),
+        (403, "permission_denied", "model_access_denied", False),
+        (404, "model_not_found", "model_access_denied", False),
+        (429, "insufficient_quota", "quota_exceeded", False),
+        (429, "rate_limit_exceeded", "rate_limited", True),
+        (503, "service_unavailable", "provider_unavailable", True),
+    ],
+)
+async def test_provider_errors_have_safe_categories_and_quota_is_not_retried(
+    adapter, status, upstream_code, code, retry
+):
+    body = {"error": {"code": upstream_code, "message": "secret-key-and-request-data"}}
+    if adapter == "http":
+        planner, http = http_planner(lambda request: httpx.Response(status, json=body))
+        async with http:
+            with pytest.raises(PlannerError) as error:
+                await planner.plan(request_with_settings(provider("openai-compatible")))
+    else:
+        response = httpx.Response(
+            status, json=body, request=httpx.Request("POST", "https://api.openai.com/v1/responses")
+        )
+        client = fake_client(None)
+        client.responses.parse.side_effect = openai.APIStatusError(
+            "secret-key-and-request-data", response=response, body=body
+        )
+        with pytest.raises(PlannerError) as error:
+            await OpenAIPlanner(Settings(), client=client).plan(goal_request())
+    assert error.value.code == code
+    assert isinstance(error.value, TransientModelError) is retry
+    assert "secret-key-and-request-data" not in str(error.value)
 
 
 @pytest.mark.parametrize("name", ["anthropic", "openai-compatible"])

@@ -11,6 +11,7 @@ import json
 import httpx
 
 from rocky.browser import interactive, parse_browse_options
+from rocky.file_search import SearchOptionsError, parse_search_options
 from rocky.http_tools import HTTPToolError, _request_options
 from rocky.models import SAFE_HTTP_METHODS, Action, ToolInput
 
@@ -184,7 +185,11 @@ def validate_action(action: Action, *, full_access: bool) -> dict | None:
         raise ActionValidationError(
             "path must be text without NUL characters; choose a valid path."
         )
-    if action.tool in {"read_file", "write_file", "append_file", "edit_file"} and not action.path:
+    if (
+        action.tool
+        in {"read_file", "write_file", "append_file", "edit_file", "find_files", "search_files"}
+        and not action.path
+    ):
         raise ActionValidationError(
             f"{action.tool} requires path; supply the file to read or change."
         )
@@ -208,6 +213,16 @@ def validate_action(action: Action, *, full_access: bool) -> dict | None:
         raise ActionValidationError(
             f"{action.tool} does not accept timeout_seconds or background; set them to null."
         )
+    if action.tool in {"find_files", "search_files"}:
+        try:
+            options = parse_search_options(action.tool, action.content)
+        except SearchOptionsError as exc:
+            raise ActionValidationError(str(exc)) from None
+        if not full_access and options["include_hidden"]:
+            raise ActionValidationError(
+                "Scoped searches cannot include hidden files; use include_hidden=false."
+            )
+        return options
     if action.tool == "run_command":
         if not action.content or not action.content.strip() or "\x00" in action.content:
             raise ActionValidationError(

@@ -129,7 +129,7 @@ struct ApprovalsView: View {
                 Button("完成") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("拒绝所选") { answer(approve: false) }.buttonStyle(.bordered)
                     .disabled(selectedItems.isEmpty || working || !model.isConnected)
-                Button("批准所选") { answer(approve: true) }.buttonStyle(.borderedProminent)
+                Button("批准所选") { answer(approve: true) }.buttonStyle(PrimaryButtonStyle())
                     .disabled(selectedItems.isEmpty || working || !model.isConnected)
             }.padding(20)
         }

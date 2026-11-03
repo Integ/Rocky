@@ -315,3 +315,168 @@ Reviewed and validated on 2026-11-02 (America/Vancouver):
   Ruff lint, formatting and diff whitespace checks passed.
 - No live model calls were used for this release review. Local checks do not
   replace the macOS 14 and macOS 26 CI gates required before publication.
+
+## Native app real usage validation
+
+Validated on 2026-11-03 (America/Vancouver), commit `b22fce9`, bundled Rocky
+0.2.0 on macOS 27.2, with real `gpt-6.1-sol` requests and real tools:
+
+- Used the native app to draft and submit a synthetic CSV task, approve individual
+  commands and a selected approval-center item, restart the backend while an
+  approval was pending, extend an exhausted budget, request a revised delivery,
+  preview/export history, and accept the second delivery. Checkpoints, pending
+  approval identity and file hashes survived the backend restart. Work continued
+  with the window closed and survived a client quit/relaunch.
+- Independently ran the generated script against the original fixture and a
+  changed fixture; both passed. All eight archived files across two deliveries
+  matched their SHA256 values. The second report contained exactly the requested
+  additional line, and its other three files were unchanged. The old report
+  exported through the native save panel matched its original archive.
+- Found two unresolved verification problems: consumed owner answers are absent
+  from the review evidence, causing an answered name question to be asked again;
+  the computed-claim audit rejects valid calculations containing expected-value
+  assertions. Reproduced both behaviors offline from the collected records and
+  current evidence functions. The CSV task initially exhausted its AI-estimated
+  12-step budget after two review rejections, then completed after extension.
+- An existing invalid saved key caused only a generic submission error. Replaced
+  it with the working environment key after explicit owner authorization. No
+  credential values are included in the report. Finder reopening of a closed
+  window needs manual follow-up; a full client quit/relaunch restored it.
+- Two task runs plus contract drafting used **29 model calls / 243065 total
+  input and output tokens**. The main delivery is accepted; the failing
+  clarification task is cancelled with its files retained. Final service status
+  was healthy, with no active tasks or pending approvals. Product code was not
+  changed and the full automated suite was not rerun for this validation.
+
+Detailed reproduction steps, scope and structured evidence:
+[real usage report](reports/2026-11-03-real-usage-validation.md).
+
+## Real usage findings fixed
+
+Validated on 2026-11-03 (America/Vancouver), after the real usage investigation:
+
+- Reviews now include persisted questions and consumed owner replies, with
+  auditable `question:` and `owner:` citations. Tests cover question-bound and
+  ordinary replies, exclusion of unconsumed/foreign input, and whole-record
+  omission under context pressure. Tool permissions remain separate.
+- Python comparison assertions no longer make calculated values appear to be
+  literal answers. Replayed the original rejected CSV claim unchanged and
+  verified acceptance. Regression coverage still rejects literal assignments,
+  printing answers, side effects inside assertions, compound commands and
+  failed computation evidence, including the automatic verification fallback.
+- Fixed provider error categories cross the local API without upstream text.
+  Native Chinese messages distinguish authentication, access, exhausted quota,
+  rate limits, connectivity and timeouts; exhausted quota is non-retryable.
+  Tests exercise SDK and compatible-provider errors and hostile error bodies.
+- Finder/Dock reopen now restores a main window rather than reusing a retained
+  closed window. Rebuilt the complete offline-capable app and verified real
+  close/reopen without changing the client process ID. Final build ID:
+  `3DE29ACD-1F07-49F5-950C-6EFE038CF279`.
+- Full Python suite: **1338 passed, 3 skipped**, using the cached real Temporal
+  test service; two existing Temporal import warnings remain. Swift:
+  **108 passed**. Ruff lint/format and diff whitespace checks passed.
+- Repeated the original missing-name task with real `gpt-6.1-sol`, replying once
+  through its question card and once through the ordinary composer. Both
+  succeeded in **4 steps / 5 model calls**, and both deliveries were accepted.
+  Their reviews cite the actual owner receipts/questions; no repeated question
+  or budget increase was needed. These two runs used **48188 tokens** total.
+  Final service status was healthy, with no active tasks or pending approvals;
+  bundled and staged backend sources match the final workspace sources.
+
+The [report](reports/2026-11-03-real-usage-validation.md) preserves the original
+failures; [fix evidence](reports/2026-11-03-fix-validation.json) records the
+successful reviews and final checks.
+
+## Neutral macOS interface
+
+Validated on 2026-11-03 (America/Vancouver):
+
+- Replaced the Tiffany accent with adaptive black/white actions and neutral
+  canvas, sidebar, message and input surfaces. The new-task composer is
+  centered beneath a system-font heading, with compact suggestion buttons.
+  Task replies retain their bottom composer. The in-app Rocky mark is monochrome.
+- Referenced the [official ChatGPT macOS Chat Bar screenshots](https://help.openai.com/en/articles/9295241-how-to-launch-the-chat-bar)
+  for neutral surfaces and inverse action controls; no ChatGPT branding assets
+  were copied. Existing success, warning, error and conventional link colors
+  remain available for their semantic roles.
+- Rendered actual theme, mark and button components off-screen under Aqua and
+  Dark Aqua and visually checked enabled/disabled labels and inverse send
+  buttons. This was a component preview; native-window inspection used the
+  current light system appearance, without changing system preferences.
+- Checked the rebuilt app's new-task page, suggestion-to-input interaction,
+  enabled send button, task delivery page and settings sheet. Native sidebar
+  selection is neutral gray, and pressing Down still changes the selected task.
+  The sidebar bridge changes only selection drawing and does not intercept hits.
+- Swift: **108 passed**; complete offline app build and signature verification
+  passed; diff whitespace checks passed. Final build:
+  `B674B9C7-6737-417C-BC9E-03E657FB2A77`. The app is running on the new-task page.
+  No model calls or task submissions were needed for this interface change.
+
+## Workspace file batches and execution efficiency
+
+Validated on 2026-11-03 (America/Vancouver):
+
+- File mutations may share one planning round with ordered dispatch, per-file
+  persistence and existing tool receipts. New owner input, approval and unknown
+  outcomes stop later mutations. Completed work survives cancellation and
+  worker replacement. Pre-upgrade history replay passed with its original
+  zero-write branch.
+- Full Python suite: **1365 passed, 3 skipped**, including 27 new focused checks.
+  Ruff lint, format and diff whitespace checks passed.
+- Matched real-model evaluation: **3/3 expected outcomes** before and after,
+  no false successes. Total calls **16 → 12** and tokens **109,299 → 79,139**.
+  Cross-file refactoring used a five-file mutation batch and passed hidden tests;
+  its model calls fell **9 → 6** and wall time **82.46 → 53.03 seconds**.
+  These are single samples, not a general completion-rate estimate.
+- Rebuilt and launched the native app, build
+  `153D07EF-CB29-4962-92D5-B43C35A165FA`. A four-file synthetic task succeeded
+  in 3 steps and 4 model calls. Exact UTF-8 contents were independently checked
+  and the delivery was accepted in the native interface.
+
+See the [execution report](reports/2026-11-03-execution-validation.md) and
+[machine-readable evidence](reports/2026-11-03-execution-validation.json).
+
+## File discovery and literal content search
+
+Validated on 2026-11-03 (America/Vancouver):
+
+- Added `find_files` and `search_files` with bounded descriptor-relative
+  traversal, glob filtering, line/context results, pagination and explicit
+  completeness/skip metadata. Both share existing approval, isolation and
+  receipt handling and support concurrent read-only batches. Search outputs
+  are review evidence without marking the source completely read.
+- **53** focused checks passed; full Python suite **1420 passed, 3 skipped**;
+  Swift **109 passed**. Ruff, format and whitespace checks passed. Production
+  batch replay and pre-upgrade history replay passed.
+- Rebuilt and launched the signed app, build
+  `A18E526F-2E2C-44FF-AEFE-102B8ED75B74`. Bundled sources match the workspace.
+- A real-model task over 28 synthetic files called both new tools, excluded a
+  distractor and delivered correct relative paths, source lines and one-based
+  line numbers. It succeeded in **5 steps, 6 calls, 37,908 tokens**, with no
+  commands or extra approvals. Actual artifacts were independently checked;
+  native Chinese tool labels and accepted delivery were verified.
+
+See the [tool validation report](reports/2026-11-03-tool-expansion-validation.md)
+and [structured evidence](reports/2026-11-03-tool-expansion-validation.json).
+
+## Quality review of file tools and review integration
+
+Validated on 2026-11-03 (America/Vancouver):
+
+- Reproduced and fixed three P2 issues: search line numbers disagreeing with
+  targeted reads on non-LF separators, regular files excluded by directory
+  names, and quoted search evidence rejected because of JSON escaping.
+  Search evidence retains decoded source text; quote auditing prefers literal
+  text while retaining compatibility with escaped quotations.
+- Added **30** regression cases. Full Python suite: **1450 passed, 3 skipped**.
+  Ruff, format, whitespace and legacy history replay checks passed.
+- A fixed-seed check over **120 files** compared **292 matching lines**, paged
+  19 at a time, with independently computed paths, line numbers and contents;
+  all matched with no duplicate results.
+- Rebuilt and launched the signed native app, build
+  `6619D54F-18C8-46AA-9BCF-4638C83D067A`. The same reproducer using bundled
+  sources passed all three cases. The API, database and worker are healthy;
+  there are no pending test approvals. No additional model calls were needed.
+
+See the [quality report](reports/2026-11-03-quality-review.md) and
+[before/after evidence](reports/2026-11-03-quality-review.json).

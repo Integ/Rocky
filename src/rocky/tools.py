@@ -38,6 +38,7 @@ from rocky.browser import BrowserUnavailable, browse, browser_executable, parse_
 from rocky.command_policy import command_class, command_words
 from rocky.config import Settings
 from rocky.file_locks import open_lock_file
+from rocky.file_search import parse_search_options, search_directory
 from rocky.http_tools import HTTPToolError, request_http
 from rocky.models import (
     DEFAULT_COMMAND_SECONDS,
@@ -979,7 +980,7 @@ class WorkspaceTools:
             allowed = (self.root / goal_id, *self._allowed_folders(request))
             if not any(_inside(target, folder) for folder in allowed):
                 return f"write {target} outside this task's folders"
-        elif action.tool in {"read_file", "list_files"}:
+        elif action.tool in {"read_file", "list_files", "find_files", "search_files"}:
             target = self._resolve_path(goal_id, action.path)
             if any(_inside(target, path) for path in self.sensitive_paths):
                 return f"read the credential store {target}"
@@ -1007,6 +1008,8 @@ class WorkspaceTools:
         return bool(found) and not Path(found).resolve().is_relative_to(self.root)
 
     def _execute(self, request: ToolInput, goal_fd: int) -> ToolResult:
+        if request.action.tool in {"find_files", "search_files"}:
+            return self._search(request, goal_fd)
         if self.full_access:
             return self._execute_full(request)
         action = request.action
@@ -1081,6 +1084,46 @@ class WorkspaceTools:
                 artifacts=[artifact],
                 changed_paths=[artifact.path],
             )
+
+    def _search(self, request: ToolInput, goal_fd: int) -> ToolResult:
+        action = request.action
+        options = parse_search_options(action.tool, action.content)
+        with ExitStack() as stack:
+            if self.full_access:
+                root = self._path(request, action.path)
+                parent = stack.enter_context(self._full_parent(request.run.goal_id, root))
+                descriptor = os.open(root.name or root.anchor, _DIRECTORY_FLAGS, dir_fd=parent)
+                stack.callback(os.close, descriptor)
+                self._check_parent(request.run.goal_id, descriptor, "")
+
+                def visible(relative: str) -> bool:
+                    path = root / relative
+                    # A parent-folder search never implicitly opens credential
+                    # stores. Searching one explicitly still uses the exact gate.
+                    if any(
+                        _inside(path, item) and not _inside(root, item)
+                        for item in self.sensitive_paths
+                    ):
+                        return False
+                    return self._visible_path(request.run.goal_id, path, parent_resolved=True)
+            else:
+                descriptor = goal_fd
+                for part in _parts(action.path, allow_root=True):
+                    descriptor = _open_directory(descriptor, part, create=False)
+                    stack.callback(os.close, descriptor)
+
+                def visible(relative: str) -> bool:
+                    return not any(part.startswith(".") for part in relative.split("/"))
+
+            result = search_directory(
+                descriptor, action.tool, options, root=action.path or ".", visible=visible
+            )
+        content = json.dumps(result, ensure_ascii=False)
+        return ToolResult(
+            success=True,
+            content=content,
+            progress_key=action.tool + ":" + _digest(content.encode()),
+        )
 
     def _path(self, request: ToolInput, path: str | None, *, default_root: bool = False) -> Path:
         writes = request.action.tool in {

@@ -1,11 +1,6 @@
 import AppKit
 import SwiftUI
 
-extension Color {
-    static let rockyAccent = Color(red: 10 / 255, green: 186 / 255, blue: 181 / 255)
-    static let rockyCanvas = Color(nsColor: .textBackgroundColor)
-}
-
 struct WorkspaceView: View {
     @ObservedObject var model: AppModel
     @ObservedObject private var runtime: RuntimeManager
@@ -64,6 +59,7 @@ struct WorkspaceView: View {
                 goalRow(goal).tag(goal.id).contextMenu {
                     if goal.state.isTerminal { historyActions(goal) }
                 }
+                .listRowBackground(model.selectedID == goal.id ? Color.primary.opacity(0.07) : Color.clear)
             }
             if model.visibleGoals.isEmpty {
                 Text(model.search.isEmpty ? (model.showArchived ? "暂无已存档任务" : model.onlyActive ? "没有进行中的任务" : "你的任务会保存在这里") : "没有匹配的任务")
@@ -72,6 +68,8 @@ struct WorkspaceView: View {
             }
         }
         .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .background(Color.rockySidebar)
         .searchable(text: $model.search, placement: .sidebar, prompt: "搜索任务")
         .onChange(of: model.search) { _, _ in model.searchChanged() }
         .onChange(of: model.showArchived) { _, _ in model.searchChanged() }
@@ -101,10 +99,11 @@ struct WorkspaceView: View {
         HStack(spacing: 8) {
             Image(systemName: statusSymbol(goal.state)).font(.system(size: 12)).foregroundStyle(statusColor(goal.state)).frame(width: 16)
             VStack(alignment: .leading, spacing: 2) {
-                Text(goal.title).lineLimit(1)
-                Text(goal.state.statusLabel).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text(goal.title).foregroundStyle(Color.rockyAccent).lineLimit(1)
+                Text(goal.state.statusLabel).font(.caption).foregroundStyle(Color.rockySecondary).lineLimit(1)
             }
-        }.padding(.vertical, 3)
+        }.padding(.vertical, 6)
+            .background(NeutralSidebarSelection())
     }
 
     private var sidebarFooter: some View {
@@ -128,8 +127,8 @@ struct WorkspaceView: View {
                     Spacer()
                     let count = model.approvalItems.count
                     if count > 0 {
-                        Text("\(count)").font(.system(size: 10, weight: .semibold)).foregroundStyle(.white)
-                            .padding(.horizontal, 6).padding(.vertical, 2).background(Color.orange, in: Capsule())
+                        Text("\(count)").font(.system(size: 10, weight: .semibold)).foregroundStyle(.primary)
+                            .padding(.horizontal, 6).padding(.vertical, 2).background(Color.primary.opacity(0.08), in: Capsule())
                     }
                 }.padding(.horizontal, 10).frame(height: 32)
             }.buttonStyle(HoverButtonStyle(cornerRadius: 8)).disabled(!runtime.isReady)
@@ -140,8 +139,8 @@ struct WorkspaceView: View {
                     Spacer()
                     let count = agenda.attentionCount
                     if count > 0 {
-                        Text("\(count)").font(.system(size: 10, weight: .semibold)).foregroundStyle(.white)
-                            .padding(.horizontal, 6).padding(.vertical, 2).background(Color.orange, in: Capsule())
+                        Text("\(count)").font(.system(size: 10, weight: .semibold)).foregroundStyle(.primary)
+                            .padding(.horizontal, 6).padding(.vertical, 2).background(Color.primary.opacity(0.08), in: Capsule())
                     }
                 }.padding(.horizontal, 10).frame(height: 32)
             }.buttonStyle(HoverButtonStyle(cornerRadius: 8)).disabled(!runtime.isReady)
@@ -156,7 +155,10 @@ struct WorkspaceView: View {
                     Spacer()
                 }.padding(.horizontal, 10).frame(height: 40)
             }.buttonStyle(HoverButtonStyle(cornerRadius: 8)).disabled(!runtime.isReady)
-        }.padding(10)
+        }.padding(12)
+            .padding(.top, 6)
+            .overlay(alignment: .top) { Divider().padding(.horizontal, 14) }
+            .background(Color.rockySidebar)
     }
 
     // MARK: Detail
@@ -164,10 +166,14 @@ struct WorkspaceView: View {
     private var detail: some View {
         Group {
             if runtime.isReady {
-                conversation.safeAreaInset(edge: .bottom, spacing: 0) {
-                    VStack(spacing: 0) {
-                        if let error = model.error { errorBanner(error) }
-                        composer.padding(.horizontal, 36).padding(.bottom, 16)
+                if model.selected == nil {
+                    newTask
+                } else {
+                    conversation.safeAreaInset(edge: .bottom, spacing: 0) {
+                        VStack(spacing: 0) {
+                            if let error = model.error { errorBanner(error) }
+                            composer.padding(.horizontal, 36).padding(.bottom, 16)
+                        }
                     }
                 }
             } else {
@@ -233,7 +239,7 @@ struct WorkspaceView: View {
                     HStack {
                         Spacer(minLength: 35)
                         Text(goal.contract.objective).font(.system(size: 14)).lineSpacing(6).textSelection(.enabled)
-                            .padding(18).background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 17))
+                            .padding(18).background(Color.rockySurface, in: RoundedRectangle(cornerRadius: 20))
                     }.padding(.top, 30)
                     if !model.messages.isEmpty {
                         DisclosureGroup("已保存的补充信息（\(model.messages.count)）") {
@@ -272,7 +278,7 @@ struct WorkspaceView: View {
                                         .font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
                                     HStack {
                                         Button("批准此操作") { Task { await model.approve() } }
-                                            .buttonStyle(.borderedProminent)
+                                            .buttonStyle(PrimaryButtonStyle())
                                         if let scope = approval.reusableScopeText {
                                             Button("本任务内批准同类") { Task { await model.approve(scope: .task) } }
                                                 .help("本任务中的\(scope)将直接执行；命令不能含 ; && | > $ 等 Shell 操作符")
@@ -330,14 +336,14 @@ struct WorkspaceView: View {
                             if ["budget_exhausted", "deadline_exceeded"].contains(goal.state.status) {
                                 Button { Task { await model.extend(goal) } } label: {
                                     Label(goal.state.status == "budget_exhausted" ? "加倍预算继续" : "延长时限继续", systemImage: "arrow.clockwise")
-                                }.buttonStyle(.borderedProminent)
+                                }.buttonStyle(PrimaryButtonStyle())
                                     .disabled(!model.isConnected || model.isSubmitting || model.pendingCommand != nil)
                                     .help("在原任务上继续：沿用工作区、进度和已有记录，预算和时限翻倍，运行时间重新计算。")
                             }
                             if goal.state.status == "failed" {
                                 Button { Task { await model.recover(goal) } } label: {
                                     Label("从保存的进度恢复", systemImage: "arrow.uturn.forward")
-                                }.buttonStyle(.borderedProminent)
+                                }.buttonStyle(PrimaryButtonStyle())
                                     .disabled(!model.isConnected || model.pendingCommand != nil)
                                     .help("执行引擎意外停止了这个任务。恢复后沿用已有进度、用量和工作区，运行时间重新计算。")
                             }
@@ -352,16 +358,33 @@ struct WorkspaceView: View {
         }
     }
 
+    private var newTask: some View {
+        VStack(spacing: 0) {
+            Spacer(minLength: 36)
+            VStack(spacing: 26) {
+                welcome
+                VStack(spacing: 10) {
+                    if let error = model.error { errorBanner(error) }
+                    composer
+                }
+                HStack(spacing: 10) {
+                    suggestion("整理一份报告", icon: "doc.text", prompt: "帮我整理一份关于 Rocky 项目的说明，解释它的核心能力与使用方式。")
+                    suggestion("制定执行计划", icon: "checklist", prompt: "帮我制定一份详细的执行计划：\n")
+                    suggestion("比较不同方案", icon: "square.split.2x2", prompt: "帮我比较以下方案，分析各自的优缺点并给出建议：\n")
+                }
+            }.frame(maxWidth: 760)
+            Spacer(minLength: 72)
+            Text("任务与产物保存在这台 Mac 上。重要结果请自行核验。")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center).padding(.bottom, 18)
+        }.padding(.horizontal, 36).frame(maxWidth: .infinity)
+    }
+
     private var welcome: some View {
-        VStack(spacing: 17) {
-            Text("把想法交给 Rocky。").font(.system(size: 30, weight: .medium, design: .serif))
-            Text("一个目标，从规划到交付。\n你的本地 AI 伙伴，会接着把事情做完。重要结果请自行核验。")
-                .font(.system(size: 13)).foregroundStyle(.secondary).lineSpacing(6).multilineTextAlignment(.center)
-            HStack(spacing: 10) {
-                suggestion("整理一份报告", icon: "doc.text", prompt: "帮我整理一份关于 Rocky 项目的说明，解释它的核心能力与使用方式。")
-                suggestion("制定执行计划", icon: "checklist", prompt: "帮我制定一份详细的执行计划：\n")
-                suggestion("比较不同方案", icon: "square.split.2x2", prompt: "帮我比较以下方案，分析各自的优缺点并给出建议：\n")
-            }.padding(.top, 24)
+        VStack(spacing: 12) {
+            Text("今天想完成什么？").font(.system(size: 29, weight: .semibold))
+            Text("交给 Rocky，从规划到交付。")
+                .font(.system(size: 14)).foregroundStyle(.secondary).multilineTextAlignment(.center)
             if model.provider?.isConfigured == false {
                 Button { model.showSettings = true } label: {
                     Label("先连接你的 AI 模型", systemImage: "key.horizontal").font(.system(size: 12, weight: .medium)).foregroundStyle(Color.rockyAccent)
@@ -373,11 +396,11 @@ struct WorkspaceView: View {
 
     private func suggestion(_ title: String, icon: String, prompt: String) -> some View {
         Button { model.input = prompt; composerFocused = true } label: {
-            VStack(alignment: .leading, spacing: 15) {
-                Image(systemName: icon).foregroundStyle(Color.rockyAccent.opacity(0.8))
-                Text(title).font(.system(size: 11))
-            }.frame(width: 122, alignment: .leading).padding(14)
-        }.buttonStyle(CardButtonStyle())
+            HStack(spacing: 8) {
+                Image(systemName: icon).foregroundStyle(.secondary)
+                Text(title)
+            }.font(.system(size: 12)).padding(.horizontal, 14).padding(.vertical, 10)
+        }.buttonStyle(CardButtonStyle(cornerRadius: 20, fill: .rockyCanvas))
     }
 
     private var composer: some View {
@@ -388,7 +411,7 @@ struct WorkspaceView: View {
             } else {
                 VStack(alignment: .leading, spacing: 12) {
                     TextField(model.selected == nil ? "描述你想完成的事…" : model.selected?.state.isTerminal == true ? "追加要求，Rocky 会在这个任务上继续…" : "补充信息，或回复 Rocky…", text: $model.input, axis: .vertical)
-                        .textFieldStyle(.plain).font(.system(size: 14)).lineLimit(3...7).focused($composerFocused).onSubmit { Task { await model.send() } }
+                        .textFieldStyle(.plain).font(.system(size: 15)).lineLimit(3...7).focused($composerFocused).onSubmit { Task { await model.send() } }
                     if model.selected == nil, !(model.draftFolders.isEmpty && model.draftFiles.isEmpty) {
                         FlowFolders(folders: model.draftFolders, files: model.draftFiles) { path in
                             model.draftFolders.removeAll { $0 == path }
@@ -413,14 +436,14 @@ struct WorkspaceView: View {
                             if model.isSubmitting { ProgressView().controlSize(.small) } else { Image(systemName: "arrow.up").font(.system(size: 15, weight: .semibold)) }
                         }.buttonStyle(SendButtonStyle()).disabled(!model.canSend).keyboardShortcut(.return, modifiers: .command).labelled("发送 ⌘↩")
                     }
-                }.padding(17).floatingSurface(cornerRadius: 22)
+                }.padding(18).floatingSurface(cornerRadius: 24)
                     .dropDestination(for: URL.self) { urls, _ in
                         guard model.selected == nil else { return false }
                         model.addFolders(urls)
                         return true
                     }
-                    .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(Color.rockyAccent.opacity(composerFocused ? 0.45 : 0)))
-                    .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous)).onTapGesture { composerFocused = true }
+                    .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Color.primary.opacity(composerFocused ? 0.22 : 0)))
+                    .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous)).onTapGesture { composerFocused = true }
             }
         }.frame(maxWidth: 780).frame(maxWidth: .infinity)
     }
@@ -434,7 +457,7 @@ struct WorkspaceView: View {
             if runtime.phase == .failed {
                 HStack(spacing: 10) {
                     Button("打开日志") { NSWorkspace.shared.open(runtime.logsURL) }
-                    Button(runtime.serviceStopped ? "启动后台服务" : "重试启动") { Task { await runtime.start() } }.buttonStyle(.borderedProminent)
+                    Button(runtime.serviceStopped ? "启动后台服务" : "重试启动") { Task { await runtime.start() } }.buttonStyle(PrimaryButtonStyle())
                 }
             } else { ProgressView().controlSize(.small) }
             Spacer()
@@ -465,7 +488,7 @@ struct WorkspaceView: View {
             } else if let error = model.artifactErrors[artifact.path] {
                 Text(error).font(.system(size: 11)).foregroundStyle(.secondary)
             } else { Text("任务结束后可预览产物").font(.system(size: 11)).foregroundStyle(.secondary) }
-        }.padding(16).background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 12)).overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.primary.opacity(0.08)))
+        }.padding(18).background(Color.rockyElevated, in: RoundedRectangle(cornerRadius: 16)).overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Color.rockyBorder))
     }
 
     private var inspector: some View {

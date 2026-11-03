@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 from fastapi.testclient import TestClient
 
+from rocky.activities import Activities
 from rocky.api import create_app
 from rocky.config import Settings
 from rocky.models import (
@@ -22,6 +23,7 @@ from rocky.models import (
 )
 from rocky.planner import consumed_owner_messages
 from rocky.store import Store
+from rocky.tools import WorkspaceTools
 from rocky.workflow import GoalWorkflow
 
 
@@ -118,6 +120,90 @@ def test_receipts_are_monotonic_revision_fenced_and_do_not_confirm_other_tasks(s
         ]
         == "saved"
     )
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_review_uses_consumed_owner_reply_and_persisted_question(store, tmp_path, bound):
+    from rocky.evidence import audit_review
+
+    state = blocked(store)
+    state.revision = 2
+    state.execution_step = ExecutionStep(
+        step_id="ask",
+        cycle=1,
+        phase="act",
+        status="completed",
+        started_at="2026-11-01T00:00:00Z",
+        completed_at="2026-11-01T00:00:01Z",
+        input={"decision": {"kind": "blocked", "question": {"text": "Which year?"}}},
+    )
+    store.save_state(state)
+    command = store.enqueue_command(
+        "task", "wake", "2026", question_id="question-1" if bound else None
+    )
+    store.mark_command_sent(command)
+    state.revision = 3
+    state.execution_step = ExecutionStep(
+        step_id="consume",
+        cycle=2,
+        phase="think",
+        status="completed",
+        started_at="2026-11-01T00:00:02Z",
+        completed_at="2026-11-01T00:00:03Z",
+        output={"consumed_message_ids": [f"wake:{command}"]},
+    )
+    store.save_state(state)
+    store.enqueue_command("task", "wake", "unconsumed answer")
+    store.create_goal("other", contract())
+    store.enqueue_command("other", "wake", "another task's reply")
+    tools = WorkspaceTools(Settings(workspace_root=tmp_path / "workspaces"))
+    run = RunInput(goal_id="task", contract=contract())
+    evidence = Activities(store, tools, None).review_evidence(run)
+    [reply] = evidence["owner_messages"]
+    assert reply["id"] == command and reply["message"] == "2026"
+    assert reply["question_id"] == ("question-1" if bound else None)
+    if bound:
+        assert reply["question"]["text"] == "Which year?"
+    else:
+        assert reply["question"] is None
+    assert evidence["questions"][0]["text"] == "Which year?"
+    assert reply["consumed_at"] == "2026-11-01T00:00:03Z"
+    claim = {
+        "deliverable": "report.md",
+        "pointer": "/year",
+        "value": 2026,
+        "kind": "quoted",
+        "location": f"owner:{command}",
+        "quote": "2026",
+        "supported": True,
+    }
+    _, problems = audit_review(
+        [claim],
+        evidence,
+        {"report.md": "2026"},
+        [
+            {"deliverable": "report.md", "pointer": "/year", "value": 2026},
+        ],
+    )
+    assert not problems
+    _, problems = audit_review(
+        [
+            claim
+            | {
+                "pointer": "asked",
+                "kind": "judgment",
+                "value": "Asked the year",
+                "location": "question:question-1",
+                "quote": "Which year?",
+            }
+        ],
+        evidence,
+        {},
+        [],
+    )
+    assert not problems
+    _, problems = audit_review([claim | {"location": "owner:invented"}], evidence, {}, [])
+    assert "not in the evidence" in problems[0]
 
 
 def test_only_complete_model_visible_messages_are_confirmed():

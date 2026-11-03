@@ -142,14 +142,20 @@ final class AppModel: ObservableObject {
         runTask = Task { await run() }
     }
 
-    /// Opens a task from a notification or the menu bar.
-    func reveal(_ id: String) {
+    /// Reuses a live window, or creates one after the last window was closed.
+    func showMainWindow() {
         if let window = NSApp.mainWorkspaceWindow {
+            if window.isMiniaturized { window.deminiaturize(nil) }
             window.makeKeyAndOrderFront(nil)
         } else {
             openMainWindow?()
         }
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Opens a task from a notification or the menu bar.
+    func reveal(_ id: String) {
+        showMainWindow()
         if let goal = goals.first(where: { $0.id == id }) { showArchived = goal.isArchived }
         select(id)
     }

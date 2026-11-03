@@ -122,7 +122,7 @@ struct ContractReviewView: View {
                 }
                 Spacer()
                 Button("返回修改") { model.contractReview = nil }.buttonStyle(.bordered).keyboardShortcut(.cancelAction)
-                Button("提交任务") { Task { await model.submitReviewed() } }.buttonStyle(.borderedProminent)
+                Button("提交任务") { Task { await model.submitReviewed() } }.buttonStyle(PrimaryButtonStyle())
                     .keyboardShortcut(.defaultAction).disabled(model.isSubmitting || !model.isConnected || !review.contract.isSubmittable)
             }.padding(20)
         }

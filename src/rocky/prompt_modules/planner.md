@@ -23,11 +23,18 @@ a command that prints its results, rather than writing numbers by hand.
 Valid decisions:
 - act: set action to one tool action that makes useful progress, or set
   actions to a list of up to 8 independent read-only actions: read_file,
-  list_files, fetch_url, and http_request with method GET/HEAD/OPTIONS and a
+  list_files, find_files, search_files, fetch_url, and http_request with method GET/HEAD/OPTIONS and a
   null path. A batch runs concurrently in one step and each action returns its
   own result, so request every file, directory or page you already know you
   need together instead of one per step. Exactly one of action and actions is
-  non-null. Writes, commands and mutating requests always use action.
+  non-null. When execution.file_batch_tools is nonempty, actions may instead
+  contain up to 8 independent write_file/edit_file/append_file actions, all
+  with content and distinct task-workspace-relative paths. These run in order
+  in one planning step and return per-file results, not an atomic transaction.
+  Do not mix reads and writes, overlap paths, or depend on another action's
+  result. An interrupted batch may have completed some files: inspect its
+  results and change only remaining files. External paths, commands and
+  mutating requests always use action. Never batch command or approval work.
 - wait: only for an actual external/time dependency; explain what is awaited,
   and choose an integer wait_seconds from 1 to contract.max_wait_seconds.
 - finish: only when actual observations support the deliverables and all
@@ -93,6 +100,27 @@ and background apply only to run_command and are null for every other tool:
   must match the file exactly and occur once unless replace_all is true. Prefer
   it to rewriting a whole file for a small change.
 - list_files: relative directory path required (use '.' for root); url/content null.
+- find_files: path is the directory to search ('.' for task root); content is
+  null or JSON {"glob":"**/*.py","limit":50,"offset":0,"include_hidden":false}.
+  Returns matching regular files with relative paths and byte sizes. A glob
+  without '/' matches file names at any depth; with '/' it is root-relative.
+  '*' stays within one segment; '**' spans directories. Globs are case-sensitive.
+- search_files: directory path required; content is JSON
+  {"query":"literal text","glob":"**/*.py","case_sensitive":true,
+  "context_lines":1,"limit":50,"offset":0,"include_hidden":false}.
+  query is required, literal (no regex), single-line and at most 500 characters.
+  Returns one match per matching line with a relative path, one-based line
+  number, text and optional nearby lines. Use it to locate relevant evidence
+  before a targeted read_file; it does not mean the entire file was read.
+  Both searches are read-only, need no shell, and accept limit 1..200 and offset
+  0..10000. Search context_lines is 0..3; other options are optional. They skip
+  symlinks, hard links, dependency/cache directories and hidden files by default.
+  Content search skips binary/non-UTF-8 files and files over 1 MB. JSON results
+  report skipped files, complete, truncated and stop_reason. If next_offset is
+  present, continue with it on an unchanged tree; scan/time/byte/offset limits require
+  narrowing the directory or glob. A partial search cannot establish absence.
+  Do not infer total file counts from page size. Both tools use url=null and
+  timeout_seconds/background=null; scoped mode cannot include hidden files.
 - fetch_url: HTTP/HTTPS URL required; path and content null.
 
 Each response has a bounded output budget, execution.response_token_limit,

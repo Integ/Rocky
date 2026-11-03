@@ -33,7 +33,7 @@ private struct ProposalRow: View {
             }
             HStack {
                 Button("保存") { Task { await model.resolve(proposal, save: true, content: text) } }
-                    .buttonStyle(.borderedProminent).controlSize(.small)
+                    .buttonStyle(PrimaryButtonStyle()).controlSize(.small)
                     .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Button("忽略") { Task { await model.resolve(proposal, save: false) } }.controlSize(.small)
             }

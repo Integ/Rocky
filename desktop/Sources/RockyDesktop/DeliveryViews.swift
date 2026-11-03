@@ -52,14 +52,14 @@ struct DeliveryReviewCard: View {
                     HStack {
                         Button("提交修改要求") { Task {
                             if await model.reviewDelivery(goal, action: "request_changes", feedback: feedback) { requesting = false; feedback = "" }
-                        } }.buttonStyle(.borderedProminent)
+                        } }.buttonStyle(PrimaryButtonStyle())
                             .disabled(model.reviewingDelivery || feedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || feedback.count > 2000 || !model.isConnected)
                         Button("取消") { requesting = false; feedback = "" }.disabled(model.reviewingDelivery)
                     }
                     if feedback.count > 2000 { Text("修改要求最多 2,000 字。").font(.caption).foregroundStyle(.red) }
                 } else {
                     HStack {
-                        Button("接受结果") { Task { await model.reviewDelivery(goal, action: "accept") } }.buttonStyle(.borderedProminent)
+                        Button("接受结果") { Task { await model.reviewDelivery(goal, action: "accept") } }.buttonStyle(PrimaryButtonStyle())
                         Button("要求修改…") { requesting = true }
                     }.disabled(model.reviewingDelivery || !model.isConnected)
                 }

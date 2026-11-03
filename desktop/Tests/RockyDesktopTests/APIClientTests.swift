@@ -23,6 +23,40 @@ final class APIClientTests: XCTestCase {
         APIClient(baseURL: URL(string: "http://127.0.0.1:18741")!, token: "desktop-test-token", session: session)
     }
 
+    func testModelFailureCategoriesUseSafeMessagesAndNeverEchoUpstreamDetails() async throws {
+        let cases = [
+            ("authentication_failed", "API 密钥"), ("missing_api_key", "尚未配置"),
+            ("model_access_denied", "模型权限"), ("quota_exceeded", "额度已耗尽"),
+            ("rate_limited", "过于频繁"), ("network_error", "无法连接"),
+            ("model_timeout", "超时"), ("provider_unavailable", "暂时不可用"),
+            ("secret-injected-category", "AI 未能完成任务评估"),
+        ]
+        for (code, expected) in cases {
+            InterceptingProtocol.handle = { _ in
+                (502, try JSONSerialization.data(withJSONObject: [
+                    "detail": ["code": code, "message": "secret-provider-response"],
+                ]))
+            }
+            do {
+                _ = try await api.prepareContract(GoalDraft(objective: "测试"))
+                XCTFail("Expected provider failure")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains(expected), error.localizedDescription)
+                XCTAssertFalse(error.localizedDescription.contains("secret"))
+            }
+        }
+        for body in [#"{"detail":"secret-provider-response"}"#, #"{"detail":{"code":["secret"]}}"#, "not JSON"] {
+            InterceptingProtocol.handle = { _ in (502, Data(body.utf8)) }
+            do {
+                _ = try await api.prepareContract(GoalDraft(objective: "测试"))
+                XCTFail("Expected provider failure")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains("AI 未能完成任务评估"))
+                XCTAssertFalse(error.localizedDescription.contains("secret"))
+            }
+        }
+    }
+
     func testQuestionAnswerUsesItsOwnEndpointAndConcreteQuestionID() async throws {
         InterceptingProtocol.handle = { request in
             XCTAssertEqual(request.url?.path, "/goals/task/answer")

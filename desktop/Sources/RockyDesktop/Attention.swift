@@ -117,8 +117,9 @@ struct AttentionTracker {
 extension NSApplication {
     /// The workspace window, if it is still open (possibly hidden or minimized).
     var mainWorkspaceWindow: NSWindow? {
-        windows.first { $0.identifier?.rawValue.hasPrefix("main") == true }
-            ?? windows.first { $0.canBecomeMain && $0.styleMask.contains(.titled) }
+        let open = windows.filter { $0.isVisible || $0.isMiniaturized }
+        return open.first { $0.identifier?.rawValue.hasPrefix("main") == true }
+            ?? open.first { $0.canBecomeMain && $0.styleMask.contains(.titled) }
     }
 }
 

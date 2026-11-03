@@ -141,7 +141,7 @@ struct SettingsView: View {
                 Button("完成") { dismiss() }.buttonStyle(.bordered).keyboardShortcut(.cancelAction)
                 Button { Task { await save() } } label: {
                     HStack(spacing: 6) { if saving { ProgressView().controlSize(.mini) }; Text("保存设置") }
-                }.buttonStyle(.borderedProminent).disabled(!canSave).keyboardShortcut("s", modifiers: .command)
+                }.buttonStyle(PrimaryButtonStyle()).disabled(!canSave).keyboardShortcut("s", modifiers: .command)
             }.padding(20)
         }
         .frame(width: 610, height: 600).tint(.rockyAccent)

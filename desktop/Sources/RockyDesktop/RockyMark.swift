@@ -1,11 +1,10 @@
 import SwiftUI
 
 /// Rocky's mark, drawn from the geometry in desktop/Branding/RockyMark.svg: an AI spark balanced
-/// on a stone. The stone takes the secondary foreground style so the accent spark leads.
+/// on a stone, using the same monochrome hierarchy as the rest of the interface.
 struct RockyMark: View {
     private static let viewBox = CGRect(x: 272, y: 184, width: 480, height: 614)
     private static let stone: [CGFloat] = [276.7, 743.1, 274.2, 695.6, 357.6, 664.0, 489.6, 657.1, 621.6, 650.2, 745.5, 670.9, 747.7, 713.0, 750.3, 761.9, 671.1, 783.8, 525.0, 791.4, 378.9, 799.1, 279.0, 786.6, 276.7, 743.1]
-    private static let sparkGradient = Gradient(colors: [Color(red: 129 / 255, green: 216 / 255, blue: 208 / 255), .rockyAccent])
 
     var body: some View {
         Canvas { context, size in
@@ -14,7 +13,7 @@ struct RockyMark: View {
             context.scaleBy(x: scale, y: scale)
             context.translateBy(x: -box.minX, y: -box.minY)
             context.fill(Self.stonePath, with: .style(.secondary))
-            context.fill(Self.sparkPath, with: .linearGradient(Self.sparkGradient, startPoint: CGPoint(x: 392, y: 188), endPoint: CGPoint(x: 632, y: 660)))
+            context.fill(Self.sparkPath, with: .style(Color.rockyAccent))
         }
         .aspectRatio(Self.viewBox.width / Self.viewBox.height, contentMode: .fit)
         .accessibilityLabel("Rocky")
