@@ -14,12 +14,12 @@ Purpose = Literal["planner", "reviewer", "contract", "decomposition", "revision"
 Guidance = Literal["coding", "research"]
 
 _MODULES = {
-    "planner": (1, "执行与交接", "始终用于任务规划"),
+    "planner": (2, "执行与交接", "始终用于任务规划"),
     "tools-full": (1, "完整工具策略", "使用完整工具模式时加载"),
     "tools-scoped": (1, "受限工具策略", "使用受限工具模式时加载"),
     "coding": (1, "编程指导", "目标、验收标准或交付文件涉及编程时加载"),
     "research": (1, "研究指导", "目标或验收标准涉及检索、研究和引用时加载"),
-    "reviewer": (1, "独立验收", "始终用于结果验收"),
+    "reviewer": (3, "独立验收", "始终用于结果验收"),
     "contract": (1, "任务要求", "生成任务要求时加载"),
     "decomposition": (1, "目标拆解", "拆解长期目标时加载"),
     "revision": (1, "计划调整", "检查长期目标的剩余步骤时加载"),

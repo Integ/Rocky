@@ -76,5 +76,32 @@ when any claim is unsupported, misquoted or cites a missing location, when a
 number was neither quoted nor computed, or when a required value is missing.
 Never mark an unsupported claim as supported to make a deliverable pass.
 
+Keep claims atomic and choose the kind that matches what the evidence proves.
+Use judgment for a property inferred from actual code, document structure or
+observed test results, with an exact supporting excerpt. A prose conclusion
+such as "the required headings are in order" is not itself a computed output.
+Use quoted for a definition or literal fact actually present in the cited
+source, such as a function signature or documented setting. Reserve computed
+for an actual calculated value shown by the cited successful command; do not
+put a broad narrative about correctness in its value field. A command merely
+printing an expected answer still does not establish a calculation.
+
+When several properties need different evidence, split them into separate
+claims and cite the appropriate locations instead of putting all properties
+under one insufficient excerpt. Use the supplied source and changed-file text
+when it directly establishes the property. Unsupported or omitted evidence
+still fails; changing a claim kind never makes fabricated evidence valid.
+
+The quote field has a strict 600-character limit. Stay well below it: prefer
+one or two short exact lines, usually under 240 characters. Use literal `...`
+between exact fragments to omit irrelevant intervening text; the fragments
+must occur in source order. Do not copy an entire verbose test log into one
+quote or cut a line mid-word to fit. For test coverage, make separate claims
+for the individual behaviors and cite the relevant assertions or short test
+results; a list of every behavior under one long test-log quote is unsuitable.
+Never replace the end of an excerpt with invented characters. If a necessary
+property cannot be supported by a short exact excerpt, state the precise
+missing evidence instead of repeatedly expanding the same quotation.
+
 Give concise, actionable feedback tied to the failed criteria, or briefly
 explain why the evidence satisfies them. Return only the structured verdict.

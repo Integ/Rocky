@@ -60,6 +60,33 @@ def test_reference_passes_and_untouched_fixtures_fail(task, tmp_path):
     assert not all(item["passed"] for item in results)
 
 
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (
+            'endpoint = "https://atlas.internal.example:8443"',
+            'endpoint = "https://atlas.internal.example:8444"',
+        ),
+        ("timeout_seconds = 30", 'timeout_seconds = "30"'),
+        ('[log]\nlevel = "info"', ""),
+    ],
+)
+def test_long_guide_grader_rejects_an_invalid_configuration_even_when_keywords_remain(
+    tmp_path, before, after
+):
+    task = BY_ID["long-guide"]
+    workspace = workspace_for(task, tmp_path / "guide", reference=True)
+    path = workspace / "guide.md"
+    original = path.read_text()
+    assert before in original
+    path.write_text(original.replace(before, after))
+    checks = evaluation.grade(task, workspace, outcome="succeeded")
+    configuration = next(item for item in checks if item["check"].startswith("command:"))
+    assert not configuration["passed"]
+    # The old keyword/size checks alone would accept this broken example.
+    assert all(item["passed"] for item in checks if item is not configuration)
+
+
 @pytest.mark.parametrize("task", TASKS, ids=lambda task: task.id)
 def test_expected_answers_stay_out_of_the_planner_contract(task):
     contract = task.contract("http://127.0.0.1:9")
@@ -458,6 +485,147 @@ def _eval_script():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def readiness_report():
+    report = gate_report(
+        [
+            run_record(name, True, steps=4, tokens=100) | {"attempt": attempt}
+            for name in ("fix-bug", "missing-info")
+            for attempt in range(1, 4)
+        ]
+    )
+    report["task_versions"] = {
+        name: evaluation.task_fingerprint(BY_ID[name]) for name in ("fix-bug", "missing-info")
+    }
+    return report
+
+
+def test_task_fingerprint_covers_inputs_and_hidden_checks_but_ignores_cache(tmp_path):
+    original = BY_ID["long-guide"]
+    root = tmp_path / "task-copy"
+    shutil.copytree(original.root, root)
+    task = evaluation.EvalTask(original.spec, root)
+    before = evaluation.task_fingerprint(original)
+    assert evaluation.task_fingerprint(task) == before
+    cache = root / "hidden" / "__pycache__"
+    cache.mkdir(exist_ok=True)
+    (cache / "generated.pyc").write_bytes(b"generated cache")
+    assert evaluation.task_fingerprint(task) == before
+    for path in (
+        root / "fixtures/atlas-reference.md",
+        root / "hidden/test_guide_config.py",
+        root / "task.json",
+    ):
+        content = path.read_bytes()
+        path.write_bytes(content + b"\n")
+        assert evaluation.task_fingerprint(task) != before
+        path.write_bytes(content)
+    (root / "linked-input").symlink_to(root / "task.json")
+    with pytest.raises(ValueError, match="symbolic links"):
+        evaluation.task_fingerprint(task)
+
+
+def test_gates_reject_same_named_tasks_with_changed_or_missing_fingerprints():
+    report = readiness_report()
+    baseline = evaluation.baseline_summary(report)
+    assert evaluation.find_regressions(baseline, report) == []
+    for versions in (None, {"fix-bug": "changed", "missing-info": "changed"}):
+        current = {**report, "task_versions": versions}
+        assert any(
+            "fingerprints" in item for item in evaluation.find_regressions(baseline, current)
+        )
+        assert "not comparable" in evaluation.compare_reports(baseline, current)
+        assert any(
+            "fingerprints" in item
+            for item in evaluation.check_report(
+                current,
+                expected_tasks=("fix-bug", "missing-info"),
+                expected_versions=report["task_versions"],
+            )
+        )
+
+
+def test_readiness_gate_requires_complete_repeated_runs_without_an_old_baseline():
+    report = readiness_report()
+    expected = ("fix-bug", "missing-info")
+    assert (
+        evaluation.check_report(report, expected_tasks=expected, require_pass=("missing-info",))
+        == []
+    )
+    assert evaluation.check_report(evaluation.baseline_summary(report), expected_tasks=expected)
+    report["runs"].pop()
+    # The stored summary still says 6/6; only five raw runs actually exist.
+    problems = evaluation.check_report(report, expected_tasks=expected)
+    assert any("missing-info has 2 runs" in problem for problem in problems)
+    report["runs"].append(dict(report["runs"][-1]))
+    assert any(
+        "duplicate attempt" in problem
+        for problem in evaluation.check_report(report, expected_tasks=expected)
+    )
+
+
+def test_readiness_gate_catches_false_success_errors_and_missing_tasks():
+    report = readiness_report()
+    report["runs"][0].update(passed=False, false_success=True)
+    report["runs"][1].update(passed=False, outcome="error")
+    problems = evaluation.check_report(
+        report, expected_tasks=("fix-bug", "missing-info", "add-feature")
+    )
+    assert any("missing add-feature" in problem for problem in problems)
+    assert any("Only 4/6" in problem for problem in problems)
+    assert any("false successes" in problem for problem in problems)
+    assert any("runner error" in problem for problem in problems)
+
+
+def test_readiness_gate_includes_failed_runs_in_cost_and_required_tasks():
+    report = readiness_report()
+    report["runs"][-1].update(passed=False, outcome="blocked", status="cancelled", tokens=1000)
+    problems = evaluation.check_report(
+        report,
+        expected_tasks=("fix-bug", "missing-info"),
+        min_success_rate=0.8,
+        require_pass=("missing-info",),
+        max_task_tokens={"missing-info": 399},
+    )
+    assert any("did not pass every run" in problem for problem in problems)
+    assert any("mean tokens 400 exceeds limit 399" in problem for problem in problems)
+    del report["runs"][-1]["tokens"]
+    assert any(
+        "missing or invalid token" in problem
+        for problem in evaluation.check_report(
+            report,
+            expected_tasks=("fix-bug", "missing-info"),
+            max_task_tokens={"missing-info": 1000},
+        )
+    )
+
+
+def test_readiness_command_is_offline_and_exits_nonzero_for_an_incomplete_suite(
+    tmp_path, monkeypatch, capsys
+):
+    script = _eval_script()
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(readiness_report()))
+
+    def main(*arguments):
+        monkeypatch.setattr(sys, "argv", ["run_evals.py", "check", str(path), *arguments])
+        return script.main()
+
+    assert (
+        main("--task", "fix-bug", "--task", "missing-info", "--require-pass", "missing-info") == 0
+    )
+    assert "Readiness checks passed" in capsys.readouterr().out
+    assert main() == 1
+    assert "missing" in capsys.readouterr().out
+    for arguments in (
+        ("--min-runs", "0"),
+        ("--min-success-rate", "1.1"),
+        ("--min-success-rate", "nan"),
+    ):
+        with pytest.raises(SystemExit) as error:
+            main(*arguments)
+        assert error.value.code == 2
 
 
 def test_compare_command_exits_nonzero_only_when_gating_finds_a_regression(

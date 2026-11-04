@@ -19,6 +19,7 @@ from rocky.evidence import (
 from rocky.memory import serialize_memory
 from rocky.models import (
     Action,
+    ClaimCheck,
     Deliverable,
     GoalContract,
     ReviewVerdict,
@@ -629,6 +630,51 @@ def test_quotes_may_skip_lines_but_record_values_stay_on_their_line():
     )
     audited, _ = audit_review([spliced], evidence, deliverables, checklist)
     assert "does not tie this value to its record (DEC-01)" in audited[0]["problem"]
+
+
+def test_bounded_review_quotes_can_skip_long_logs_without_invented_endings():
+    lines = [f"test_condition_{i:02d}_{'x' * 72} ... ok" for i in range(9)]
+    output = "\n".join(lines) + "\nRan 9 tests\nOK\n"
+    evidence = {
+        "sources": [],
+        "changed_files": [],
+        "deliverables": {},
+        "actions": [
+            {
+                "step": 1,
+                "tool": "run_command",
+                "target": "python -m unittest -v",
+                "success": True,
+                "output": output,
+            }
+        ],
+    }
+    compact = lines[1] + "\n...\n" + lines[5]
+    item = claim(
+        "",
+        "judgment",
+        "step:1",
+        compact,
+        deliverable="module.py",
+        value="The selected tests passed.",
+    )
+    assert len(compact) < 240
+    ClaimCheck.model_validate(item)
+    assert audit_review([item], evidence, {"module.py": "# implemented"}, [])[1] == []
+
+    # A schema-valid 600-character quote is still rejected when its ending
+    # invents a character. Short, source-ordered fragments need no relaxation.
+    corrupted = {**item, "quote": output[:599] + "¤"}
+    ClaimCheck.model_validate(corrupted)
+    assert "quoted text does not appear" in audit_review([corrupted], evidence, {}, [])[1][0]
+    reversed_fragments = {**item, "quote": lines[5] + "\n...\n" + lines[1]}
+    assert (
+        "quoted text does not appear" in audit_review([reversed_fragments], evidence, {}, [])[1][0]
+    )
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        ClaimCheck.model_validate({**item, "quote": output[:601]})
 
 
 def test_citations_hold_by_quoting_the_cited_file_or_its_paired_answer():

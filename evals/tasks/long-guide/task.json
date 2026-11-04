@@ -3,10 +3,11 @@
   "category": "writing",
   "description": "Write a 9 KB structured onboarding guide that follows an outline.",
   "contract": {
-    "objective": "Write guide.md, an onboarding guide for the Atlas command-line tool, following outline.md in the task workspace. Use the eight section headings from the outline as second-level headings in the same order, cover every fact the outline lists, and include worked command examples. The guide should be thorough: at least 9000 bytes.",
+    "objective": "Write guide.md, an onboarding guide for the fictional Atlas command-line tool, following outline.md in the task workspace. Use atlas-reference.md as the authoritative configuration schema and command reference; no real Atlas installation or service is needed. Use the eight section headings from the outline as second-level headings in the same order, cover every fact the outline lists, and include worked command examples. The guide should be thorough: at least 9000 bytes.",
     "acceptance_criteria": [
       "guide.md follows the outline's eight sections in order",
       "Every fact in the outline appears in the guide",
+      "guide.md includes a complete parseable TOML configuration example in a fenced toml code block, matching atlas-reference.md",
       "guide.md is at least 9000 bytes"
     ],
     "deliverables": [
@@ -17,6 +18,10 @@
     ]
   },
   "checks": [
+    {
+      "type": "command",
+      "argv": ["{python}", "-m", "unittest", "-q", "test_guide_config"]
+    },
     {
       "type": "min_bytes",
       "path": "guide.md",

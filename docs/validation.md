@@ -480,3 +480,84 @@ Validated on 2026-11-03 (America/Vancouver):
 
 See the [quality report](reports/2026-11-03-quality-review.md) and
 [before/after evidence](reports/2026-11-03-quality-review.json).
+
+## Repeated live evaluations and isolated service reliability
+
+Validated on 2026-11-03 (America/Vancouver), starting from `61e7775`:
+
+- Original clean-source suite: **24/30 passed**, three grader false-success
+  labels and no runner errors, using `gpt-6.1-sol`, default reasoning and
+  three repetitions per task. The writing task requested a complete fictional
+  configuration without specifying its schema; meeting ownership wording was
+  ambiguous against the grader's historical-owner expectation.
+- Supplied an authoritative fictional configuration/command reference and a
+  hidden TOML parser check, and clarified decision-specific ownership without
+  changing the expected owners. Six additional runs yielded **5/6 passed**,
+  zero false successes and no runner errors. One writing run exhausted its
+  token budget after 69 file reads before independent review.
+- The current task-version observation baseline contains all 24 attempts from
+  unchanged tasks plus all six attempts from revised tasks: **29/30**, zero
+  false successes, with explicit source batches and task fingerprints. Its
+  absolute readiness check correctly exits **1** because long-guide is 2/3.
+  Task revisions are not evidence of an execution performance improvement.
+- Reproduced concurrent fresh-schema creation and SQLite WAL-conversion busy
+  errors. Initialization now serializes DDL/migrations, rolls back interrupted
+  SQLite DDL and retries only bounded journal-conversion contention. Five
+  groups of six independent cold-start processes passed. Final full suite:
+  **1470 passed, 3 skipped**; Ruff, formatting and whitespace checks passed.
+- Final source passed three real subprocess cycles killing worker, API and
+  Temporal in turn, checking unchanged pending approvals, exact append bytes,
+  injected model 503 recovery, due scheduling, debounced file events, idle
+  backup/restore, artifact hashes and both SQLite integrity checks.
+- An earlier source revision ran for **1801.88 seconds**, six fault cycles
+  and 168 health/resource samples. It preceded the final WAL retry patch;
+  final-source evidence is separately identified. This is not a 24–72 hour
+  test of a single unrestarted process, Mac sleep/reboot, launchd, Keychain,
+  PostgreSQL concurrency, or notarized installation.
+
+See the [readiness report](reports/2026-11-03-v03-readiness.md),
+[structured evidence](reports/2026-11-03-v03-readiness.json),
+[observed baseline](../evals/baselines/gpt-6.1-sol-v03-observed.json) and
+[reliability procedure](reliability.md). Raw runs, databases, logs and exact
+source archives are retained under ignored `data/validation/2026-11-03-readiness/`.
+
+## Long-document execution and review-quote efficiency
+
+Validated on 2026-11-03 (America/Vancouver), frozen candidate `15b22c9`:
+
+- The planner retains completed comparisons and concrete check references,
+  retrieves specific missing details, and saves reusable document checks.
+  The reviewer uses atomic claims and short exact source-ordered excerpts.
+  Planner/reviewer modules are now versions 2/3. The quote schema retains its
+  600-character cap; audit, permissions, workflow, task versions and budgets
+  were not relaxed.
+- An intermediate six-run experiment passed all grades but failed the
+  predeclared code mean-token cap (225935 > 200000). Its complete evidence is
+  retained separately. The final code pilot and remaining nine-task batch
+  both use the same clean frozen source; all 30 attempts count in the result.
+- Full live suite: **30/30 passed**, zero false successes and zero runner
+  errors. Absolute readiness, four critical tasks passing every attempt,
+  same-version relative regression checks and code/writing mean-token caps
+  of 200000 all passed. Code averaged 46802 tokens versus 333511 before;
+  long-guide averaged 78057 versus 317322. Several other tasks cost more,
+  including fix-bug (+81%); all per-task results are reported.
+- Final code tasks each used five steps, six model calls and one successful
+  independent review. Writing tasks read files 9/6/2 times and passed one
+  review each; the earlier budget failure had 69 reads before review.
+- Final Python suite: **1471 passed, 3 skipped**. A focused set of 134 passed,
+  including rejection of fabricated quote endings, reversed fragments and
+  over-limit excerpts. Ruff, formatting and whitespace checks passed.
+- The same source built an isolated developer macOS app. Native tar extraction
+  and offline uv installation passed using unchanged cached dependencies;
+  all 51 installed runtime source files match the candidate. Reapplied ad-hoc
+  signing and deep strict verification passed. The existing app was not
+  replaced or launched. No Developer ID/notarization or physical long-run
+  checks were performed.
+
+See the [efficiency report](reports/2026-11-03-efficiency-validation.md),
+[structured evidence](reports/2026-11-03-efficiency-validation.json) and
+[new baseline](../evals/baselines/gpt-6.1-sol-v03-efficient.json). Complete raw
+attempts, databases, workspaces, exact source and build/install evidence are
+retained under ignored `data/validation/2026-11-03-efficiency/`. The earlier
+29/30 observation baseline and its source-specific reliability results remain
+unchanged; physical 24–72 hour testing is the next stage.

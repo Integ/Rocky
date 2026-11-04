@@ -5,6 +5,8 @@ import json
 import math
 import re
 import shlex
+import sqlite3
+import time
 from collections.abc import Callable
 from contextlib import nullcontext
 from datetime import UTC, datetime
@@ -322,8 +324,24 @@ class Store:
             @event.listens_for(self.engine, "connect")
             def _write_ahead_log(connection, _record) -> None:
                 cursor = connection.cursor()
-                cursor.execute("PRAGMA journal_mode=WAL")
-                cursor.close()
+                # Concurrent first connections can receive SQLITE_BUSY during
+                # journal-mode conversion without SQLite invoking busy_timeout.
+                # Retry that specific contention, bounded like connect_args.
+                deadline = time.monotonic() + 30
+                try:
+                    while True:
+                        try:
+                            cursor.execute("PRAGMA journal_mode=WAL")
+                            break
+                        except sqlite3.OperationalError as error:
+                            if (
+                                getattr(error, "sqlite_errorcode", 0) & 0xFF != sqlite3.SQLITE_BUSY
+                                or time.monotonic() >= deadline
+                            ):
+                                raise
+                            time.sleep(0.05)
+                finally:
+                    cursor.close()
 
         self.sessions = sessionmaker(self.engine, expire_on_commit=False)
 
@@ -335,17 +353,18 @@ class Store:
         import rocky.prompt_archive  # noqa: F401
         import rocky.triggers  # noqa: F401
 
-        existing = inspect(self.engine).has_table(GoalRow.__tablename__)
-        Base.metadata.create_all(self.engine)
-        for attempt in range(2):
-            try:
-                with self.engine.begin() as connection:
-                    self._migrate(connection, existing)
-                return
-            except IntegrityError:
-                # The API and worker initialize concurrently; the other wrote first.
-                if attempt:
-                    raise
+        with self.engine.begin() as connection:
+            # create_all's check-then-create is not atomic. Serialize both DDL
+            # and migrations across the independently starting API and worker.
+            # Explicit BEGIN also makes SQLite's DDL transactional under the
+            # driver's legacy transaction mode, so a failed migration rolls back.
+            if connection.dialect.name == "sqlite":
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+            elif connection.dialect.name == "postgresql":
+                connection.execute(select(func.pg_advisory_xact_lock(0x524F434B59)))
+            existing = inspect(connection).has_table(GoalRow.__tablename__)
+            Base.metadata.create_all(connection)
+            self._migrate(connection, existing)
 
     @staticmethod
     def _migrate(connection: Connection, existing: bool) -> None:

@@ -3,10 +3,10 @@
   "category": "synthesis",
   "description": "Extract and reconcile decisions spread across six meeting transcripts (29 KB).",
   "contract": {
-    "objective": "The notes directory in the task workspace contains six meeting transcripts. Each decision has an ID such as DEC-01. Write decisions.json as an object with a \"decisions\" array containing one entry per decision ID with \"id\", \"summary\" (one sentence), \"owner\" (the person responsible for the decision at the end of the period) and \"status\" (\"active\", or \"superseded\" when a later decision replaced it). Ignore discussion that only mentions an existing decision.",
+    "objective": "The notes directory in the task workspace contains six meeting transcripts. Each decision has an ID such as DEC-01. Write decisions.json as an object with a \"decisions\" array containing one entry per decision ID with \"id\", \"summary\" (one sentence), \"owner\" and \"status\" (\"active\", or \"superseded\" when a later decision replaced it). Ownership is specific to each decision ID: an active decision uses its latest assigned owner; a superseded decision retains the last owner it had before replacement. A replacement decision's new owner must not overwrite the owner of the superseded decision. Ignore discussion that only mentions an existing decision.",
     "acceptance_criteria": [
       "Every decision ID in the notes appears exactly once",
-      "Owners and statuses reflect later decisions that replace earlier ones"
+      "Statuses reflect replacements; owners follow the per-decision ownership policy, preserving a superseded decision's last owner before replacement"
     ],
     "deliverables": [
       {

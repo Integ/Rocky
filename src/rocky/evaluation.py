@@ -11,6 +11,7 @@ answers live only in the checks, never in the contract the planner reads.
 """
 
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -198,6 +199,24 @@ def load_tasks(names: list[str] | None = None, directory: Path = TASKS_DIR) -> l
             raise ValueError("Unknown evaluation tasks: " + ", ".join(unknown))
         tasks = [known[name] for name in dict.fromkeys(names)]
     return tasks
+
+
+def task_fingerprint(task: EvalTask) -> str:
+    """Identify the task, visible fixtures, hidden grader and reference bytes.
+
+    Absolute paths and generated Python caches do not affect identity. A task
+    edit must not silently compare against a same-named, different benchmark.
+    """
+    files = []
+    for path in sorted(task.root.rglob("*")):
+        relative = path.relative_to(task.root)
+        if "__pycache__" in relative.parts or path.suffix == ".pyc":
+            continue
+        if path.is_symlink():
+            raise ValueError("Evaluation task fingerprints do not follow symbolic links")
+        if path.is_file():
+            files.append((relative.as_posix(), hashlib.sha256(path.read_bytes()).hexdigest()))
+    return hashlib.sha256(json.dumps(files, ensure_ascii=False).encode()).hexdigest()
 
 
 # --- Fixture servers ---------------------------------------------------------
@@ -889,6 +908,11 @@ def compare_reports(baseline: dict, current: dict) -> str:
             "Warning: the reports used different models; differences are not comparable.",
             "",
         ]
+    if baseline.get("task_versions") != current.get("task_versions"):
+        lines += [
+            "Warning: task fingerprints differ or are missing; results are not comparable.",
+            "",
+        ]
     lines += [
         "| Task | " + " | ".join(columns) + " |",
         "|---|" + "---|" * len(columns),
@@ -916,6 +940,82 @@ def baseline_summary(report: dict) -> dict:
     return {key: value for key, value in report.items() if key != "runs"}
 
 
+def check_report(
+    report: dict,
+    *,
+    expected_tasks: tuple[str, ...],
+    expected_versions: dict[str, str] | None = None,
+    min_runs: int = 3,
+    min_success_rate: float = 0.9,
+    require_pass: tuple[str, ...] = (),
+    max_task_tokens: dict[str, int] | None = None,
+) -> list[str]:
+    """Absolute readiness checks, including when no comparable baseline exists.
+
+    Recompute from raw runs: a trimmed baseline or a stale summary cannot
+    establish readiness. Every expected task needs distinct measured attempts;
+    runner errors and false successes always fail this gate.
+    """
+    runs = report.get("runs")
+    if not isinstance(runs, list) or not runs:
+        return ["A full report with per-run records is required."]
+    problems = []
+    if expected_versions is not None and report.get("task_versions") != expected_versions:
+        problems.append(
+            "Task fingerprints differ or are missing; check against the recorded task version."
+        )
+    expected, actual = set(expected_tasks), {run["task"] for run in runs}
+    if expected != actual:
+        problems.append(
+            "The task sets differ: "
+            + ", ".join(
+                f"{label} {', '.join(sorted(names))}"
+                for label, names in (
+                    ("missing", expected - actual),
+                    ("unexpected", actual - expected),
+                )
+                if names
+            )
+            + "."
+        )
+    for name in sorted(expected):
+        attempts = [run.get("attempt") for run in runs if run["task"] == name]
+        if len(attempts) < min_runs:
+            problems.append(
+                f"Task {name} has {len(attempts)} runs; at least {min_runs} are required."
+            )
+        if any(not isinstance(value, int) or value < 1 for value in attempts) or len(
+            set(attempts)
+        ) != len(attempts):
+            problems.append(f"Task {name} has missing or duplicate attempt numbers.")
+    passed = sum(run["passed"] is True for run in runs)
+    if passed / len(runs) + 1e-9 < min_success_rate:
+        problems.append(
+            f"Only {passed}/{len(runs)} runs passed; required success rate is {min_success_rate:.0%}."
+        )
+    if count := sum(bool(run.get("false_success")) for run in runs):
+        problems.append(f"{count} runs were false successes.")
+    if count := sum(run.get("outcome") == "error" for run in runs):
+        problems.append(f"{count} runs ended in a runner error.")
+    for name in dict.fromkeys(require_pass):
+        attempts = [run for run in runs if run["task"] == name]
+        if not attempts or not all(run["passed"] is True for run in attempts):
+            problems.append(f"Required task {name} did not pass every run (or was not run).")
+    for name, limit in (max_task_tokens or {}).items():
+        attempts = [run for run in runs if run["task"] == name]
+        measured = [run.get("tokens") for run in attempts]
+        if not measured or any(
+            not isinstance(value, int | float) or not math.isfinite(value) or value < 0
+            for value in measured
+        ):
+            problems.append(f"Task {name} has missing or invalid token measurements.")
+        elif statistics.fmean(measured) > limit:
+            problems.append(
+                f"Task {name} mean tokens {statistics.fmean(measured):.0f} exceeds limit {limit}."
+            )
+    return problems
+
+
 def find_regressions(
     baseline: dict,
     current: dict,
@@ -938,6 +1038,10 @@ def find_regressions(
     problems = []
     if _model_identity(baseline) != _model_identity(current):
         problems.append("The baseline was recorded with a different model or provider.")
+    if baseline.get("task_versions") != current.get("task_versions"):
+        problems.append(
+            "Task fingerprints differ or are missing; record a baseline for this task version."
+        )
     before_tasks = set(baseline["summary"]["by_task"])
     after_tasks = set(current["summary"]["by_task"])
     if before_tasks != after_tasks:

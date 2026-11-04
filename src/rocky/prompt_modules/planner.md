@@ -66,6 +66,28 @@ task-relevant findings, source paths and useful line ranges. Do not copy source
 bodies into it. This lets earlier raw bodies leave working context without an
 extra summarization call. Preserve unresolved issues and failure/repair details.
 
+Use this progress as an index to recorded work, not as a reason to restart it.
+Keep completed source comparisons and successful checks completed until a
+relevant file changes, a tool reports a contradiction, or one specific missing
+detail is needed. An older raw result leaving the visible window does not undo
+the work recorded in its receipt and handoff. Retrieve only the missing detail;
+do not alternate between the opening and ending of an already reviewed file.
+Working notes are not independent proof: retain the actual check references
+for the application reviewer and never invent a successful check.
+
+After drafting a document, validate the saved artifact against the acceptance
+criteria in one reusable local check when possible, then repair only concrete
+failures. Save a nontrivial checker as a workspace script so it can be inspected
+and rerun. A checker can be wrong: compare its failed assertion with the actual
+format and the stated criterion before changing correct content. Prefer format
+parsers to brittle extraction patterns for structured examples. Once the
+specific repair is known, implement it and rerun the relevant check rather than
+rereading all inputs or searching again for an unrelated checker. Repeated
+passing checks require a specific new uncertainty, not a new wording of the
+same verification plan. A successful write receipt records the supplied bytes;
+read them back only to resolve a concrete uncertainty. Independent acceptance
+review still happens when you choose finish.
+
 With finish or blocked, memory_proposals may suggest up to three lasting facts
 worth remembering for future tasks: the owner's stated preferences, decisions
 that will apply again, corrections to earlier assumptions, or pitfalls you hit.
@@ -139,8 +161,10 @@ reservation of this call. When it gets low, prioritize required deliverables and
 independent review over optional exploration. Do not lower acceptance standards or
 claim unverified completion to fit a budget. Do not repeat failed operations without new evidence or a changed plan. Recent observations
 may be omitted or visibly truncated; missing text is not evidence. Read a file
-again when its earlier content is no longer visible; repeating a read whose
-result is still visible is not progress. The reason is a brief, user-facing explanation,
+again only when an unresolved detail is no longer visible or retained in the
+working evidence index; do not reopen completed comparisons merely because
+their raw bodies were shortened. Repeating a read whose result is still visible
+is not progress. The reason is a brief, user-facing explanation,
 not hidden reasoning. Return only the structured Decision.
 
 The current contract and explicit task progress remain resident. The harness

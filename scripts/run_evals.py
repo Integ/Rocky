@@ -3,6 +3,7 @@
 run       execute tasks and write report.json (live model calls; costs tokens)
 compare   show per-task changes between two report.json files
 baseline  reduce a report.json to the summary worth committing as a baseline
+check     check absolute readiness without an existing baseline (offline)
 list      list the available tasks
 """
 
@@ -23,7 +24,7 @@ from temporalio.testing import WorkflowEnvironment
 
 from rocky import evaluation
 from rocky.config import Settings
-from rocky.inference import ModelSettings
+from rocky.inference import DEFAULT_MODEL, ModelSettings
 from rocky.planner import OpenAIPlanner
 
 _KEY_VARIABLES = ("OPENAI_API_KEY", "ROCKY_EVAL_API_KEY")
@@ -68,7 +69,7 @@ def _model(args) -> tuple[ModelSettings, str | None]:
     if args.provider is None:
         if not os.environ.get("OPENAI_API_KEY"):
             raise SystemExit("Set OPENAI_API_KEY, or choose --provider with ROCKY_EVAL_API_KEY.")
-        model = args.model or os.environ.get("ROCKY_MODEL") or "gpt-4.1-mini"
+        model = args.model or os.environ.get("ROCKY_MODEL") or DEFAULT_MODEL
         return ModelSettings(model=model, reasoning_effort=args.reasoning_effort), None
     if not args.model:
         raise SystemExit("--model is required with --provider.")
@@ -91,6 +92,7 @@ def _model(args) -> tuple[ModelSettings, str | None]:
 
 async def _run(args) -> int:
     tasks = evaluation.load_tasks(args.task)
+    task_versions = {task.id: evaluation.task_fingerprint(task) for task in tasks}
     model_settings, key = _model(args)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     # Outside the repository: shell commands in a workspace must not see this checkout.
@@ -147,6 +149,7 @@ async def _run(args) -> int:
             "approvals": args.approvals,
             "repeat": args.repeat,
             "tasks": [task.id for task in tasks],
+            "task_versions": task_versions,
             "python": platform.python_version(),
         },
     )
@@ -243,7 +246,7 @@ def main() -> int:
     )
     run.add_argument("--task", action="append", help="run only this task (repeatable)")
     run.add_argument("--repeat", type=int, default=1, help="runs per task, to measure variance")
-    run.add_argument("--model", help="model ID (default: ROCKY_MODEL or gpt-4.1-mini)")
+    run.add_argument("--model", help=f"model ID (default: ROCKY_MODEL or {DEFAULT_MODEL})")
     run.add_argument(
         "--provider",
         choices=["openai", "openai-compatible", "anthropic", "ollama"],
@@ -266,12 +269,42 @@ def main() -> int:
     baseline = commands.add_parser("baseline", help="write a committable baseline summary")
     baseline.add_argument("report", type=Path)
     baseline.add_argument("--output", "-o", type=Path, required=True)
+    check = commands.add_parser("check", help="check a full report without an existing baseline")
+    check.add_argument("report", type=Path)
+    check.add_argument(
+        "--task", action="append", help="expected tasks (default: the complete suite)"
+    )
+    check.add_argument("--min-runs", type=int, default=3)
+    check.add_argument("--min-success-rate", type=float, default=0.9)
+    check.add_argument("--require-pass", action="append", default=[])
+    check.add_argument("--max-task-tokens", action="append", default=[], type=_task_token_limit)
     commands.add_parser("list", help="list tasks")
     args = parser.parse_args()
     if getattr(args, "require_pass", []) or getattr(args, "max_task_tokens", []):
-        if not args.fail_on_regression:
+        if args.command != "check" and not args.fail_on_regression:
             parser.error("task guards require --fail-on-regression")
 
+    if args.command == "check":
+        if args.min_runs < 1 or not 0 <= args.min_success_rate <= 1:
+            parser.error(
+                "--min-runs must be positive and --min-success-rate must be between 0 and 1"
+            )
+        tasks = evaluation.load_tasks(args.task)
+        problems = evaluation.check_report(
+            _load(args.report),
+            expected_tasks=tuple(task.id for task in tasks),
+            expected_versions={task.id: evaluation.task_fingerprint(task) for task in tasks},
+            min_runs=args.min_runs,
+            min_success_rate=args.min_success_rate,
+            require_pass=tuple(args.require_pass),
+            max_task_tokens=dict(args.max_task_tokens),
+        )
+        print(
+            "Readiness checks failed:\n" + "\n".join(f"- {item}" for item in problems)
+            if problems
+            else "Readiness checks passed."
+        )
+        return int(bool(problems))
     if args.command == "list":
         for task in evaluation.load_tasks():
             print(f"{task.id:20} {task.spec.category:14} {task.spec.description}")

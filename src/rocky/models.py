@@ -489,7 +489,12 @@ class ClaimCheck(Model):
     kind: Literal["quoted", "computed", "judgment"]
     # source:<path>, file:<path>, step:<number> or deliverable:<path>.
     location: str = Field(max_length=300)
-    quote: str = Field(max_length=600)
+    quote: str = Field(
+        max_length=600,
+        description="Short exact evidence excerpt, preferably 1-2 lines under 240 characters. "
+        "Use ... between exact source-ordered fragments to omit intervening text; "
+        "never copy a whole verbose log or invent a truncated ending.",
+    )
     supported: bool
 
 

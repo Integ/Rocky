@@ -9,6 +9,7 @@
 | [macos.md](macos.md) | macOS 应用：安装、模型配置、提交与继续任务、审批与通知、数据目录 |
 | [architecture.md](architecture.md) | 执行架构（英文）：持久边界、执行循环、生命周期、验收与信任、权限边界 |
 | [validation.md](validation.md) | 各阶段的验证记录（英文，按时间追加） |
+| [reliability.md](reliability.md) | 隔离服务故障恢复、持续运行检查及真机验证清单 |
 | [../evals/README.md](../evals/README.md) | 评测集：任务、运行方法、基线与回归门槛 |
 | [../CHANGELOG.md](../CHANGELOG.md) | 更新日志 |
 
@@ -28,3 +29,5 @@
 | 2026-11-03 | [执行能力增强与验证](reports/2026-11-03-execution-validation.md) | 本轮增强前快照 | 支持独立文件批次及逐文件恢复；三类真实评测通过，Python 1365 项通过，新构建原生验证通过 |
 | 2026-11-03 | [文件查找与内容搜索工具验证](reports/2026-11-03-tool-expansion-validation.md) | 本轮工具扩展前工作区 | 新增两项只读工具；Python 1420 / Swift 109 项通过，真实模型和原生应用验证通过 |
 | 2026-11-03 | [工具与执行衔接质量审查](reports/2026-11-03-quality-review.md) | 工具扩展后工作区 | 3 项 P2 已修复；Python 1450 项通过，120 文件分页核对通过，修复构建已启动 |
+| 2026-11-03 | [重复评测与可靠性验证](reports/2026-11-03-v03-readiness.md) | `61e7775` 起 | 首轮当前版本样本 29/30，失败已由后续效率修复处理；原始结果保留，初始化竞态已修复 |
+| 2026-11-03 | [长文执行与验收引用效率验证](reports/2026-11-03-efficiency-validation.md) | 冻结候选 `15b22c9` | 同版本全套 30/30，零虚假成功与错误，严格门槛通过；代码/长文平均用量下降 86%/75%，Python 1471 项及离线开发包验证通过 |

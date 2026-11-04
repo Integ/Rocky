@@ -8,7 +8,10 @@ on:
         default: ""
       model:
         description: "Model ID"
-        default: "gpt-4.1-mini"
+        default: "gpt-6.1-sol"
+      reasoning_effort:
+        description: "Reasoning effort; empty uses the model default"
+        default: ""
       base_url:
         description: "Provider API base URL (with provider)"
         default: ""
@@ -19,8 +22,12 @@ on:
         description: "Space-separated task IDs; empty runs all"
         default: ""
       baseline:
-        description: "Committed baseline (e.g. evals/baselines/gpt-4.1-mini.json); fails on regression"
+        description: "Committed baseline with matching model/task fingerprints; fails on regression"
         default: ""
+      readiness_gate:
+        description: "Require at least 3 runs/task, 90% success, no false successes/errors"
+        type: boolean
+        default: true
 permissions:
   contents: read
 concurrency:
@@ -47,6 +54,7 @@ jobs:
           # Inputs reach the script as data, never as interpolated shell text.
           PROVIDER: ${{ inputs.provider }}
           MODEL: ${{ inputs.model }}
+          REASONING_EFFORT: ${{ inputs.reasoning_effort }}
           BASE_URL: ${{ inputs.base_url }}
           REPEAT: ${{ inputs.repeat }}
           TASKS: ${{ inputs.tasks }}
@@ -57,8 +65,31 @@ jobs:
                 --run-dir "$RUNNER_TEMP/rocky-evals")
           if [ -n "$PROVIDER" ]; then args+=(--provider "$PROVIDER"); fi
           if [ -n "$BASE_URL" ]; then args+=(--base-url "$BASE_URL"); fi
-          for task in $TASKS; do args+=(--task "$task"); done
+          if [ -n "$REASONING_EFFORT" ]; then args+=(--reasoning-effort "$REASONING_EFFORT"); fi
+          read -r -a selected_tasks <<< "$TASKS"
+          for task in "${selected_tasks[@]}"; do args+=(--task "$task"); done
           if [ -n "$BASELINE" ]; then args+=(--baseline "$BASELINE" --fail-on-regression); fi
+          uv run python scripts/run_evals.py "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Check absolute readiness
+        if: ${{ success() && inputs.readiness_gate }}
+        shell: bash
+        env:
+          TASKS: ${{ inputs.tasks }}
+        run: |
+          args=(check "$RUNNER_TEMP/rocky-evals/report.json")
+          read -r -a selected_tasks <<< "$TASKS"
+          for task in "${selected_tasks[@]}"; do
+            args+=(--task "$task")
+          done
+          for required in missing-info add-feature long-guide meeting-synthesis; do
+            if [ -z "$TASKS" ]; then
+              args+=(--require-pass "$required")
+            else
+              for task in "${selected_tasks[@]}"; do
+                if [ "$task" = "$required" ]; then args+=(--require-pass "$required"); fi
+              done
+            fi
+          done
           uv run python scripts/run_evals.py "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Keep the report
         if: always()
