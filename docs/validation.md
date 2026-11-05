@@ -561,3 +561,38 @@ attempts, databases, workspaces, exact source and build/install evidence are
 retained under ignored `data/validation/2026-11-03-efficiency/`. The earlier
 29/30 observation baseline and its source-specific reliability results remain
 unchanged; physical 24–72 hour testing is the next stage.
+
+## Long-duration service fault recovery, stopped by the user
+
+Ran from 2026-11-03 22:15:18 to 2026-11-04 21:48:00 (America/Vancouver),
+using committed source `1e222b5` and matching frozen runtime fingerprints:
+
+- Actual duration: **23 hours, 32 minutes, 42 seconds**. The user requested
+  stopping between cycles; this is **not a full 24-hour pass**.
+- **283/283 completed cycles passed**, including 95 worker, 94 API and
+  94 Temporal forced interruptions. All 566 injected HTTP 503 responses
+  recovered. Approval contents and budgets survived restarts; no premature
+  approval, duplicate append, duplicate schedule or file-trigger result was
+  detected by the cycle checks. Backup/restore checks passed every cycle.
+- All **849 synthetic tasks succeeded**. After stopping, every workspace's
+  two deliverables matched their exact expected bytes. Both SQLite databases
+  passed `quick_check`; no pending approvals, undispatched goals or unsent
+  commands remained. All test process groups and sleep assertions exited.
+- **7874 health samples**, all with empty dispatch/command queues. Combined
+  supervisor/direct-child RSS peaked at approximately **495 MiB**. Restarts
+  and system memory management limit interpretation of RSS; this is not an
+  uninterrupted-process memory-leak test or a predefined resource-growth gate.
+- Raw runner state remains `running/passed=false`, with SIGINT exit **-2**,
+  because the harness does not classify KeyboardInterrupt separately. The
+  controller labels that exit `failed`; no application check or cleanup
+  error was recorded. Raw evidence is unchanged; the independent summary
+  classifies the actual reason as `stopped_by_user`.
+- The fixed local model used no owner model credentials or external model
+  calls. Physical lid/sleep/reboot, launchd, Keychain, production signing and
+  uninterrupted-process testing remain separate checks.
+
+See the [long-run report](reports/2026-11-04-long-run-validation.md) and
+[structured results](reports/2026-11-04-long-run-validation.json). The original
+reports, logs, samples, frozen source, database/workspace archive, stop request,
+process-cleanup proof and SHA-256 manifest are retained under ignored
+`data/validation/2026-11-03-long-run/`.
